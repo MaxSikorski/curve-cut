@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Curve Cut</title>
+    <meta name="description" content="Cut 3D printing meshes along drawn curves, right in your browser. Free, offline-capable, no install.">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M10 70 C 35 20, 65 95, 90 35' fill='none' stroke='white' stroke-width='12' stroke-linecap='round'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body data-theme="dark">
+
+    <nav class="header-nav">
+        <a href="#" class="logo" id="logo-refresh" aria-label="Curve Cut — reload">
+            <svg class="logo-mark" width="20" height="20" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round">
+                <path d="M10 70 C 35 20, 65 95, 90 35"/>
+            </svg>
+            Curve Cut
+        </a>
+        <div class="nav-actions">
+            <button id="info-btn" class="theme-toggle" aria-label="About Curve Cut" title="About Curve Cut">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>
+                </svg>
+            </button>
+            <button id="theme-toggle" class="theme-toggle" aria-label="Toggle Theme">
+                <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+                </svg>
+            </button>
+        </div>
+    </nav>
+
+    <!-- About Curve Cut ("i" popup) -->
+    <div class="modal-overlay" id="about-overlay"></div>
+    <div class="modal about-modal" id="about-modal" role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <button class="close-modal" id="about-close" aria-label="Close">&times;</button>
+        <h2 class="modal-title" id="about-title">About Curve Cut</h2>
+        <p class="modal-text">Hi — I'm Max. I run a large online 3D printing meetup where we
+            print a lot, and especially <strong>BIG</strong> things.</p>
+        <p class="modal-text">Curve Cut combines ideas from a couple of projects I love —
+            the <em>Polycarver</em> and <em>LuBan3D</em> — but those are Windows and desktop
+            apps. I wanted something that works right in the browser: nothing to download,
+            and it even runs completely offline if you want.</p>
+        <p class="modal-text">So I built Curve Cut: load any 3D model (STL, OBJ, or 3MF),
+            cut it along curves instead of hard flat planes, and — with Big Print — scale it
+            up, auto-slice it for your printer, and print <strong>BIG</strong>.</p>
+        <div class="about-actions">
+            <a class="btn secondary-btn" id="about-github" target="_blank" rel="noopener">
+                View on GitHub
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg>
+            </a>
+            <a class="btn primary-btn" id="about-donate" target="_blank" rel="noopener" hidden>
+                Support this project
+            </a>
+            <button class="btn secondary-btn" id="about-tour" hidden>Take the tour</button>
+        </div>
+    </div>
+
+    <canvas id="viewport"></canvas>
+
+    <!-- Spline drawing overlay (screen-space projection of the locked cut plane) -->
+    <svg id="draw-layer" aria-hidden="true">
+        <path id="spline-path" />
+        <path id="spline-skeleton" />
+        <g id="spline-handles"></g>
+        <g id="spline-anchors"></g>
+    </svg>
+
+    <!-- Empty state: shown until a model is loaded -->
+    <div class="hero-overlay" id="hero-overlay">
+        <div class="hero-content">
+            <h1 class="hero-title">Curve Cut</h1>
+            <p class="hero-subtitle">Cut 3D prints along curves, not flat planes.<br>Drop an STL, OBJ, or 3MF anywhere to begin.</p>
+            <div class="hero-cta">
+                <button class="btn primary-btn" id="open-file-btn">Open Model</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Drag highlight -->
+    <div class="drop-veil" id="drop-veil" aria-hidden="true">
+        <div class="drop-veil-text">Drop to load</div>
+    </div>
+
+    <!-- View snap buttons -->
+    <div class="view-dock glass" id="view-dock">
+        <button class="view-btn" data-view="front" title="Front (1)">Front</button>
+        <button class="view-btn" data-view="back" title="Back (2)">Back</button>
+        <button class="view-btn" data-view="left" title="Left (3)">Left</button>
+        <button class="view-btn" data-view="right" title="Right (4)">Right</button>
+        <button class="view-btn" data-view="top" title="Top (5)">Top</button>
+        <button class="view-btn" data-view="bottom" title="Bottom (6)">Bottom</button>
+    </div>
+
+    <!-- Model stats -->
+    <div class="stats-chip glass" id="stats-chip">
+        <span class="stats-name" id="stats-name"></span>
+        <span class="stats-detail" id="stats-detail"></span>
+    </div>
+
+    <!-- Main actions -->
+    <div class="action-dock" id="action-dock">
+        <button class="icon-btn glass" id="undo-btn" aria-label="Undo (Cmd+Z)" title="Undo (⌘Z)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+        </button>
+        <button class="icon-btn glass" id="redo-btn" aria-label="Redo (Cmd+Shift+Z)" title="Redo (⇧⌘Z)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
+        </button>
+        <button class="btn secondary-btn" id="new-btn">Start New</button>
+        <button class="btn secondary-btn" id="bigprint-btn">Big Print</button>
+        <button class="btn primary-btn" id="draw-btn">Draw Cut</button>
+    </div>
+
+    <!-- Big Print: scale past the bed, auto-slice into printable parts -->
+    <div class="simplecut-panel glass" id="bigprint-panel">
+        <div class="sc-row">
+            <label for="bp-printer">Printer</label>
+            <select id="bp-printer"></select>
+            <label class="bp-sub" for="bp-margin">Margin</label>
+            <input type="number" id="bp-margin" step="1" min="0" value="5"><span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row">
+            <label for="bp-bed-w">Bed</label>
+            <input type="number" id="bp-bed-w" step="1" min="10" title="Bed width">
+            <span class="bp-x">×</span>
+            <input type="number" id="bp-bed-d" step="1" min="10" title="Bed depth">
+            <span class="bp-x">×</span>
+            <input type="number" id="bp-bed-h" step="1" min="10" title="Bed height">
+            <span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row">
+            <label for="bp-scale">Scale</label>
+            <input type="range" id="bp-scale-slider" min="1" max="12" step="0.05" value="1">
+            <input type="number" id="bp-scale" step="0.1" min="0.1"><span class="sc-unit">×</span>
+            <label class="bp-sub" for="bp-size" title="Longest side of the finished model">Size</label>
+            <input type="number" id="bp-size" step="1" min="1"><span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row">
+            <label title="Slide the cut grid to dodge fragile features">Nudge</label>
+            <span class="bp-sub">W</span><input type="number" id="bp-nudge-x" step="1" value="0" title="Slide cuts along the width">
+            <span class="bp-sub">D</span><input type="number" id="bp-nudge-z" step="1" value="0" title="Slide cuts along the depth">
+            <span class="bp-sub">H</span><input type="number" id="bp-nudge-y" step="1" value="0" title="Slide cuts up/down">
+            <span class="sc-unit">mm</span>
+            <label class="bp-sub" for="bp-gap" title="Gap left between printed parts so they fit together">Gap</label>
+            <input type="number" id="bp-gap" step="0.05" min="0" max="0.5" value="0.15"><span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row">
+            <label class="sc-check" style="width:auto"><input type="checkbox" id="bp-connectors" checked> Connectors</label>
+            <select id="bp-conn-shape" class="bp-conn-shape">
+                <option value="circle">Circle</option>
+                <option value="hexagon">Hexagon</option>
+            </select>
+            <label class="bp-sub" for="bp-conn-size">Size</label>
+            <input type="number" id="bp-conn-size" step="0.5" min="2"><span class="sc-unit">mm</span>
+            <label class="bp-sub" for="bp-conn-tol" title="Sockets are printed this much larger than pegs">Tol</label>
+            <input type="number" id="bp-conn-tol" step="0.05" min="0" max="1" value="0.2"><span class="sc-unit">mm</span>
+            <label class="sc-check" style="width:auto" title="Engrave each part's grid ID on an inside face"><input type="checkbox" id="bp-engrave" checked> Engrave IDs</label>
+        </div>
+        <div class="sc-status" id="bp-status"></div>
+        <div class="sc-row" id="bp-explode-row" style="display:none">
+            <label for="bp-explode-amt">Explode</label>
+            <input type="range" id="bp-explode-amt" min="0" max="1" step="0.01" value="0.35">
+            <span class="bp-sub" id="bp-explode-note"></span>
+        </div>
+        <div class="sc-footer">
+            <div class="sc-actions">
+                <button class="view-btn" id="bp-explode" style="display:none">Exploded view</button>
+            </div>
+            <div class="sc-actions">
+                <select id="bp-format" class="bp-conn-shape" title="File format for the exported parts">
+                    <option value="stl">STL parts</option>
+                    <option value="3mf">3MF parts (smaller)</option>
+                </select>
+                <button class="view-btn" id="bp-cancel">Cancel</button>
+                <button class="view-btn view-btn-primary" id="bp-export">Cut &amp; Export</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pieces panel -->
+    <aside class="pieces-panel glass" id="pieces-panel" aria-label="Pieces">
+        <div class="pieces-head">
+            <span class="pieces-title">Pieces</span>
+            <div class="fmt-toggle" id="export-fmt" title="Export file format">
+                <button data-fmt="stl" class="on">STL</button>
+                <button data-fmt="3mf">3MF</button>
+            </div>
+            <button class="pieces-export" id="export-btn">Export</button>
+        </div>
+        <div class="pieces-list" id="pieces-list"></div>
+    </aside>
+
+    <!-- Cut mode picker (Curve / Planar / Dovetail) -->
+    <div class="view-dock glass mode-dock" id="mode-dock">
+        <button class="view-btn mode-btn" data-mode="curve">Curve</button>
+        <button class="view-btn mode-btn" data-mode="planar">Planar</button>
+        <button class="view-btn mode-btn" data-mode="dovetail">Dovetail</button>
+    </div>
+
+    <!-- Planar / dovetail parameters -->
+    <div class="simplecut-panel glass" id="simplecut-panel">
+        <div class="sc-row" id="sc-row-height">
+            <label for="sc-height">Height</label>
+            <input type="range" id="sc-height-slider">
+            <input type="number" id="sc-height" step="0.1"><span class="sc-unit">mm</span>
+            <button class="view-btn sc-level sc-planar-only" id="sc-level" title="Reset the plane to level">Level</button>
+        </div>
+        <div class="sc-row sc-planar-only">
+            <label for="sc-clearance" title="Gap left between the printed pieces so they fit together">Gap</label>
+            <input type="range" id="sc-clearance-slider">
+            <input type="number" id="sc-clearance" step="0.01"><span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row sc-dovetail">
+            <label for="sc-depth">Depth</label>
+            <input type="range" id="sc-depth-slider">
+            <input type="number" id="sc-depth" step="0.1"><span class="sc-unit">mm</span>
+            <input type="number" class="sc-tol" id="sc-depth-tol" step="0.01" min="0" max="1" value="0.10" title="Depth tolerance — clearance so printed pieces fit"><span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row sc-dovetail">
+            <label for="sc-width">Width</label>
+            <input type="range" id="sc-width-slider">
+            <input type="number" id="sc-width" step="0.1"><span class="sc-unit">mm</span>
+            <input type="number" class="sc-tol" id="sc-width-tol" step="0.01" min="0" max="1" value="0.10" title="Width tolerance — clearance so printed pieces fit"><span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row sc-dovetail">
+            <label for="sc-flap">Flap</label>
+            <input type="range" id="sc-flap-slider">
+            <input type="number" id="sc-flap" step="1"><span class="sc-unit">°</span>
+        </div>
+        <div class="sc-row sc-dovetail">
+            <label for="sc-groove">Groove</label>
+            <input type="range" id="sc-groove-slider">
+            <input type="number" id="sc-groove" step="1"><span class="sc-unit">°</span>
+        </div>
+        <div class="sc-status" id="sc-status"></div>
+        <div class="sc-footer">
+            <div class="sc-keep">
+                <label class="sc-check"><input type="checkbox" id="sc-keep-upper" checked> Keep upper</label>
+                <label class="sc-check"><input type="checkbox" id="sc-keep-lower" checked> Keep lower</label>
+            </div>
+            <div class="sc-actions">
+                <button class="view-btn sc-planar-only" id="sc-connectors">Connectors</button>
+                <button class="view-btn" id="sc-cancel">Cancel</button>
+                <button class="view-btn view-btn-primary" id="sc-apply">Apply Cut</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Connector placement (planar cuts, Orca-style) -->
+    <div class="simplecut-panel glass" id="connector-panel">
+        <div class="sc-row">
+            <label>Shape</label>
+            <div class="conn-shapes">
+                <button class="view-btn conn-shape active" data-shape="circle">Circle</button>
+                <button class="view-btn conn-shape" data-shape="hexagon">Hexagon</button>
+            </div>
+        </div>
+        <div class="sc-row">
+            <label for="conn-depth">Depth</label>
+            <input type="range" id="conn-depth-slider">
+            <input type="number" id="conn-depth" step="0.1"><span class="sc-unit">mm</span>
+            <input type="number" class="sc-tol" id="conn-depth-tol" step="0.01" min="0" max="1" value="0.10" title="Depth tolerance — extra socket depth"><span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row">
+            <label for="conn-size">Size</label>
+            <input type="range" id="conn-size-slider">
+            <input type="number" id="conn-size" step="0.1"><span class="sc-unit">mm</span>
+            <input type="number" class="sc-tol" id="conn-size-tol" step="0.01" min="0" max="1" value="0.10" title="Size tolerance — extra socket width"><span class="sc-unit">mm</span>
+        </div>
+        <div class="sc-row">
+            <label for="conn-rot">Rotation</label>
+            <input type="range" id="conn-rot-slider">
+            <input type="number" id="conn-rot" step="1"><span class="sc-unit">°</span>
+        </div>
+        <div class="sc-status">Click the cut face to add &nbsp;·&nbsp; drag a connector to move it &nbsp;·&nbsp; quick-click removes &nbsp;·&nbsp; <kbd>⌫</kbd> removes the newest</div>
+        <div class="sc-footer">
+            <div></div>
+            <div class="sc-actions">
+                <button class="view-btn" id="conn-flip">Flip side</button>
+                <button class="view-btn view-btn-primary" id="conn-done">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Draw mode controls -->
+    <div class="draw-hint" id="draw-hint">Click to add points &nbsp;·&nbsp; drag the line to move it &nbsp;·&nbsp; <kbd>⌥</kbd>click the line to insert &nbsp;·&nbsp; double-click a point for a corner &nbsp;·&nbsp; <kbd>D</kbd> deletes &nbsp;·&nbsp; <kbd>Esc</kbd> cancels</div>
+    <div class="view-dock glass draw-dock" id="draw-dock">
+        <button class="view-btn" id="draw-cancel">Cancel</button>
+        <button class="view-btn" id="draw-clear">Clear</button>
+        <button class="view-btn view-btn-primary" id="draw-done">Done</button>
+    </div>
+
+    <!-- Cut preview controls (shown with the extruded ribbon) -->
+    <div class="view-dock glass draw-dock" id="preview-dock">
+        <label class="clearance-field" title="Gap left between the printed pieces so they fit together">
+            Gap <input type="number" id="cut-clearance" step="0.05" min="0" max="0.5" value="0.15"> mm
+        </label>
+        <button class="view-btn" id="cut-discard">Discard</button>
+        <button class="view-btn view-btn-primary" id="cut-apply">Apply Cut</button>
+    </div>
+
+    <!-- Floating angle readout while rotating the cut plane -->
+    <div class="angle-chip glass" id="angle-chip"></div>
+
+    <!-- Work progress (cutting / simplifying) -->
+    <div class="progress-pill glass" id="progress-pill" role="status">
+        <span class="progress-label" id="progress-label"></span>
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+    </div>
+
+    <!-- Heavy-model simplify offer -->
+    <div class="modal-overlay" id="simplify-overlay"></div>
+    <div class="modal" id="simplify-modal" role="dialog" aria-modal="true" aria-labelledby="simplify-title">
+        <h2 class="modal-title" id="simplify-title">This model is heavy</h2>
+        <p class="modal-text" id="simplify-text"></p>
+        <div class="modal-actions">
+            <button class="btn secondary-btn" id="simplify-keep">Keep original</button>
+            <button class="btn primary-btn" id="simplify-go">Simplify</button>
+        </div>
+    </div>
+
+    <input type="file" id="file-input" accept=".stl,.obj,.3mf" hidden>
+
+    <script src="vendor/three/three.min.js"></script>
+    <script src="vendor/three/OrbitControls.js"></script>
+    <script src="vendor/three/STLLoader.js"></script>
+    <script src="vendor/fflate/fflate.min.js"></script><!-- before 3MFLoader (zip) -->
+    <script src="vendor/three/OBJLoader.js"></script>
+    <script src="vendor/three/3MFLoader.js"></script>
+    <script src="vendor/three/STLExporter.js"></script>
+    <script src="vendor/gsap/gsap.min.js"></script>
+    <script src="vendor/manifold/manifold.wasm.b64.js"></script>
+    <script src="vendor/manifold/manifold.js"></script>
+    <script src="vendor/hershey/hershey-font.js"></script>
+    <script src="js/app.js"></script>
+    <script src="js/pen-core.js"></script>
+    <script src="js/pen.js"></script>
+    <script src="js/cut-core.js"></script>
+    <script src="js/cut.js"></script>
+    <script src="js/cutmodes.js"></script>
+    <script src="js/bigprint-core.js"></script>
+    <script src="js/bigprint.js"></script>
+    <script src="js/pieces.js"></script>
+    <script src="js/simplify.js"></script>
+    <script src="js/history.js"></script>
+    <script src="js/about.js"></script>
+    <script src="js/tour.js"></script>
+    <script src="js/perf-hook.js"></script>
+</body>
+</html>

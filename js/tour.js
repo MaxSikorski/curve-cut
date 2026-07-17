@@ -11,6 +11,8 @@
 
     const CC = window.CurveCut;
     const STORE_KEY = "curvecut-tour"; // unset = never seen · "done" · "always"
+    // storage can throw when blocked (private mode) — treat that as "never seen"
+    const store = () => { try { return localStorage.getItem(STORE_KEY); } catch (_) { return null; } };
 
     // what the demo changed, so end() can put the model back
     const demo = { previewOpen: false, cutApplied: false, bigPrintOpen: false };
@@ -91,9 +93,10 @@
         {
             title: "Welcome to Curve Cut",
             text: "Cut 3D prints along curves — right in your browser, nothing to "
-                + "install. Drop an STL, OBJ, or 3MF anywhere (or click Open Model) "
-                + "and the tour continues on its own.",
+                + "install. Hit Start now and we'll tour on the demo cube — or drop "
+                + "your own STL, OBJ, or 3MF anywhere and it continues on that instead.",
             waitFor: "curvecut:model-loaded",
+            demoOffer: true,
         },
         {
             title: "Pick your side",
@@ -133,8 +136,9 @@
         },
         {
             title: "Print BIG",
-            text: "We undid the demo cut and opened Big Print at 3× — those planes are "
-                + "where your model gets sliced to fit the printer you pick. Cut & "
+            text: "We undid the demo cut and opened Big Print, scaled to spill past the "
+                + "bed — those planes are where your model gets sliced to fit the printer "
+                + "you pick. Cut & "
                 + "Export produces labeled parts, connectors, and an assembly map. "
                 + "Have fun!",
             target: "#bigprint-panel",
@@ -273,7 +277,7 @@
         els.text.textContent = s.text;
         els.back.style.visibility = step === 0 ? "hidden" : "visible";
         els.alwaysRow.style.display = s.last ? "flex" : "none"; // .sc-check is display:flex
-        if (s.last) els.always.checked = localStorage.getItem(STORE_KEY) === "always";
+        if (s.last) els.always.checked = store() === "always";
 
         // waiting steps advance themselves; a loaded model turns them normal
         if (waitListener) {
@@ -281,8 +285,11 @@
             waitListener = null;
         }
         const waiting = s.waitFor && !CC.getModel();
-        els.next.textContent = s.last ? "Done" : waiting ? "Waiting…" : "Next";
-        els.next.disabled = !!waiting;
+        // a waiting step with the demo on hand isn't stuck — "Start now" loads it
+        const canDemo = waiting && s.demoOffer && !!window.DEMO_MODEL_B64;
+        els.next.textContent = s.last ? "Done"
+            : canDemo ? "Start now" : waiting ? "Waiting…" : "Next";
+        els.next.disabled = !!waiting && !canDemo;
         if (waiting) {
             const fn = () => setTimeout(() => { if (active && STEPS[step] === s) show(step + 1); }, 700);
             window.addEventListener(s.waitFor, fn, { once: true });
@@ -317,15 +324,41 @@
             waitListener = null;
         }
         undoDemo(); // the tour leaves the model exactly as it found it
-        localStorage.setItem(STORE_KEY, els.always.checked ? "always" : "done");
+        if (CC.getModel()) CC.flyHome(); // ...and framed, not stranded far out (Max)
+        try { localStorage.setItem(STORE_KEY, els.always.checked ? "always" : "done"); } catch (_) {}
         gsap.to([veil, card], {
             opacity: 0, duration: 0.3, ease: "power2.out",
             onComplete: () => { veil.style.display = "none"; card.style.display = "none"; },
         });
     }
 
-    els.next.addEventListener("click", () =>
-        STEPS[step].last ? end() : show(step + 1));
+    // ---------------------------------------------- demo model (Max #1)
+
+    /* The Voron cube ships embedded (assets/demo/voron-cube.stl.b64.js,
+       zlib+base64) because file:// pages can't fetch() local files. */
+    function loadDemoModel() {
+        try {
+            const bin = atob(window.DEMO_MODEL_B64);
+            const packed = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) packed[i] = bin.charCodeAt(i);
+            const geometry = new THREE.STLLoader().parse(fflate.unzlibSync(packed).buffer);
+            geometry.rotateX(-Math.PI / 2); // STL is Z-up
+            CC.loadGeometry(geometry, "Voron Cube (demo)");
+        } catch (err) {
+            console.error("demo model:", err);
+            CC.toast("The demo model failed to load — try opening your own file.");
+        }
+    }
+
+    els.next.addEventListener("click", () => {
+        const s = STEPS[step];
+        if (s.last) return end();
+        if (s.demoOffer && !CC.getModel() && window.DEMO_MODEL_B64) {
+            els.next.disabled = true; // model-loaded advances the step itself
+            return loadDemoModel();
+        }
+        show(step + 1);
+    });
     els.back.addEventListener("click", () => show(step - 1));
     els.close.addEventListener("click", end);
     window.addEventListener("resize", () => { if (active) place(); });
@@ -340,7 +373,7 @@
     }
 
     // auto-open on first visit (or every visit if the visitor opted in)
-    const seen = localStorage.getItem(STORE_KEY);
+    const seen = store();
     if (!seen || seen === "always") {
         setTimeout(start, 1400); // let the hero entrance finish first
     }

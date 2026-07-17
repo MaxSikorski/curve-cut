@@ -1,0 +1,9 @@
+Voron Design Cube v8 (Voron_Design_Cube_v8.STL)
+
+Copyright Voron Design (https://vorondesign.com), released under the
+GNU General Public License v3.0 — https://github.com/VoronDesign
+
+Bundled with Curve Cut as the tour's demo/calibration model, unmodified.
+voron-cube.stl.b64.js in this folder is the same STL, zlib-compressed and
+base64-encoded by tools/embed_demo.py so the demo works from file:// (browsers
+refuse fetch() of local files). The GPL-3.0 applies to it equally.

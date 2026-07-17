@@ -26,7 +26,8 @@ tools, go support their work.
 
 - Load an STL, OBJ, or 3MF by drag-and-drop or file picker
 - Meshes with small gaps get repaired on load; honest errors when they can't be
-- Draw a cut with a pen tool: click for corners, drag for curves with adjustable handles
+- Draw a cut with a pen tool: clicks land as smooth curve points (double-click for a
+  sharp corner), drag the line itself to move it, adjustable handles throughout
 - Or pick **Planar** (tilt-and-rotate cutting plane) and **Dovetail** (slide-lock joint
   with printable tolerances) modes, Orca-style
 - Preview every cut before committing; a Gap setting leaves real clearance so printed
@@ -55,4 +56,7 @@ Hershey fonts, and the rest is plain HTML, CSS, and JavaScript with no build ste
 
 ## License
 
-[MIT](LICENSE). Use it however you like, and bring it to your print club.
+[AGPL-3.0](LICENSE). Free to use, study, share, and modify — and if you build
+something on top of it (including a hosted service), your version stays open too.
+Bring it to your print club. Bundled libraries keep their own licenses — see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

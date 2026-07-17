@@ -799,6 +799,10 @@
 
     function enterFlow() {
         if (!CC.getModel()) return;
+        if (!CC.pieces.some((p) => p.visible)) {
+            CC.toast("Every piece is hidden — show one to cut it.");
+            return;
+        }
         gsap.fromTo(modeDock, { y: -12 },
             { autoAlpha: 1, y: 0, duration: 0.6, ease: "power4.out" });
         setMode("curve");

@@ -242,7 +242,7 @@ window.BigPrintCore = (() => {
         L.push(`Printer: ${s.printer} (bed ${s.bed.w}×${s.bed.d}×${s.bed.h} mm, margin ${s.margin} mm)`);
         L.push(`Assembly gap: ${s.gap} mm · Connectors: ${s.connectors}`);
         L.push(`Parts: ${rows.length} (grid IDs: columns = letters, rows = numbers, -L2.. = higher layers)`);
-        L.push(`Print each Part_<ID>.stl; assemble layer by layer using assembly-map.png.`);
+        L.push(`Print each part file listed below; assemble layer by layer using assembly-map.png.`);
         L.push("");
         L.push("ID        file                 triangles  engraved ID");
         for (const r of rows) {

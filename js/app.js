@@ -26,7 +26,12 @@
         stroke + "' stroke-width='12' stroke-linecap='round'/%3E%3C/svg%3E";
 
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
-    const savedTheme = localStorage.getItem("theme");
+    // namespaced key ("theme" was too generic); storage can throw when blocked
+    const THEME_KEY = "curvecut-theme";
+    let savedTheme = null;
+    try {
+        savedTheme = localStorage.getItem(THEME_KEY) || localStorage.getItem("theme");
+    } catch (_) { /* private mode / blocked storage — fall back to OS preference */ }
     let isDark = savedTheme ? savedTheme === "dark" : prefersDark.matches;
 
     let themeAnimTimer = null;
@@ -40,7 +45,7 @@
                 () => document.body.classList.remove("theme-anim"), 550);
         }
         document.body.setAttribute("data-theme", dark ? "dark" : "light");
-        localStorage.setItem("theme", dark ? "dark" : "light");
+        try { localStorage.setItem(THEME_KEY, dark ? "dark" : "light"); } catch (_) {}
 
         const metaTheme = document.querySelector('meta[name="theme-color"]');
         if (metaTheme) metaTheme.content = dark ? "#000000" : "#f5f5f7";
@@ -89,7 +94,17 @@
     // ---------------------------------------------------------------- scene
 
     const canvas = document.getElementById("viewport");
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    let renderer;
+    try {
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    } catch (err) { // no WebGL (blocked, headless, ancient GPU) — say so, don't white-screen
+        console.error("WebGL unavailable:", err);
+        document.body.insertAdjacentHTML("beforeend",
+            '<div style="position:fixed;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font:16px/1.5 sans-serif;">' +
+            "<p>Curve Cut needs WebGL, which this browser has disabled or doesn't support.<br>" +
+            "Try Chrome, Edge, Firefox, or Safari with hardware acceleration on.</p></div>");
+        return;
+    }
     // lighter framebuffer on low-memory machines (meetup laptops)
     const maxPixelRatio = navigator.deviceMemory && navigator.deviceMemory <= 4 ? 1.5 : 2;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
@@ -209,12 +224,30 @@
                 return;
             }
             loadGeometry(geometry, file.name);
+        }).catch((err) => {
+            // arrayBuffer() itself can reject (file moved/locked mid-read)
+            console.error("file read failed:", err);
+            toast("That file could not be read — try opening it again.");
         });
     }
 
     /* Shared entry for STL loads and test harnesses: takes a Y-up geometry,
        centers it on the floor, and makes it the scene's single piece. */
     function loadGeometry(geometry, name) {
+        // reject junk BEFORE nuking the current scene: NaN/Inf coordinates
+        // poison every boolean downstream, and an empty bbox means no mesh
+        geometry.computeBoundingBox();
+        const check = geometry.boundingBox;
+        const finite = [check.min, check.max].every(
+            (v) => isFinite(v.x) && isFinite(v.y) && isFinite(v.z));
+        const sz = new THREE.Vector3();
+        check.getSize(sz);
+        if (!finite || (sz.x === 0 && sz.y === 0 && sz.z === 0)) {
+            geometry.dispose();
+            toast("That mesh has no usable geometry (empty or corrupt coordinates).");
+            return;
+        }
+
         clearPieces();
         window.dispatchEvent(new CustomEvent("curvecut:model-loaded"));
 
@@ -465,6 +498,8 @@
         getModel: () => pieces[0] || null,
         getModelCenter: () => modelCenter.clone(),
         getFitDist: () => fitDist,
+        // the load-time framing ("home position") — the tour uses it on exit
+        flyHome: () => flyTo(new THREE.Vector3(1, 0.55, 1).normalize()),
         baseMaterial: meshMaterial,
         toast,
         showStats,

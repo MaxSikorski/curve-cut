@@ -8,7 +8,10 @@
 (() => {
     "use strict";
 
-    if (window.location.hash !== "#perftest") return;
+    // dev-only: never let the public site URL + #perftest run a heavy benchmark
+    const isDev = location.protocol === "file:" ||
+        location.hostname === "localhost" || location.hostname === "127.0.0.1";
+    if (window.location.hash !== "#perftest" || !isDev) return;
     const CC = window.CurveCut;
 
     const once = (evt) => new Promise((resolve) =>

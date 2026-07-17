@@ -1,12 +1,12 @@
 /* Curve Cut — the "i" popup (about, GitHub, donate, tour launcher).
-   DONATE_URL stays null until Max sets up a real donation page — the
-   button hides itself rather than link anywhere fake. */
+   DONATE_URL is Max's Stripe payment link; set it null to hide the donate
+   button (and the js/donate.js visit popup) rather than link anywhere fake. */
 
 (() => {
     "use strict";
 
     const REPO_URL = "https://github.com/MaxSikorski/curve-cut";
-    const DONATE_URL = null; // Max fills this in when his donation page exists
+    const DONATE_URL = "https://buy.stripe.com/7sY00i79Q1H50S9dZn0gw00"; // Max's Stripe payment link (2026-07-17)
 
     const overlay = document.getElementById("about-overlay");
     const modal = document.getElementById("about-modal");
@@ -50,6 +50,7 @@
         }
     }, true);
 
-    // the tour (js/tour.js) reveals this button when it registers itself
-    window.CurveCut.about = { show, hide, tourBtn };
+    // the tour (js/tour.js) reveals this button when it registers itself;
+    // donateUrl feeds the visit popup (js/donate.js)
+    window.CurveCut.about = { show, hide, tourBtn, donateUrl: DONATE_URL };
 })();

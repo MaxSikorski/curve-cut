@@ -267,6 +267,13 @@
                 await framePainted();
                 results.push(CutCore.cutWithCutter(visible[i].geometry, cutterIn, cutterOut, connectors));
             }
+        } catch (err) {
+            // a mid-loop failure leaves finished halves nobody will ever commit
+            for (const r of results) {
+                if (r.inside) r.inside.dispose();
+                if (r.outside) r.outside.dispose();
+            }
+            throw err;
         } finally {
             cutterIn.delete();
             if (cutterOut !== cutterIn) cutterOut.delete();
@@ -283,7 +290,13 @@
         for (let i = 0; i < visible.length; i++) {
             const src = visible[i];
             const r = results[i];
-            if (!r.inside || !r.outside) continue; // cut missed this piece — keep it
+            if (!r.inside || !r.outside) {
+                // cut missed this piece — keep it, but a one-sided miss still
+                // allocated the other half; free it or it leaks
+                if (r.inside) r.inside.dispose();
+                if (r.outside) r.outside.dispose();
+                continue;
+            }
 
             CC.pieces.splice(CC.pieces.indexOf(src), 1);
             scene.remove(src); // geometry lives on in the undo stack — no dispose

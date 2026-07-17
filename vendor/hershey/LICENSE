@@ -1,0 +1,17 @@
+Hershey 'futural' single-stroke font
+
+Created by Dr. Allen V. Hershey at the U.S. National Bureau of Standards (1967).
+The Hershey fonts are in the public domain, with the traditional usage note from
+the original distribution:
+
+  This distribution of the Hershey Fonts may be used by anyone for any purpose,
+  commercial or otherwise, freely and without restriction, providing that:
+  1. The following acknowledgements must be distributed with the font data:
+     - The Hershey Fonts were originally created by Dr. A. V. Hershey while
+       working at the U. S. National Bureau of Standards.
+     - The format of the Font data in this distribution was originally created by:
+       James Hurt, Cognition, Inc.
+
+Vendored into Curve Cut from the JHF data at
+https://github.com/kamalmostafa/hershey-fonts (futural.jhf) via
+tools/vendor_hershey.py, converted to the JSON stroke format in hershey-font.js.

@@ -1,7 +1,7 @@
-/* Curve Cut — Big Print mode UI (v2.0 step 2)
+/* Curve Cut — Big Print mode UI (v2.0)
    Scale panel (printer presets, margin, size ⇄ multiplier), live part
-   estimate, and the translucent grid preview. The streaming cut engine
-   lands in the next build steps; Cut & Export says so honestly until then. */
+   estimate, translucent grid preview, and the streaming Cut & Export
+   pipeline (per-cell cut → connectors → engraving → zip). */
 
 (() => {
     "use strict";
@@ -29,6 +29,7 @@
     let active = false;
     let model = null;          // the single piece Big Print scales
     let baseSize = null;       // THREE.Vector3, unscaled model dimensions
+    let savedCam = null;       // camera pose from before enter()'s fit flight
     let scale = 1;
     let gridGroup = null;      // THREE.Group of preview planes
     let grid = null;           // last computeGrid result
@@ -204,6 +205,7 @@
         }
         active = true;
         CC.bigPrintActive = true;
+        savedCam = { pos: CC.camera.position.clone(), target: CC.controls.target.clone() };
         model = CC.pieces[0];
         model.geometry.computeBoundingBox();
         const bb = model.geometry.boundingBox;
@@ -235,6 +237,11 @@
         removeGrid();
         model.scale.setScalar(1);
         model = null;
+        if (savedCam) { // the scale-to-fit flight shouldn't strand the camera
+            gsap.to(CC.camera.position, { x: savedCam.pos.x, y: savedCam.pos.y, z: savedCam.pos.z, duration: 0.5, ease: "power2.out" });
+            gsap.to(CC.controls.target, { x: savedCam.target.x, y: savedCam.target.y, z: savedCam.target.z, duration: 0.5, ease: "power2.out" });
+            savedCam = null;
+        }
         gsap.to(panel, { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
         gsap.fromTo([viewDock, actionDock], { y: 10 },
             { autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out", delay: 0.1 });
@@ -434,6 +441,7 @@
         canvas.width = gw + pad * 2;
         canvas.height = (header + gh + 18) * g.counts.y + footer + pad;
         const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error(`assembly map canvas refused (${canvas.width}×${canvas.height} px — over the browser limit?)`);
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -472,6 +480,7 @@
         ctx.fillText(`Printer ${s.printer}, margin ${s.margin} mm · gap ${s.gap} mm · connectors ${s.connectors}`, pad, y + 50);
 
         const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+        if (!blob) throw new Error("assembly map PNG encode returned null");
         return new Uint8Array(await blob.arrayBuffer());
     }
 
@@ -497,11 +506,16 @@
             writer = window.showSaveFilePicker
                 ? await fsaZipWriter(baseName)
                 : blobZipWriter(baseName);
-        } catch (err) { // user dismissed the save dialog
-            running = false;
-            exportBtn.disabled = false;
-            cancelBtn.textContent = "Cancel";
-            return;
+        } catch (err) {
+            if (err && err.name === "AbortError") { // user dismissed the save dialog
+                running = false;
+                exportBtn.disabled = false;
+                cancelBtn.textContent = "Cancel";
+                return;
+            }
+            // the picker API itself failed — blob zips still work everywhere
+            console.warn("save picker failed, using blob zips:", err);
+            writer = blobZipWriter(baseName);
         }
 
         disposeProxies(); // fresh proxy set per export
@@ -574,7 +588,12 @@
                     : "off",
             };
             CC.progress.update("Drawing the assembly map…", 1);
-            writer.add("assembly-map.png", await renderAssemblyMap(g, occupied, settings));
+            try {
+                writer.add("assembly-map.png", await renderAssemblyMap(g, occupied, settings));
+            } catch (mapErr) { // the parts matter more than the map — ship without it
+                console.warn("assembly map skipped:", mapErr);
+                CC.toast("The assembly map couldn't be rendered — the zip ships without it.");
+            }
             writer.add("manifest.txt",
                 new TextEncoder().encode(Core.buildManifest(rows, settings)));
             const files = await writer.end();

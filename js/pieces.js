@@ -89,35 +89,51 @@
         }
 
         const exporter = new THREE.STLExporter();
+        const used = new Set();
         const files = visible.map((piece, i) => {
             const base = (piece.name || `piece-${i + 1}`)
                 .replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || `piece-${i + 1}`;
+            let name = base;
+            for (let n = 2; used.has(name); n++) name = `${base}-${n}`;
+            used.add(name);
             if (exportFmt === "3mf") {
                 // serialize3MF handles the Y-up -> Z-up mapping itself
                 const bytes = window.BigPrintCore.serialize3MF(piece.geometry);
-                return { blob: new Blob([bytes], { type: "model/3mf" }), name: `${base}.3mf` };
+                return { bytes, type: "model/3mf", name: `${name}.3mf` };
             }
             // scene is Y-up; STLs are printer Z-up — rotate back on the way out
             const temp = new THREE.Mesh(piece.geometry, piece.material);
             temp.rotation.x = Math.PI / 2;
             temp.updateMatrixWorld(true);
             const data = exporter.parse(temp, { binary: true });
-            return { blob: new Blob([data], { type: "model/stl" }), name: `${base}.stl` };
+            return { bytes: new Uint8Array(data.buffer || data), type: "model/stl", name: `${name}.stl` };
         });
 
-        // stagger the downloads so the browser accepts them all
-        files.forEach((f, i) => {
-            setTimeout(() => {
-                const a = document.createElement("a");
-                a.href = URL.createObjectURL(f.blob);
-                a.download = f.name;
-                document.body.appendChild(a);
-                a.click();
-                setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
-            }, i * 350);
-        });
+        if (files.length >= 2) {
+            // two or more parts belong together — one zip, not a download storm
+            const entries = {};
+            for (const f of files) {
+                // 3MF is already deflated; storing it again would just burn CPU
+                entries[f.name] = exportFmt === "3mf" ? [f.bytes, { level: 0 }] : f.bytes;
+            }
+            const zipped = fflate.zipSync(entries);
+            download(new Blob([zipped], { type: "application/zip" }),
+                `curve-cut-${files.length}-pieces.zip`);
+            CC.toast(`Exporting ${files.length} pieces as one ${exportFmt.toUpperCase()} zip…`);
+        } else {
+            const f = files[0];
+            download(new Blob([f.bytes], { type: f.type }), f.name);
+            CC.toast(`Exporting 1 piece as ${exportFmt.toUpperCase()}…`);
+        }
+    }
 
-        CC.toast(`Exporting ${files.length} piece${files.length === 1 ? "" : "s"} as ${exportFmt.toUpperCase()}…`);
+    function download(blob, name) {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
     }
 
     exportBtn.addEventListener("click", exportVisible);

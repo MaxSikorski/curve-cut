@@ -26,14 +26,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - name: Browser-free checks
+      - name: Install Playwright's Chromium
+        run: uv run --no-project --with "playwright==1.62.*" python -m playwright install --with-deps chromium
+      - name: Syntax and offline checks
         run: |
           uv run --no-project python tools/check_js_syntax.py
           uv run --no-project python tools/check_offline.py
       - name: Worker source is up to date
         run: uv run --no-project python tools/embed_worker.py --check
-      - name: Install Playwright's Chromium
-        run: uv run --no-project --with "playwright==1.62.*" python -m playwright install --with-deps chromium
       - name: Smoke
         run: uv run --no-project python tools/check_smoke.py
       - name: Engine checks

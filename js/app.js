@@ -779,12 +779,13 @@
         progressEtaTimer = null;
     }
 
+    // Snap, never fade in: the work behind the pill blocks the main thread
+    // (a Big Print part for seconds), and gsap's lag smoothing counts each
+    // block as ~33 ms, so a fade restarted per update crawled ~10% per part.
     function revealProgress() {
         gsap.killTweensOf(progressPill);
         progressPill.setAttribute("aria-hidden", "false");
-        gsap.to(progressPill, {
-            autoAlpha: 1, y: 0, duration: motionDuration(0.3), ease: "power2.out",
-        });
+        gsap.set(progressPill, { autoAlpha: 1, y: 0 });
     }
 
     function updateProgressState(label, frac) {

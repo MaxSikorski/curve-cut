@@ -839,8 +839,11 @@
        Returns an indexed BufferGeometry, or null for an empty cell.
        conn (optional) adds deterministic seam connectors — pegs on +axis
        interior faces, tolerance-grown sockets on -axis ones; see
-       applyCellConnectors. */
-    function cutGridCell(solid, cell, gap = 0, conn = null) {
+       applyCellConnectors.
+       ctx (optional, hollow models) is a createOuterContext result: solid
+       blocks carry the connectors and the ID goes on a pad. The geometry's
+       userData = { engraved, onPad, noPadRoom, label, connectors }. */
+    function cutGridCell(solid, cell, gap = 0, conn = null, ctx = null) {
         const g2 = Math.max(gap, 0) / 2;
         const pad = 1; // mm past the model on exterior faces
         const x0 = cell.x0 + (cell.in.x0 ? g2 : -pad);
@@ -861,26 +864,91 @@
         let part = null;
         try {
             part = solid.intersect(box);
-        } finally {
-            box.delete();
-        }
-        try {
+            if (!ctx) { box.delete(); box = null; } // a hollow cell keeps its box for the blocks
             if (part.numTri() === 0) return null;
+
+            const report = conn ? { pegs: [], sockets: [], seams: 0, thinSeams: 0 } : null;
+            const reached = [];
             if (conn) {
-                part = applyCellConnectors(part, solid, cell, { ...conn, gap });
+                const top = part.boundingBox().max;
+                for (const [i, axis] of ["x", "y", "z"].entries()) {
+                    if (cell.in[axis + "1"] && top[i] >= cell[axis + "1"] - g2 - 0.01) reached.push(axis);
+                }
             }
-            let engraved = false;
+
+            const connCfg = conn ? { ...conn, gap } : null;
+            const avoid = [];
+            if (conn && ctx) {
+                const posBySeam = new Map();
+                const bossSets = [];
+                try {
+                    for (const { axis, dir } of interiorSeams(cell)) {
+                        const seam = window.BigPrintCore.seamOf(cell, axis, dir);
+                        const key = `${axis}:${seam.plane}`;
+                        const entry = ctx.planes.get(key);
+                        const positions = entry ? bossSeamPositions(ctx, entry, seam, cell, connCfg) : [];
+                        posBySeam.set(key, positions);
+                        avoid.push(...positions);
+                        if (positions.length) bossSets.push(buildSeamBosses(ctx, entry, axis, positions));
+                    }
+                    if (bossSets.length) {
+                        const all = wasm.Manifold.union(bossSets);
+                        try {
+                            const inBox = all.intersect(box);
+                            try {
+                                const previous = part;
+                                part = previous.add(inBox);
+                                previous.delete();
+                            } finally {
+                                inBox.delete();
+                            }
+                        } finally {
+                            all.delete();
+                        }
+                    }
+                } finally {
+                    bossSets.forEach((m) => m.delete());
+                }
+                part = applyCellConnectors(part, null, cell, connCfg,
+                    (seam) => posBySeam.get(`${seam.axis}:${seam.plane}`) || [], report);
+            } else if (conn) {
+                part = applyCellConnectors(part, solid, cell, connCfg, undefined, report);
+            }
+            if (report) {
+                report.seams = reached.length;
+                report.thinSeams = reached.filter((axis) => !report.pegs.some(
+                    (p) => p["xyz".indexOf(axis)] === cell[axis + "1"])).length;
+            }
+
+            let engraved = false, onPad = false, noPadRoom = false, label = null;
             if (cell.engraveId) {
-                const r = engraveCellId(part, cell, cell.engraveId, { gap });
+                const r = ctx
+                    ? engraveOnPad(part, cell, cell.engraveId, { gap, ctx, box, avoid, conn: connCfg })
+                    : engraveCellId(part, cell, cell.engraveId, { gap });
                 part = r.part;
                 engraved = r.engraved;
+                onPad = !!r.onPad;
+                noPadRoom = !!r.noPadRoom;
+                label = r.label || null;
             }
             const geometry = toGeometry(part);
-            geometry.userData = { engraved };
+            geometry.userData = { engraved, onPad, noPadRoom, label, connectors: report };
             return geometry;
         } finally {
+            if (box) box.delete();
             if (part) part.delete();
         }
+    }
+
+    /* The cell's interior faces, + before - on each axis (the order every
+       seam loop uses). */
+    function interiorSeams(cell) {
+        const seams = [];
+        for (const axis of ["x", "y", "z"]) {
+            if (cell.in[axis + "1"]) seams.push({ axis, dir: +1 });
+            if (cell.in[axis + "0"]) seams.push({ axis, dir: -1 });
+        }
+        return seams;
     }
 
     /* World-space vector for a seam-plane point (seam from BigPrintCore.seamOf). */
@@ -893,6 +961,25 @@
     }
 
     const AXIS_DIR = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+
+    /* True when a wall-margin test prism (peg + wall, both directions from
+       the plane) sits fully inside `solid`. */
+    function connectorFits(solid, pos, normal, opts, wall) {
+        const probe = buildConnectorSolid(
+            { pos: pos.clone().addScaledVector(normal, -(opts.depth + wall)),
+              normal, shape: "circle", size: opts.size + 2 * wall,
+              depth: 2 * (opts.depth + wall), rotDeg: 0 });
+        try {
+            const outside = probe.subtract(solid);
+            try {
+                return outside.numTri() === 0;
+            } finally {
+                outside.delete();
+            }
+        } finally {
+            probe.delete();
+        }
+    }
 
     /* Deterministic connector placement on one seam: candidates come from a
        fixed centered grid (BigPrintCore.seamGridPositions), and a candidate
@@ -911,23 +998,7 @@
         const kept = [];
         for (const c of candidates) {
             const pos = seamPoint(seam, c);
-            // test prism: peg + wall margin, both directions from the plane
-            const probe = buildConnectorSolid(
-                { pos: pos.clone().addScaledVector(normal, -(opts.depth + wall)),
-                  normal, shape: "circle", size: opts.size + 2 * wall,
-                  depth: 2 * (opts.depth + wall), rotDeg: 0 });
-            let fits;
-            try {
-                const outside = probe.subtract(solid);
-                try {
-                    fits = outside.numTri() === 0;
-                } finally {
-                    outside.delete();
-                }
-            } finally {
-                probe.delete();
-            }
-            if (fits) kept.push(pos);
+            if (connectorFits(solid, pos, normal, opts, wall)) kept.push(pos);
         }
         return kept;
     }
@@ -939,19 +1010,16 @@
        matching tolerance-grown socket set, computed independently by the two
        neighbors. `part` is consumed and a new Manifold returned.
        conn = { size, depth, shape, tolR, tolD, spacing?, wall?, gap } */
-    function applyCellConnectors(part, solid, cell, conn) {
-        const seams = [];
-        for (const axis of ["x", "y", "z"]) {
-            if (cell.in[axis + "1"]) seams.push({ axis, dir: +1 });
-            if (cell.in[axis + "0"]) seams.push({ axis, dir: -1 });
-        }
+    function applyCellConnectors(part, solid, cell, conn,
+        place = (seam) => placeSeamConnectors(solid, seam, conn), report = null) {
+        const seams = interiorSeams(cell);
         let out = part;
         const owned = new Set();
         let complete = false;
         try {
             for (const { axis, dir } of seams) {
                 const seam = window.BigPrintCore.seamOf(cell, axis, dir);
-                const positions = placeSeamConnectors(solid, seam, conn);
+                const positions = place(seam);
                 if (!positions.length) continue;
                 const normal = new THREE.Vector3(...AXIS_DIR[axis]);
                 const g2 = (conn.gap || 0) / 2;
@@ -980,6 +1048,7 @@
                                     previous.delete();
                                     owned.delete(previous);
                                 }
+                                if (report) report.pegs.push([pos.x, pos.y, pos.z]);
                             }
                         } else {
                             // socket: the neighbor's peg, grown by the fit tolerance
@@ -995,6 +1064,7 @@
                                 previous.delete();
                                 owned.delete(previous);
                             }
+                            if (report) report.sockets.push([pos.x, pos.y, pos.z]);
                         }
                     } finally {
                         if (piece) piece.delete();
@@ -1006,6 +1076,219 @@
             return out;
         } finally {
             if (!complete) for (const made of owned) made.delete();
+        }
+    }
+
+    // ------------------------------- Big Print hollow seams (solid blocks)
+
+    /* A hollow part's cut face is a thin ring, so connectors and ID labels
+       would find no plastic to sit in. Instead each seam gets small solid
+       "bosses" and each part a label "pad", placed from the PRE-hollow outer
+       solid: both neighbours of a seam read the same outer data and so still
+       decide the same way, independently. */
+    const CYCLIC = { x: ["y", "z"], y: ["z", "x"], z: ["x", "y"] };
+
+    /* One thin slab of `outer` per seam plane (plus its 2D section), built
+       once per export. The caller keeps and deletes `outer` itself.
+       planes = [{ axis, plane }]; conn may be null (labels only). */
+    function createOuterContext(outer, planes, { conn = null, gap = 0 } = {}) {
+        const wall = conn && conn.wall !== undefined ? conn.wall : 1.5;
+        const R = conn ? conn.size / 2 + wall : 0;
+        const Rb = conn ? R + 1 : 0;
+        const Lc = conn ? conn.depth + (conn.tolD || 0) + gap / 2 + wall : 0;
+        const H = Math.max(conn ? Lc + Rb + 1 : 0, 5);
+        const ctx = { planes: new Map(), R, Rb, Lc, H, wall, conn, probeCache: new Map(),
+            bounds: outer.boundingBox() };
+        try {
+            for (const plane of planes) addOuterPlane(ctx, outer, plane);
+        } catch (err) {
+            disposeOuterContext(ctx);
+            throw err;
+        }
+        return ctx;
+    }
+
+    /* One more seam plane for a context (the export adds them one at a time so
+       it can yield and honour Stop in between). `outer` must be the same solid. */
+    function addOuterPlane(ctx, outer, { axis, plane }) {
+        const key = `${axis}:${plane}`;
+        if (ctx.planes.has(key)) return;
+        const bb = ctx.bounds;
+        const lo = [], hi = [];
+        for (const [i, c] of ["x", "y", "z"].entries()) {
+            lo.push(c === axis ? plane - ctx.H : bb.min[i] - 1);
+            hi.push(c === axis ? plane + ctx.H : bb.max[i] + 1);
+        }
+        const rawBox = wasm.Manifold.cube([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]);
+        let box;
+        try {
+            box = rawBox.translate(lo);
+        } finally {
+            rawBox.delete();
+        }
+        let slab;
+        try {
+            slab = outer.intersect(box);
+        } finally {
+            box.delete();
+        }
+        slab.numTri(); // evaluate the lazy boolean now, not inside the part loop
+        const entry = { slab, section: null, axes: CYCLIC[axis], skin: null };
+        ctx.planes.set(key, entry);
+        if (ctx.conn) {
+            const [a1, a2] = CYCLIC[axis];
+            const rot = new THREE.Matrix4().makeBasis(
+                new THREE.Vector3(...AXIS_DIR[a1]), new THREE.Vector3(...AXIS_DIR[a2]),
+                new THREE.Vector3(...AXIS_DIR[axis])).transpose();
+            const rotated = slab.transform(rot.elements);
+            try {
+                entry.section = rotated.slice(plane);
+            } finally {
+                rotated.delete();
+            }
+        }
+    }
+
+    function disposeOuterContext(ctx) {
+        for (const entry of ctx.planes.values()) {
+            if (entry.slab) entry.slab.delete();
+            if (entry.section) entry.section.delete();
+        }
+        ctx.planes.clear();
+        ctx.probeCache.clear();
+    }
+
+    /* Points every ~`step` mm along each loop of a 2D outline ([[a, b]] per
+       loop). Deterministic: each loop starts at its vertex with the smallest
+       a (then b) and walks in the loop's own order. */
+    function walkOutline(polys, step) {
+        const out = [];
+        for (const loop of polys) {
+            if (loop.length < 2) continue;
+            let s = 0;
+            for (let i = 1; i < loop.length; i++) {
+                if (loop[i][0] < loop[s][0]
+                    || (loop[i][0] === loop[s][0] && loop[i][1] < loop[s][1])) s = i;
+            }
+            const pts = loop.slice(s).concat(loop.slice(0, s));
+            const seg = pts.map((p, i) => {
+                const q = pts[(i + 1) % pts.length];
+                return Math.hypot(q[0] - p[0], q[1] - p[1]);
+            });
+            const total = seg.reduce((n, d) => n + d, 0);
+            if (!(total > 0)) continue;
+            const n = Math.max(1, Math.floor(total / step));
+            let i = 0, before = 0; // `before` = arc length at the start of segment i
+            for (let k = 0; k < n; k++) {
+                const at = (k * total) / n;
+                while (i < seg.length - 1 && before + seg[i] < at) { before += seg[i]; i++; }
+                const t = seg[i] > 0 ? (at - before) / seg[i] : 0;
+                const p = pts[i], q = pts[(i + 1) % pts.length];
+                out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+            }
+        }
+        return out;
+    }
+
+    /* Where this seam's connector blocks go: along the skin (the outer
+       section shrunk by R + 0.5, so a block hugs the skin and overlaps the
+       shell wall), sampled every 10 mm, greedily spaced, and kept only where
+       today's probe fits the outer. Same inputs for both neighbours, same
+       answer. Returns world-space THREE.Vector3[]. */
+    function bossSeamPositions(ctx, entry, seam, cell, conn) {
+        if (!entry.section) return [];
+        const size = conn.size;
+        if (!entry.skin) {
+            const shrunk = entry.section.offset(-(ctx.R + 0.5), "Round");
+            try {
+                entry.skin = walkOutline(shrunk.toPolygons(), 10);
+            } finally {
+                shrunk.delete();
+            }
+        }
+        const [a1, a2] = entry.axes;
+        const range = {};
+        for (const side of [seam.u, seam.v]) {
+            const edge = ctx.R + 1;
+            range[side.axis] = [
+                side.lo + (cell.in[side.axis + "0"] ? edge : 0),
+                side.hi - (cell.in[side.axis + "1"] ? edge : 0),
+            ];
+        }
+        const inside = [];
+        for (const [a, b] of entry.skin) {
+            if (a < range[a1][0] || a > range[a1][1] || b < range[a2][0] || b > range[a2][1]) continue;
+            const pos = new THREE.Vector3();
+            pos[seam.axis] = seam.plane;
+            pos[a1] = a;
+            pos[a2] = b;
+            inside.push(pos);
+        }
+        const minGap = Math.max((inside.length * 10) / 4, 5 * size);
+        const normal = new THREE.Vector3(...AXIS_DIR[seam.axis]);
+        const kept = [];
+        let probes = 0;
+        for (const pos of inside) {
+            if (kept.length >= 4 || probes >= 24) break;
+            if (kept.some((q) => q.distanceTo(pos) < minGap)) continue;
+            probes++;
+            const key = `${seam.axis}:${pos.x},${pos.y},${pos.z}`;
+            let fits = ctx.probeCache.get(key);
+            if (fits === undefined) {
+                fits = connectorFits(entry.slab, pos, normal, conn, ctx.wall);
+                ctx.probeCache.set(key, fits);
+            }
+            if (fits) kept.push(pos);
+        }
+        return kept;
+    }
+
+    /* The block that gives a connector plastic to grip: the convex hull of two
+       rings (radius Rb, centred Lc either side of the seam plane) with 45
+       degree cone ends. On x/z seams the axis is horizontal, so each ring also
+       gets a point Rb*sqrt(2) straight below the centre: the underside becomes
+       45 degree flanks instead of a round overhang. Not support-free in every
+       spot: a block hanging from a cavity ceiling starts about Rb*sqrt(2) +
+       (R + 0.5) - wall below it, and a block hugging a side wall (or the lower
+       cone of a y seam) starts its bottom ridge R + 0.5 - wall into the air.
+       Check the slicer preview for islands. */
+    function buildBossSolid(pos, axis, Rb, Lc) {
+        const [ua, va] = CYCLIC[axis];
+        const at = (along, u, v) => {
+            const p = [pos.x, pos.y, pos.z];
+            p["xyz".indexOf(axis)] += along;
+            p["xyz".indexOf(ua)] += u;
+            p["xyz".indexOf(va)] += v;
+            return p;
+        };
+        const pts = [];
+        for (const side of [-1, 1]) {
+            for (let i = 0; i < 24; i++) {
+                const t = (i / 24) * Math.PI * 2;
+                pts.push(at(side * Lc, Math.cos(t) * Rb, Math.sin(t) * Rb));
+            }
+            pts.push(at(side * (Lc + Rb), 0, 0));
+            if (axis !== "y") {
+                const low = at(side * Lc, 0, 0);
+                low[1] = pos.y - Rb * Math.SQRT2;
+                pts.push(low);
+            }
+        }
+        return wasm.Manifold.hull(pts);
+    }
+
+    /* All of one seam's blocks, joined and trimmed to the outer skin. */
+    function buildSeamBosses(ctx, entry, axis, positions) {
+        const blocks = positions.map((pos) => buildBossSolid(pos, axis, ctx.Rb, ctx.Lc));
+        try {
+            const joined = wasm.Manifold.union(blocks);
+            try {
+                return joined.intersect(entry.slab);
+            } finally {
+                joined.delete();
+            }
+        } finally {
+            blocks.forEach((m) => m.delete());
         }
     }
 
@@ -1096,6 +1379,21 @@
         return w;
     }
 
+    /* Text frame for a face: text up = world up on vertical faces (x/z
+       seams); on horizontal (y) seams the baseline runs along X. */
+    function textFrame(axis, dir) {
+        const outward = new THREE.Vector3(...AXIS_DIR[axis]).multiplyScalar(dir);
+        let e1, e2;
+        if (axis === "y") {
+            e1 = new THREE.Vector3(1, 0, 0);
+            e2 = new THREE.Vector3().crossVectors(outward, e1);
+        } else {
+            e2 = new THREE.Vector3(0, 1, 0);
+            e1 = new THREE.Vector3().crossVectors(e2, outward);
+        }
+        return { outward, e1, e2 };
+    }
+
     /* Engrave a part's ID onto an interior cut face (Max's B2-style grid
        labels — outside faces stay clean). Real parts rarely fill their grid
        cell, so the label is NOT blindly centered on the cell face: candidate
@@ -1127,17 +1425,7 @@
             let probesLeft = 48; // depth-backing booleans, hard budget per part
 
             for (const f of faces) {
-                const outward = new THREE.Vector3(...AXIS_DIR[f.seam.axis]).multiplyScalar(f.dir);
-                // text up = world up on vertical faces (x/z seams); on horizontal
-                // (y) seams the baseline runs along X
-                let e1, e2;
-                if (f.seam.axis === "y") {
-                    e1 = new THREE.Vector3(1, 0, 0);
-                    e2 = new THREE.Vector3().crossVectors(outward, e1);
-                } else {
-                    e2 = new THREE.Vector3(0, 1, 0);
-                    e1 = new THREE.Vector3().crossVectors(e2, outward);
-                }
+                const { outward, e1, e2 } = textFrame(f.seam.axis, f.dir);
 
                 // the part's REAL material footprint on this face: rotate so the
                 // face plane becomes z = h, slice just inside the surface.
@@ -1247,6 +1535,215 @@
         }
     }
 
+    /* Hollow parts: put the ID on a small solid pad inside the shell. Faces
+       are tried bottom (y0, the face on the bed) first, then x/z faces by
+       area, then the top face last. Pad spots follow the outer skin (an ellipse
+       erosion of its section, so the W x H pad fits inside the skin with its
+       edges 0.5 mm off it and touches the shell), clear of every socket and
+       peg footprint. `part` is consumed and a new Manifold returned, like
+       engraveCellId.
+       opts = { gap, ctx, box, avoid: THREE.Vector3[], conn, depth? } */
+    function engraveOnPad(part, cell, id, opts) {
+        const input = part;
+        let keepPart = false;
+        const finish = (result) => { keepPart = true; return result; };
+        try {
+            const font = window.HERSHEY_FONT;
+            const { ctx, box, avoid } = opts;
+            const faces = [];
+            for (const { axis, dir } of interiorSeams(cell)) {
+                const seam = window.BigPrintCore.seamOf(cell, axis, dir);
+                const du = seam.u.hi - seam.u.lo, dv = seam.v.hi - seam.v.lo;
+                faces.push({ seam, dir, du, dv, area: du * dv });
+            }
+            if (!faces.length || !font) return finish({ part, engraved: false });
+            const rank = (f) => (f.seam.axis !== "y" ? 1 : f.dir < 0 ? 0 : 2);
+            faces.sort((a, b) => rank(a) - rank(b) || b.area - a.area);
+            const depth = opts.depth || 0.6;
+            const padDepth = 3;
+            const g2 = (opts.gap || 0) / 2;
+            let attachTests = 40; // one budget per part, so a hopeless part stays cheap
+
+            for (const f of faces) {
+                const entry = ctx.planes.get(`${f.seam.axis}:${f.seam.plane}`);
+                if (!entry) continue;
+                const th = Math.min(7, 0.35 * Math.min(f.du, f.dv), 10);
+                if (th < 3.5) continue;
+                const textW = estimateTextWidth(font, id, th);
+                const W = textW + 4, Hp = th + 4;
+                const { outward, e1, e2 } = textFrame(f.seam.axis, f.dir);
+                const centre = seamPoint(f.seam, {
+                    u: (f.seam.u.lo + f.seam.u.hi) / 2,
+                    v: (f.seam.v.lo + f.seam.v.hi) / 2,
+                });
+                const h = centre.clone().addScaledVector(outward, -g2).dot(outward);
+
+                // the outer's footprint on this face, in the text frame
+                const rot = new THREE.Matrix4().makeBasis(e1, e2, outward).transpose();
+                const rotated = entry.slab.transform(rot.elements);
+                let cross;
+                try {
+                    cross = rotated.slice(h);
+                } finally {
+                    rotated.delete();
+                }
+                let walk = [];
+                try {
+                    // squash along the text so the W x H pad becomes H x H, erode
+                    // by half of it (its edges then sit 0.5 mm off the skin on
+                    // every side), stretch back
+                    const squashed = cross.scale([Hp / W, 1]);
+                    try {
+                        const eroded = squashed.offset(-(Hp / 2 + 0.5), "Round");
+                        try {
+                            const back = eroded.scale([W / Hp, 1]);
+                            try {
+                                walk = walkOutline(back.toPolygons(), 5);
+                            } finally {
+                                back.delete();
+                            }
+                        } finally {
+                            eroded.delete();
+                        }
+                    } finally {
+                        squashed.delete();
+                    }
+                } finally {
+                    cross.delete();
+                }
+
+                // the pad is axis-aligned: half its width along e1's world axis, half
+                // its height along e2's
+                const halfOn = {};
+                for (const side of [f.seam.u, f.seam.v]) {
+                    halfOn[side.axis] = (Math.abs(e1[side.axis]) > 0.5 ? W : Hp) / 2;
+                }
+                const range = {};
+                for (const side of [f.seam.u, f.seam.v]) {
+                    const edge = halfOn[side.axis] + 0.5;
+                    range[side.axis] = [
+                        side.lo + (cell.in[side.axis + "0"] ? edge : 0),
+                        side.hi - (cell.in[side.axis + "1"] ? edge : 0),
+                    ];
+                }
+                // a pad may overlap a connector block (solid) but not a socket or
+                // peg footprint: reject only when the two boxes overlap
+                const hitsConnector = (pos) => avoid.some((q) => {
+                    const qAxis = ["x", "y", "z"].find((c) =>
+                        (cell.in[c + "1"] && q[c] === cell[c + "1"])
+                        || (cell.in[c + "0"] && q[c] === cell[c + "0"]));
+                    return ["x", "y", "z"].every((c) => {
+                        const reach = c === qAxis ? opts.conn.depth + (opts.conn.tolD || 0) + 0.5
+                            : opts.conn.size / 2 + (opts.conn.tolR || 0) / 2 + 0.5;
+                        const onFace = c === f.seam.axis; // the pad reaches padDepth inward
+                        const centreAt = onFace ? pos[c] - f.dir * padDepth / 2 : pos[c];
+                        return Math.abs(centreAt - q[c]) < reach + (onFace ? padDepth / 2 : halfOn[c]);
+                    });
+                });
+                const spots = [];
+                for (const [a, b] of walk) {
+                    const pos = new THREE.Vector3().addScaledVector(e1, a)
+                        .addScaledVector(e2, b).addScaledVector(outward, h);
+                    if (!Object.entries(range).every(([c, [lo, hi]]) => pos[c] >= lo && pos[c] <= hi)) continue;
+                    if (avoid.length && hitsConnector(pos)) continue;
+                    spots.push(pos);
+                }
+                const away = (p) => p.distanceTo(centre);
+                spots.sort(f.seam.axis === "y"
+                    ? (p, q) => away(p) - away(q)
+                    : (p, q) => (Math.round(p.y / 2) - Math.round(q.y / 2)) || (away(p) - away(q)));
+
+                for (const pos of spots.slice(0, 40)) {
+                    const boxAt = (w, hh, back, front) => {
+                        const raw = wasm.Manifold.cube([w, hh, front - back]);
+                        let placed;
+                        try {
+                            placed = raw.transform(new THREE.Matrix4().makeBasis(e1, e2, outward)
+                                .setPosition(pos.clone().addScaledVector(e1, -w / 2)
+                                    .addScaledVector(e2, -hh / 2).addScaledVector(outward, back)).elements);
+                        } finally {
+                            raw.delete();
+                        }
+                        return placed;
+                    };
+
+                    // the text and its backing must lie inside the outer skin
+                    const probe = boxAt(textW + 3, th + 3, -1.65, -0.05);
+                    let clear;
+                    try {
+                        const leak = probe.subtract(entry.slab);
+                        try {
+                            clear = leak.numTri() === 0;
+                        } finally {
+                            leak.delete();
+                        }
+                    } finally {
+                        probe.delete();
+                    }
+                    if (!clear) continue;
+
+                    // pad: from 1 mm outside the face to padDepth inside it, flush
+                    // with the cell face, trimmed to the skin
+                    const raw = boxAt(W, Hp, -padDepth, 1);
+                    let padded;
+                    try {
+                        const flush = raw.intersect(box);
+                        try {
+                            padded = flush.intersect(entry.slab);
+                        } finally {
+                            flush.delete();
+                        }
+                    } finally {
+                        raw.delete();
+                    }
+                    if (attachTests-- <= 0) { padded.delete(); break; }
+                    let attached;
+                    try {
+                        const overlap = padded.intersect(part);
+                        try {
+                            attached = overlap.volume() >= 10;
+                        } finally {
+                            overlap.delete();
+                        }
+                    } catch (err) {
+                        padded.delete();
+                        throw err;
+                    }
+                    if (!attached) { padded.delete(); continue; }
+
+                    let label;
+                    try {
+                        label = buildTextSolid(font, id, { height: th, depth, pos, e1, e2, outward });
+                    } catch (err) {
+                        padded.delete();
+                        throw err;
+                    }
+                    if (!label) { padded.delete(); return finish({ part, engraved: false }); }
+                    let withPad = null, carved;
+                    try {
+                        withPad = part.add(padded);
+                        carved = withPad.subtract(label.solid);
+                    } finally {
+                        padded.delete();
+                        label.solid.delete();
+                        if (withPad) withPad.delete();
+                    }
+                    const previous = part;
+                    part = carved;
+                    previous.delete();
+                    return finish({
+                        part, engraved: true, onPad: true, area: label.area, depth, height: th,
+                        label: { pos: pos.toArray(), e1: e1.toArray(), e2: e2.toArray(),
+                            outward: outward.toArray(), width: textW, height: th },
+                    });
+                }
+            }
+            return finish({ part, engraved: false, noPadRoom: true });
+        } finally {
+            if (!keepPart && part !== input) part.delete();
+        }
+    }
+
     /* Reduce triangle count within a geometric tolerance (mm). Throws
        Error("not-watertight") if the mesh can't be made solid first. */
     function simplifyGeometry(geometry, tolerance) {
@@ -1326,7 +1823,8 @@
         sampleSpline, buildCutter, cutWithCutter, cutGeometries,
         buildPlanarCutter, buildDovetailCutter, dovetailEdgeY,
         buildConnectorSolid, cutGridCell, placeSeamConnectors, applyCellConnectors,
-        buildTextSolid, engraveCellId,
+        buildTextSolid, engraveCellId, engraveOnPad,
+        createOuterContext, addOuterPlane, disposeOuterContext, buildBossSolid,
         simplifyGeometry, simplifyToTarget, geometryVolume,
     };
 })();

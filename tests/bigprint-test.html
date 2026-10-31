@@ -506,6 +506,7 @@
 
         // S1 — solid regression: the cutter's bytes on a solid model must not
         // change at all. FNV-1a over the concatenated STL of the 8 parts.
+        const CONNH8 = { size: 12, depth: 9.6, shape: "hexagon", tolR: 0.2, tolD: 0.2 };
         const GOLDEN = "c4b8b694"; // recorded on unchanged main (Step 0)
         {
             const solidS1 = CutCore.toManifold(cube100);
@@ -566,6 +567,21 @@
                 && ["x", "y", "z"].every((a) => planes.some((p) => p.axis === a)),
                 JSON.stringify(planes));
         }
+
+        // helpers shared by the hollow checks: a round bar along an axis, and
+        // 'what of this solid is NOT inside the part' (consumes the solid)
+        const cyl = (axis, p, r, from, to) => {
+            const n = new THREE.Vector3(axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis === "z" ? 1 : 0);
+            return CutCore.buildConnectorSolid({
+                pos: new THREE.Vector3(...p).addScaledVector(n, from), normal: n,
+                shape: "circle", size: 2 * r, depth: to - from, rotDeg: 0 });
+        };
+        const emptyAfter = (solid, part) => {
+            const left = solid.subtract(part);
+            const v = left.volume();
+            left.delete(); solid.delete();
+            return v;
+        };
 
         // H1–H8 — a 6 mm hollow cube cut by a 2×2×1 grid
         {
@@ -658,18 +674,6 @@
                     detail.join("; "));
 
                 // H4 — plastic around every socket (ring) and behind every peg (disc)
-                const cyl = (axis, p, r, from, to) => {
-                    const n = new THREE.Vector3(axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis === "z" ? 1 : 0);
-                    return CutCore.buildConnectorSolid({
-                        pos: new THREE.Vector3(...p).addScaledVector(n, from), normal: n,
-                        shape: "circle", size: 2 * r, depth: to - from, rotDeg: 0 });
-                };
-                const emptyAfter = (solid, part) => {
-                    const left = solid.subtract(part);
-                    const v = left.volume();
-                    left.delete(); solid.delete();
-                    return v;
-                };
                 let worstRing = 0, worstDisc = 0;
                 for (const { axis, p, cell, nb } of pegsAt) {
                     const g2 = GAPH / 2;
@@ -707,6 +711,22 @@
                 check("H5 every part has an engraved label on a pad with backing",
                     padsOk && worstBack < 1e-3, `backing gap ${worstBack.toFixed(3)} mm3`);
 
+                // H5b — the text is really carved: the same text solid, rebuilt, is
+                // (almost) all outside the finished part
+                let worstInk = 0;
+                full.forEach((g, i) => {
+                    const L = g.userData.label;
+                    const t = CutCore.buildTextSolid(window.HERSHEY_FONT, cellsH[i].id, {
+                        height: L.height, depth: 0.6, pos: new THREE.Vector3(...L.pos),
+                        e1: new THREE.Vector3(...L.e1), e2: new THREE.Vector3(...L.e2),
+                        outward: new THREE.Vector3(...L.outward) });
+                    const left = t.solid.intersect(man[i]);
+                    worstInk = Math.max(worstInk, left.volume() / t.solid.volume());
+                    left.delete(); t.solid.delete();
+                });
+                check("H5b label text is carved into the pad (ink left in the part < 10%)",
+                    worstInk < 0.1, `worst ${worstInk.toFixed(3)}`);
+
                 // H6 — nothing outside the skin
                 const outside = man.map((m) => {
                     const o = m.subtract(outerM);
@@ -740,6 +760,104 @@
                 plain.forEach((g) => g && g.dispose());
                 shell.delete(); outerM.delete();
             }
+        }
+
+        // H10 — every hollow part gets a label pad, on thick and thin walls, with
+        // either connector size and with connectors off (labels only)
+        if (typeof CutCore.createOuterContext === "function") {
+            const CONNC = { size: 8, depth: 6.4, shape: "circle", tolR: 0.2, tolD: 0.2 };
+            const outerM = CutCore.toManifold(cube100);
+            const planes = B.seamPlanes(grid8, min100);
+            const misses = [];
+            let runs = 0;
+            for (const wall of [6, 2]) {
+                const cavG = new THREE.BoxGeometry(100 - 2 * wall, 100 - 2 * wall, 100 - 2 * wall).toNonIndexed();
+                cavG.translate(0, 50, 0);
+                const cavM = CutCore.toManifold(cavG);
+                const shell = outerM.subtract(cavM);
+                cavM.delete(); cavG.dispose();
+                for (const [name, conn] of [["hex 12", CONNH8], ["circle 8", CONNC], ["no connectors", null]]) {
+                    const ctx = CutCore.createOuterContext(outerM, planes, { conn, gap: 0.2 });
+                    const label = `wall ${wall} ${name}`;
+                    let pads = 0, parts = 0, pieces = true;
+                    for (const c of cells8) {
+                        const g = CutCore.cutGridCell(shell, { ...c, engraveId: c.id }, 0.2, conn, ctx);
+                        if (!g) continue;
+                        parts++;
+                        if (g.userData.onPad === true && g.userData.engraved) pads++;
+                        else misses.push(`${label} ${c.id}`);
+                        const m = CutCore.toManifold(g);
+                        const pcs = m.decompose();
+                        if (pcs.length !== 1) pieces = false;
+                        pcs.forEach((q) => q.delete()); m.delete(); g.dispose();
+                    }
+                    CutCore.disposeOuterContext(ctx);
+                    runs++;
+                    check(`H10 ${label}: all ${parts} parts are one piece`, parts === 8 && pieces);
+                }
+                shell.delete();
+            }
+            check("H10 every hollow part gets a label pad (6 mm and 2 mm walls; hex 12, circle 8, no connectors)",
+                misses.length === 0 && runs === 6, `${misses.length} parts without a pad: ${misses.join(", ")}`);
+            outerM.delete();
+        }
+
+        // H11 — tapered hollow (frustum): the probe has to turn spots away, and
+        // every peg's probe bar must lie inside the outer skin
+        if (typeof CutCore.createOuterContext === "function") {
+            const mk = (r0, r1, h) => {
+                const g = new THREE.CylinderGeometry(r1, r0, h, 64).toNonIndexed(); // top r1, bottom r0
+                g.translate(0, h / 2, 0);
+                return g;
+            };
+            const outerG = mk(50, 20, 100), cavG = mk(44, 14, 94);
+            cavG.translate(0, 3, 0);
+            const outerM = CutCore.toManifold(outerG), cavM = CutCore.toManifold(cavG);
+            const shell = outerM.subtract(cavM);
+            cavM.delete(); outerG.dispose(); cavG.dispose();
+            const size = { x: 100, y: 100, z: 100 };
+            const ctx = CutCore.createOuterContext(outerM, B.seamPlanes(grid8, min100),
+                { conn: CONNH8, gap: 0.2 });
+            let pegCount = 0, worstProbe = 0, padded = 0, cellsMade = 0;
+            for (const c of cells8) {
+                const g = CutCore.cutGridCell(shell, { ...c, engraveId: c.id }, 0.2, CONNH8, ctx);
+                if (!g) continue;
+                cellsMade++;
+                if (g.userData.onPad) padded++;
+                for (const axis of ["x", "y", "z"]) {
+                    if (!c.in[axis + "1"]) continue;
+                    for (const p of g.userData.connectors.pegs) {
+                        if (!near(p["xyz".indexOf(axis)], c[axis + "1"], 1e-9)) continue;
+                        pegCount++;
+                        const bar = cyl(axis, p, CONNH8.size / 2 + 1.5, -(CONNH8.depth + 1.5), CONNH8.depth + 1.5);
+                        worstProbe = Math.max(worstProbe, (() => {
+                            const left = bar.subtract(outerM); const v = left.volume();
+                            left.delete(); bar.delete(); return v;
+                        })());
+                    }
+                }
+                g.dispose();
+            }
+            CutCore.disposeOuterContext(ctx);
+            check("H11 tapered hollow: every peg's probe bar lies inside the outer skin",
+                pegCount > 0 && worstProbe < 1e-3, `${pegCount} pegs, worst ${worstProbe.toFixed(3)} mm3 outside`);
+            check("H11 tapered hollow: parts exist", cellsMade >= 4, `${cellsMade} parts, ${padded} with pads`);
+            shell.delete(); outerM.delete();
+        }
+
+        // H12 — block shape: the teardrop point sits Rb*sqrt(2) below the centre on
+        // x/z seams; a y seam (vertical axis) has none
+        if (typeof CutCore.buildBossSolid === "function") {
+            const Rb = 8.5, Lc = 11.4, p = new THREE.Vector3(3, 40, -7);
+            const lows = {};
+            for (const axis of ["x", "y", "z"]) {
+                const m = CutCore.buildBossSolid(p, axis, Rb, Lc);
+                lows[axis] = m.boundingBox().min[1];
+                m.delete();
+            }
+            check("H12 x and z blocks reach Rb*sqrt(2) below the centre, the y block reaches Lc+Rb",
+                near(lows.x, p.y - Rb * Math.SQRT2, 1e-6) && near(lows.z, p.y - Rb * Math.SQRT2, 1e-6)
+                && near(lows.y, p.y - (Lc + Rb), 1e-6), JSON.stringify(lows));
         }
 
         // ================================= step 7: exploded-view placement

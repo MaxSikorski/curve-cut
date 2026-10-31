@@ -543,7 +543,7 @@
                 { name: "m1", scale: 1, size: { x: 100, y: 100, z: 100 },
                   bed: { w: 70, d: 70, h: 70 }, printer: "custom bed", margin: 5,
                   gap: 0.2, connectors: "hexagon 12 mm, tolerance 0.2 mm",
-                  engraveIds: true, seams: 4, seamsWithPegs: 3,
+                  engraveIds: true, seams: 4, seamsWithPegs: 3, blocks: true,
                   hollow: { wallMm: 6, savedPct: 50, engineUsed: "grid", fellBack: false } });
             check("M1 manifest: peg and socket counts",
                 m1.includes("2 pegs, 1 socket") && m1.includes("1 peg, 1 socket, 1 seam too thin"));
@@ -555,6 +555,12 @@
             check("M1 manifest: hollow blocks line and connectors column header",
                 m1.includes("Hollow parts: connectors and ID labels sit on small solid blocks")
                 && m1.includes("connectors") && m1.includes("engraved ID"));
+            const m1b = B.buildManifest([], { name: "m1b", scale: 1, size: { x: 1, y: 1, z: 1 },
+                bed: { w: 70, d: 70, h: 70 }, printer: "custom bed", margin: 5, gap: 0.2,
+                connectors: "circle 8 mm", engraveIds: true, blocks: false,
+                hollow: { wallMm: 6, savedPct: 50, engineUsed: "grid", fellBack: false } });
+            check("M1 manifest: no blocks line when no blocks were made",
+                !m1b.includes("Hollow parts:"));
         }
 
         // H9 — seamPlanes uses the same arithmetic as gridCells

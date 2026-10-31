@@ -275,7 +275,7 @@ window.BigPrintCore = (() => {
             L.push(`    Connector seams: ${s.seamsWithPegs || 0} of ${s.seams} got connectors`
                 + (thin > 0 ? ` (${thin} too thin — see the connectors column)` : ""));
         }
-        if (s.hollow && (s.connectors !== "off" || s.engraveIds)) {
+        if (s.hollow && s.blocks && (s.connectors !== "off" || s.engraveIds)) {
             L.push(`    Hollow parts: connectors and ID labels sit on small solid blocks added inside the shell.`);
         }
         L.push(`    Candidate cells: ${s.candidateCount === undefined ? rows.length : s.candidateCount}`);

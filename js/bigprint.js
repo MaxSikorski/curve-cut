@@ -611,26 +611,38 @@
     }
 
     /* Hollow models: the solid outer shape the connector blocks and label pads
-       are placed from. It is built, cut into one thin slab per seam plane, and
-       dropped again right away. Returns null (and warns) when it can't be built,
-       so the export carries on without blocks. */
-    function buildOuterContext(state, g, min, conn, gap) {
-        let base = null;
+       are placed from. It is built, cut into one thin slab per seam plane (one
+       plane per tick, so the pill moves and Stop works), and dropped again. Only
+       one copy of it is alive at a time. Returns null (and warns) when it can't
+       be built, or when shouldStop() says so. */
+    async function buildOuterContext(state, g, min, conn, gap, shouldStop, what) {
         let outer = null;
+        let ctx = null;
         try {
-            base = CutCore.toManifold(state.preHollowGeometry);
-            outer = base;
+            outer = CutCore.toManifold(state.preHollowGeometry);
             if (Math.abs(state.scale - 1) > 1e-9) {
+                const base = outer;
                 outer = base.transform(new THREE.Matrix4()
                     .makeScale(state.scale, state.scale, state.scale).elements);
+                base.delete();
             }
-            return CutCore.createOuterContext(outer, Core.seamPlanes(g, min), { conn, gap });
+            ctx = CutCore.createOuterContext(outer, [], { conn, gap });
+            const planes = Core.seamPlanes(g, min);
+            for (const [k, plane] of planes.entries()) {
+                CC.progress.update(`Preparing ${what}… (${k + 1} of ${planes.length})`, k / planes.length);
+                await new Promise((r) => setTimeout(r));
+                if (shouldStop()) throw new Error("stopped");
+                CutCore.addOuterPlane(ctx, outer, plane);
+            }
+            const done = ctx;
+            ctx = null;
+            return done;
         } catch (err) {
-            console.warn("connector blocks skipped:", err);
+            if (err.message !== "stopped") console.warn("connector blocks skipped:", err);
             return null;
         } finally {
-            if (outer && outer !== base) outer.delete();
-            if (base) base.delete();
+            if (ctx) CutCore.disposeOuterContext(ctx);
+            if (outer) outer.delete();
         }
     }
 
@@ -1114,12 +1126,16 @@
     function updateConnNote() {
         const note = document.getElementById("bp-conn-note");
         if (!note) return;
-        note.textContent = active && model && hollowStates.has(model)
-            && (connBox.checked || engraveBox.checked)
-            ? "Hollow model: each connector and ID label gets a small solid block inside the shell "
-                + "so it has plastic to grip (a little extra material). The finish message says "
-                + "how many seams and parts got one."
-            : "";
+        const wanted = active && model && (connBox.checked || engraveBox.checked);
+        note.textContent = !wanted ? ""
+            : hollowStates.has(model)
+                ? "Hollow model: each connector and ID label gets a small solid block inside the shell "
+                    + "so it has plastic to grip (a little extra material). The finish message says "
+                    + "how many seams and parts got one."
+                : model.userData.bigPrintHollow
+                    ? "This hollow came back from undo, so connector blocks and label pads can't be added. "
+                        + "Apply Hollow again first."
+                    : "";
         note.hidden = !note.textContent;
     }
 
@@ -1860,11 +1876,14 @@
             if (model.userData.bigPrintHollow && (conn || engraveBox.checked)) {
                 const hollowState = hollowStates.get(model);
                 if (hollowState) {
-                    CC.progress.show("Preparing connector blocks…");
+                    const what = conn && engraveBox.checked ? "connector blocks and label pads"
+                        : conn ? "connector blocks" : "label pads";
+                    CC.progress.show(`Preparing ${what}…`);
                     await new Promise((r) => setTimeout(r, 30)); // let the pill paint
-                    outerCtx = buildOuterContext(hollowState, g, min, conn, gap);
-                    if (!outerCtx) blocksFailed = true;
-                    if (cancelled || !op.alive()) {
+                    const stop = () => cancelled || op.cancelled || !op.alive();
+                    if (!stop()) outerCtx = await buildOuterContext(hollowState, g, min, conn, gap, stop, what);
+                    if (!outerCtx && !stop()) blocksFailed = true;
+                    if (stop()) {
                         cancelled = true;
                         writer.abort();
                         CC.toast("Stopped — nothing more was exported.");
@@ -1944,6 +1963,7 @@
                 settings.seams = seams;
                 settings.seamsWithPegs = seamsWithPegs;
             }
+            settings.blocks = !!outerCtx;
             if (model.userData.bigPrintHollow) {
                 const hollow = model.userData.bigPrintHollow;
                 settings.hollow = {
@@ -1972,16 +1992,16 @@
             const story = Core.partStory(rows.length, !!settings.hollow);
             CC.toast(`Big Print done — ${story.exportLabel} in `
                 + `${files.length} zip${files.length === 1 ? "" : "s"}.`
-                + (conn ? ` Connectors on ${seamsWithPegs} of ${seams} seams`
+                + (conn && seams > 0 ? ` Connectors on ${seamsWithPegs} of ${seams} seam${seams === 1 ? "" : "s"}`
                     + (seams > seamsWithPegs
                         ? ` (${seams - seamsWithPegs} too thin — see manifest.txt)` : "") + "."
                     : "")
-                + (engraveBox.checked ? ` IDs on ${labelled} of ${rows.length} parts`
+                + (engraveBox.checked ? ` IDs on ${labelled} of ${rows.length} part${rows.length === 1 ? "" : "s"}`
                     + (skippedEngravings
                         ? ` (${skippedEngravings} had no room — see manifest.txt)` : "") + "."
                     : "")
                 + (blocksFailed
-                    ? " Connector blocks couldn't be prepared, so hollow seams may have no connectors."
+                    ? " Solid blocks for connectors and ID labels couldn't be made, so some hollow parts may be missing them."
                     : ""));
         } catch (err) {
             console.error("Big Print export failed:", err);

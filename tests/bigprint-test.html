@@ -502,6 +502,246 @@
         });
         check("un-hollowed manifest has no hollow block", !solidManifest.includes("Hollow:"));
 
+        // ===================== step 8: hollow seams (solid bosses + label pads)
+
+        // S1 — solid regression: the cutter's bytes on a solid model must not
+        // change at all. FNV-1a over the concatenated STL of the 8 parts.
+        const GOLDEN = "c4b8b694"; // recorded on unchanged main (Step 0)
+        {
+            const solidS1 = CutCore.toManifold(cube100);
+            const CONN_S1 = { size: 8, depth: 6, shape: "circle", tolR: 0.2, tolD: 0.1, spacing: 30 };
+            let hash = 0x811c9dc5;
+            let anyPad = false, made = 0;
+            for (const cell of cells8) {
+                const g = CutCore.cutGridCell(solidS1, { ...cell, engraveId: cell.id }, 0.15, CONN_S1);
+                if (!g) continue;
+                made++;
+                if (g.userData && g.userData.onPad === true) anyPad = true;
+                const bytes = B.serializeSTL(g);
+                for (let i = 0; i < bytes.length; i++) {
+                    hash ^= bytes[i];
+                    hash = Math.imul(hash, 0x01000193);
+                }
+                g.dispose();
+            }
+            solidS1.delete();
+            const digest = (hash >>> 0).toString(16).padStart(8, "0");
+            check("S1 solid parts are byte-identical to the recorded golden digest",
+                made === 8 && digest === GOLDEN, `digest ${digest}, golden ${GOLDEN}, ${made} parts`);
+            check("S1 no solid part reports a label pad", !anyPad);
+        }
+
+        // M1 — manifest wording for the new columns and settings
+        {
+            const m1 = B.buildManifest(
+                [{ id: "A1", file: "Part_A1.stl", tris: 10, engraved: true,
+                   pegs: 2, sockets: 1, onPad: true },
+                 { id: "B1", file: "Part_B1.stl", tris: 10, engraved: false,
+                   pegs: 1, sockets: 1, thinSeams: 1, noPadRoom: true },
+                 { id: "C1", file: "Part_C1.stl", tris: 10, engraved: false }],
+                { name: "m1", scale: 1, size: { x: 100, y: 100, z: 100 },
+                  bed: { w: 70, d: 70, h: 70 }, printer: "custom bed", margin: 5,
+                  gap: 0.2, connectors: "hexagon 12 mm, tolerance 0.2 mm",
+                  engraveIds: true, seams: 4, seamsWithPegs: 3,
+                  hollow: { wallMm: 6, savedPct: 50, engineUsed: "grid", fellBack: false } });
+            check("M1 manifest: peg and socket counts",
+                m1.includes("2 pegs, 1 socket") && m1.includes("1 peg, 1 socket, 1 seam too thin"));
+            check("M1 manifest: label pad wording",
+                m1.includes("yes (on a pad)") && m1.includes("no (no room for a label pad)")
+                && m1.includes("no (face too small)"));
+            check("M1 manifest: connector seams line",
+                m1.includes("Connector seams: 3 of 4 got connectors (1 too thin"));
+            check("M1 manifest: hollow blocks line and connectors column header",
+                m1.includes("Hollow parts: connectors and ID labels sit on small solid blocks")
+                && m1.includes("connectors") && m1.includes("engraved ID"));
+        }
+
+        // H9 — seamPlanes uses the same arithmetic as gridCells
+        {
+            const planes = typeof B.seamPlanes === "function" ? B.seamPlanes(grid8, min100) : null;
+            const c0 = cells8[0];
+            check("H9 seamPlanes: 3 planes equal to the first cell's high faces",
+                !!planes && planes.length === 3
+                && planes.every((p) => p.plane === c0[p.axis + "1"])
+                && ["x", "y", "z"].every((a) => planes.some((p) => p.axis === a)),
+                JSON.stringify(planes));
+        }
+
+        // H1–H8 — a 6 mm hollow cube cut by a 2×2×1 grid
+        {
+            const apiOk = typeof CutCore.createOuterContext === "function"
+                && typeof CutCore.disposeOuterContext === "function"
+                && typeof CutCore.buildBossSolid === "function"
+                && typeof B.seamPlanes === "function";
+            check("hollow boss API exists", apiOk);
+            if (!apiOk) {
+                for (const n of ["H1 parts exist and are watertight", "H2 one piece each",
+                    "H3 every seam has pegs and matching sockets", "H4 material around sockets and pegs",
+                    "H5 every part has a label on a pad with backing", "H6 nothing outside the skin",
+                    "H7 no overlap across the gap", "H8 blocks add plastic"]) {
+                    check(n, false, "hollow boss API missing");
+                }
+            } else {
+                const outerM = CutCore.toManifold(cube100);
+                const cavG = new THREE.BoxGeometry(88, 88, 88).toNonIndexed();
+                cavG.translate(0, 50, 0);
+                const cavM = CutCore.toManifold(cavG);
+                const shell = outerM.subtract(cavM);
+                cavM.delete(); cavG.dispose();
+
+                const CONNH = { size: 12, depth: 9.6, shape: "hexagon", tolR: 0.2, tolD: 0.2 };
+                const GAPH = 0.2;
+                const gridH = B.computeGrid({ size: size100, bed: { w: 70, d: 120, h: 70 }, margin: 5 });
+                const cellsH = [...B.gridCells(gridH, size100, min100)];
+                check("hollow fixture grid is 2×2×1 with 4 cells",
+                    gridH.counts.x === 2 && gridH.counts.y === 2 && gridH.counts.z === 1
+                    && cellsH.length === 4, JSON.stringify(gridH.counts));
+                const ctxH = CutCore.createOuterContext(outerM, B.seamPlanes(gridH, min100),
+                    { conn: CONNH, gap: GAPH });
+                const full = cellsH.map((c) => CutCore.cutGridCell(
+                    shell, { ...c, engraveId: c.id }, GAPH, CONNH, ctxH));
+                const plain = cellsH.map((c) => CutCore.cutGridCell(shell, c, GAPH));
+                CutCore.disposeOuterContext(ctxH);
+
+                full.forEach((g, i) => {
+                    const u = g && g.userData;
+                    const r = u && u.connectors;
+                    log(`     part ${cellsH[i].id}: ${g ? CutCore.geometryVolume(g).toFixed(0) : "none"} mm3`
+                        + ` (plain ${plain[i] ? CutCore.geometryVolume(plain[i]).toFixed(0) : "none"})`
+                        + (r ? `, pegs ${r.pegs.length}, sockets ${r.sockets.length}, seams ${r.seams}, thin ${r.thinSeams}` : "")
+                        + (u ? `, engraved ${u.engraved}, onPad ${u.onPad}, noPadRoom ${u.noPadRoom}` : ""));
+                });
+
+                // H1
+                check("H1 parts exist and are watertight",
+                    full.every((g) => !!g) && full.every((g) => g && watertight(g)));
+                const man = full.map((g) => (g ? CutCore.toManifold(g) : null));
+
+                // H2
+                const pieceCounts = man.map((m) => {
+                    if (!m) return -1;
+                    const pieces = m.decompose();
+                    const n = pieces.length;
+                    pieces.forEach((p) => p.delete());
+                    return n;
+                });
+                check("H2 every part is one solid piece", pieceCounts.every((n) => n === 1),
+                    pieceCounts.join(","));
+
+                // H3 — pegs on the + side, a socket for each on the neighbour
+                const nx = gridH.counts.x, nz = gridH.counts.z;
+                const idxOf = (c) => c.li * nx * nz + c.ri * nx + c.ci;
+                let seamsOk = true, pegTotal = 0, socketTotal = 0;
+                const pegsAt = [];
+                const detail = [];
+                for (const c of cellsH) {
+                    const i = idxOf(c);
+                    const rep = full[i] && full[i].userData && full[i].userData.connectors;
+                    if (!rep) { seamsOk = false; continue; }
+                    pegTotal += rep.pegs.length;
+                    socketTotal += rep.sockets.length;
+                    for (const axis of ["x", "y", "z"]) {
+                        if (!c.in[axis + "1"]) continue;
+                        const plane = c[axis + "1"];
+                        const j = axis === "x" ? i + 1 : axis === "y" ? i + nx * nz : i + nx;
+                        const nb = full[j] && full[j].userData && full[j].userData.connectors;
+                        const pegs = rep.pegs.filter((p) => near(p[axis === "x" ? 0 : axis === "y" ? 1 : 2], plane, 1e-9));
+                        const socks = nb ? nb.sockets.filter((p) => near(p[axis === "x" ? 0 : axis === "y" ? 1 : 2], plane, 1e-9)) : [];
+                        const paired = pegs.every((p) => socks.some(
+                            (s) => near(s[0], p[0], 1e-6) && near(s[1], p[1], 1e-6) && near(s[2], p[2], 1e-6)));
+                        detail.push(`${c.id}:${axis}=${plane} pegs ${pegs.length} sockets ${socks.length}`);
+                        if (pegs.length < 1 || !paired) seamsOk = false;
+                        for (const p of pegs) pegsAt.push({ axis, p, cell: i, nb: j });
+                    }
+                }
+                check("H3 every seam has pegs and matching sockets", seamsOk && pegsAt.length > 0,
+                    detail.join("; "));
+
+                // H4 — plastic around every socket (ring) and behind every peg (disc)
+                const cyl = (axis, p, r, from, to) => {
+                    const n = new THREE.Vector3(axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis === "z" ? 1 : 0);
+                    return CutCore.buildConnectorSolid({
+                        pos: new THREE.Vector3(...p).addScaledVector(n, from), normal: n,
+                        shape: "circle", size: 2 * r, depth: to - from, rotDeg: 0 });
+                };
+                const emptyAfter = (solid, part) => {
+                    const left = solid.subtract(part);
+                    const v = left.volume();
+                    left.delete(); solid.delete();
+                    return v;
+                };
+                let worstRing = 0, worstDisc = 0;
+                for (const { axis, p, cell, nb } of pegsAt) {
+                    const g2 = GAPH / 2;
+                    if (man[nb]) {
+                        const outerC = cyl(axis, p, 7.9, g2 + 0.5, g2 + 9.1);
+                        const innerC = cyl(axis, p, 6.4, g2 + 0.45, g2 + 9.15);
+                        const ringS = outerC.subtract(innerC);
+                        outerC.delete(); innerC.delete();
+                        worstRing = Math.max(worstRing, emptyAfter(ringS, man[nb]));
+                    }
+                    if (man[cell]) {
+                        worstDisc = Math.max(worstDisc,
+                            emptyAfter(cyl(axis, p, 7.9, -g2 - 3, -g2 - 0.5), man[cell]));
+                    }
+                }
+                check("H4 plastic ring around every socket and disc behind every peg",
+                    pegsAt.length > 0 && worstRing < 1e-3 && worstDisc < 1e-3,
+                    `ring gap ${worstRing.toFixed(3)} mm3, disc gap ${worstDisc.toFixed(3)} mm3`);
+
+                // H5 — every part is labelled on a pad, with plastic behind the text
+                let padsOk = true, worstBack = 0;
+                full.forEach((g, i) => {
+                    const u = g && g.userData;
+                    if (!u || !u.engraved || u.onPad !== true || !u.label) { padsOk = false; return; }
+                    const L = u.label;
+                    const e1 = new THREE.Vector3(...L.e1), e2 = new THREE.Vector3(...L.e2);
+                    const out = new THREE.Vector3(...L.outward);
+                    const back = new THREE.BoxGeometry(L.width, L.height, 1.6).toNonIndexed();
+                    back.applyMatrix4(new THREE.Matrix4().makeBasis(e1, e2, out)
+                        .setPosition(new THREE.Vector3(...L.pos).addScaledVector(out, -1.6)));
+                    const bm = CutCore.toManifold(back);
+                    back.dispose();
+                    worstBack = Math.max(worstBack, emptyAfter(bm, man[i]));
+                });
+                check("H5 every part has an engraved label on a pad with backing",
+                    padsOk && worstBack < 1e-3, `backing gap ${worstBack.toFixed(3)} mm3`);
+
+                // H6 — nothing outside the skin
+                const outside = man.map((m) => {
+                    const o = m.subtract(outerM);
+                    const v = o.volume(); o.delete(); return v;
+                });
+                check("H6 nothing sticks out past the outer skin", outside.every((v) => v < 1e-3),
+                    outside.map((v) => v.toFixed(4)).join(","));
+
+                // H7 — no overlap across the assembly gap
+                let worstOverlap = 0;
+                for (let a = 0; a < man.length; a++) {
+                    for (let b = a + 1; b < man.length; b++) {
+                        const o = man[a].intersect(man[b]);
+                        worstOverlap = Math.max(worstOverlap, o.volume());
+                        o.delete();
+                    }
+                }
+                check("H7 neighbouring parts never overlap", worstOverlap < 1e-3,
+                    worstOverlap.toFixed(4));
+
+                // H8 — the blocks add plastic, within a sane upper bound
+                const sumFull = full.reduce((n, g) => n + CutCore.geometryVolume(g), 0);
+                const sumPlain = plain.reduce((n, g) => n + CutCore.geometryVolume(g), 0);
+                const added = sumFull - sumPlain;
+                check("H8 blocks add plastic (more than 4000, less than the bound)",
+                    added > 4000 && added < pegTotal * 7500 + 4 * 1125,
+                    `added ${added.toFixed(0)} mm3, ${pegTotal} pegs, ${socketTotal} sockets`);
+
+                man.forEach((m) => m && m.delete());
+                full.forEach((g) => g && g.dispose());
+                plain.forEach((g) => g && g.dispose());
+                shell.delete(); outerM.delete();
+            }
+        }
+
         // ================================= step 7: exploded-view placement
 
         const off = B.explodedPosition({ x: 100, y: 50, z: -100 }, { x: 0, y: 50, z: 0 }, 0.5);

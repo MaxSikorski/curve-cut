@@ -5,6 +5,8 @@ Then scale them way past your build plate and print BIG.
 
 **Try it: [maxsikorski.github.io/curve-cut](https://maxsikorski.github.io/curve-cut/)**
 
+**Beta: [https://curve-cut.vercel.app/](https://curve-cut.vercel.app/)**
+
 Every slicer can split a model with a straight plane. Curve Cut lets you draw the cut
 yourself, like an S-curve that follows the natural seam of a model instead of slicing
 straight through the detail. Each cut produces watertight, print-ready pieces, and you

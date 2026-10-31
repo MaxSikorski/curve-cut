@@ -151,6 +151,16 @@ window.BigPrintCore = (() => {
         return pts;
     }
 
+    /* Every interior cut plane of the grid as { axis, plane }. Same arithmetic
+       as gridCells (min + cut offset), so the doubles match its cell faces. */
+    function seamPlanes(grid, min) {
+        const out = [];
+        for (const axis of ["x", "y", "z"]) {
+            for (const t of grid.cuts[axis]) out.push({ axis, plane: min[axis] + t });
+        }
+        return out;
+    }
+
     /* Indexed BufferGeometry -> binary STL bytes, rotated back to printer
        Z-up (the scene is Y-up): (x, y, z) -> (x, -z, y), matching the
        pieces-panel exporter. Duck-typed on getAttribute/getIndex so this
@@ -260,6 +270,14 @@ window.BigPrintCore = (() => {
         L.push(`    Format: ${s.format || "not recorded"}`);
         L.push(`    Connectors: ${s.connectors}`);
         L.push(`    Engrave IDs: ${s.engraveIds === undefined ? "not recorded" : (s.engraveIds ? "on" : "off")}`);
+        if (s.seams !== undefined) {
+            const thin = s.seams - (s.seamsWithPegs || 0);
+            L.push(`    Connector seams: ${s.seamsWithPegs || 0} of ${s.seams} got connectors`
+                + (thin > 0 ? ` (${thin} too thin — see the connectors column)` : ""));
+        }
+        if (s.hollow && (s.connectors !== "off" || s.engraveIds)) {
+            L.push(`    Hollow parts: connectors and ID labels sit on small solid blocks added inside the shell.`);
+        }
         L.push(`    Candidate cells: ${s.candidateCount === undefined ? rows.length : s.candidateCount}`);
         if (s.hollow) {
             L.push(`    Hollow:`);
@@ -277,9 +295,15 @@ window.BigPrintCore = (() => {
         L.push(`Parts: ${rows.length} (grid IDs: columns = letters, rows = numbers, -L2.. = higher layers)`);
         L.push(`Print each part file listed below; assemble layer by layer using assembly-map.png.`);
         L.push("");
-        L.push("ID        file                 triangles  engraved ID");
+        const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+        L.push("ID        file                 triangles  " + "connectors".padEnd(26) + "engraved ID");
         for (const r of rows) {
-            L.push(`${r.id.padEnd(10)}${r.file.padEnd(21)}${String(r.tris).padEnd(11)}${r.engraved ? "yes" : "no (face too small)"}`);
+            const conn = r.pegs === undefined ? "-"
+                : `${plural(r.pegs, "peg")}, ${plural(r.sockets || 0, "socket")}`
+                    + (r.thinSeams ? `, ${plural(r.thinSeams, "seam")} too thin` : "");
+            const id = r.engraved ? (r.onPad ? "yes (on a pad)" : "yes")
+                : (r.noPadRoom ? "no (no room for a label pad)" : "no (face too small)");
+            L.push(`${r.id.padEnd(10)}${r.file.padEnd(21)}${String(r.tris).padEnd(11)}${conn.padEnd(26)}${id}`);
         }
         return L.join("\n");
     }
@@ -348,7 +372,7 @@ window.BigPrintCore = (() => {
         };
     }
 
-    return { PRINTERS, axisCuts, computeGrid, cellCount, gridCells, seamOf, seamGridPositions,
+    return { PRINTERS, axisCuts, computeGrid, cellCount, gridCells, seamOf, seamGridPositions, seamPlanes,
         serializeSTL, serialize3MF, buildManifest, explodedPosition, proxyTargetFor, explodeNoteText,
         colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,
         partStory, hollowSavingsStory };

@@ -444,6 +444,11 @@
             triVerts: [0, 1, 2, 2, 1, -1, 0, 2, 100000000],
         });
 
+        compareLoops("small distant edges", {
+            vertProperties: new Float32Array(24),
+            triVerts: [0, 6, 7, 1, 2, 3],
+        });
+
         // A 50 mm cube whose corner is split in two by 2h, on a weld-cell edge for every rung.
         const crackedCorner = (h) => {
             const source = boxGeometry(50, true);
@@ -462,7 +467,59 @@
                 check("cracked corner h=1e-6 exercises merge", !!before && before.method === "weld",
                     describe(before));
             }
+            // A 2e-4 gap is 4e-6 x the 50 mm scale: if Manifold's merge ever closed it,
+            // the gate's reach (1e-5 x scale) would no longer be safe.
+            if (h === 1e-4) {
+                check("cracked corner h=1e-4 stays open in Manifold", !!before && before.method === "cap",
+                    describe(before));
+            }
         }
+
+        // Two closed 10 mm cubes. Cube A has a corner split at x = 0.024 / 0.026 (split at 0.01 and
+        // 0.05, joined at 0.1); one corner of A (y = 0.049) faces one of B (y = 0.051) (joined at 0.01
+        // and 0.05, split at 0.1). Every rung has 16 vertices and 24 triangles, 0.05 repeats 0.01
+        // byte for byte, and only 0.1 is closed: the rung skip must compare bytes, not lengths.
+        const cubeTriangles = Array.from(boxGeometry(1, true).getIndex().array);
+        const twoCubePositions = [], twoCubeTriangles = [];
+        for (const [x0, y0, z0, offset] of [[0, -9.951, 0, 0], [10, 0.051, 10, 8]]) {
+            for (let c = 0; c < 8; c++) {
+                const sx = [0, 1, 1, 0, 0, 1, 1, 0][c], sy = [0, 0, 1, 1, 0, 0, 1, 1][c];
+                const sz = c < 4 ? 0 : 1;
+                twoCubePositions.push(x0 + sx * 10, y0 + sy * 10, z0 + sz * 10);
+            }
+            for (const index of cubeTriangles) twoCubeTriangles.push(index + offset);
+        }
+        twoCubePositions[0] = 0.024;
+        twoCubePositions.push(0.026, -9.951, 0);
+        for (let i = 0; i < 6; i++) if (twoCubeTriangles[i] === 0) twoCubeTriangles[i] = 16;
+        const twoCubes = geometryFromArrays(twoCubePositions, twoCubeTriangles);
+        const rungs = [0.01, 0.05, 0.1].map((tol) => legacyWeld(twoCubes, tol));
+        check("equivalence: two cubes have 16 vertices and 24 triangles on every rung",
+            rungs.every((rung) => rung.vertProperties.length === 48 && rung.triVerts.length === 72));
+        check("equivalence: two cubes 0.05 repeats 0.01, 0.1 differs",
+            sameWeld(rungs[0], rungs[1]) && !sameWeld(rungs[0], rungs[2]));
+        const twoCubeRepair = compareAll("two cubes", twoCubes);
+        check("equivalence: two cubes close only at 0.1",
+            !!twoCubeRepair && twoCubeRepair.method === "weld" && twoCubeRepair.tol === 0.1,
+            twoCubeRepair && `${describe(twoCubeRepair)}@${twoCubeRepair.tol}`);
+
+        // Same sphere with its vertices shuffled (fixed seed): edge keys far apart in index space.
+        const spherePosition = threeSphere.getAttribute("position");
+        const shuffle = Array.from({ length: spherePosition.count }, (_, i) => i);
+        let seed = 12345;
+        for (let i = shuffle.length - 1; i > 0; i--) {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            const j = seed % (i + 1);
+            [shuffle[i], shuffle[j]] = [shuffle[j], shuffle[i]];
+        }
+        const shuffledPositions = new Array(spherePosition.count * 3);
+        for (let i = 0; i < shuffle.length; i++) {
+            shuffledPositions[shuffle[i] * 3] = spherePosition.getX(i);
+            shuffledPositions[shuffle[i] * 3 + 1] = spherePosition.getY(i);
+            shuffledPositions[shuffle[i] * 3 + 2] = spherePosition.getZ(i);
+        }
+        compareAll("three sphere shuffled", geometryFromArrays(shuffledPositions,
+            Array.from(threeSphere.getIndex().array, (i) => shuffle[i])));
 
         // Every boundary vertex shares x = 0, so the merge gate runs out of budget.
         const gridPositions = [], gridTriangles = [];

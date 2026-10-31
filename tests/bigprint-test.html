@@ -520,6 +520,8 @@
         check("proxy target rounds down and survives 0 cells",
             B.proxyTargetFor(7, 1500000, 3000) === 214285
             && B.proxyTargetFor(0, 1500000, 3000) === 1500000);
+        check("proxy target rebalances from what is left of the budget",
+            B.proxyTargetFor(10, 1500000 - 20000, 3000) === 148000);
         check("explode note: plain count when nothing simplified",
             B.explodeNoteText(20, false, false) === "20 parts");
         check("explode note: simplified preview is labelled",

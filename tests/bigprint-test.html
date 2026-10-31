@@ -510,6 +510,29 @@
         const zero = B.explodedPosition({ x: 100, y: 50, z: -100 }, { x: 0, y: 50, z: 0 }, 0);
         check("explode 0 = assembled", zero.x === 0 && zero.y === 0 && zero.z === 0);
 
+        // ============================ exploded-view proxy target and note
+
+        check("proxy target: few cells get a big share of the budget",
+            B.proxyTargetFor(20, 1500000, 3000) === 75000);
+        check("proxy target floors at 3000 for huge jobs",
+            B.proxyTargetFor(1000, 1500000, 3000) === 3000
+            && B.proxyTargetFor(5000, 1500000, 3000) === 3000);
+        check("proxy target rounds down and survives 0 cells",
+            B.proxyTargetFor(7, 1500000, 3000) === 214285
+            && B.proxyTargetFor(0, 1500000, 3000) === 1500000);
+        check("proxy target rebalances from what is left of the budget",
+            B.proxyTargetFor(10, 1500000 - 20000, 3000) === 148000);
+        check("explode note: plain count when nothing simplified",
+            B.explodeNoteText(20, false, false) === "20 parts");
+        check("explode note: simplified preview is labelled",
+            B.explodeNoteText(20, false, true).includes("simplified preview")
+            && B.explodeNoteText(20, false, true).includes("exported files are full detail"));
+        check("explode note: truncated + simplified combine",
+            B.explodeNoteText(12, true, true)
+                === "showing the first 12 parts (memory budget) \u00b7 simplified preview \u2014 exported files are full detail");
+        check("explode note: truncated alone has no simplified wording",
+            B.explodeNoteText(12, true, false) === "showing the first 12 parts (memory budget)");
+
         document.title = fails.length ? `FAIL: ${fails.join("; ")}` : "PASS";
     } catch (err) {
         log("EXCEPTION " + (err.stack || err));

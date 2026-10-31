@@ -1495,8 +1495,13 @@
 
     // ------------------------------------------------------- exploded view
     // Real part geometry streams away during export, so the viewer keeps
-    // decimated stand-ins (~3k tris each) up to a hard triangle budget —
-    // the ≤250 MB heap rule outranks completeness on 1,000-part jobs.
+    // stand-ins up to a hard 1.5M-triangle budget — the ≤250 MB heap rule
+    // outranks completeness on 1,000-part jobs. Each part's target is what is
+    // left of the budget split across the candidate cells still to come
+    // (floor(left / cells), never under 3k tris), so empty cells and parts that
+    // came in small hand their share to later ones: parts at or under the
+    // target stay at full detail, bigger ones are simplified to it. Few big
+    // parts look smooth; 1,000 parts stay at ~3k.
 
     const explodeBtn = document.getElementById("bp-explode");
     const explodeRow = document.getElementById("bp-explode-row");
@@ -1508,14 +1513,16 @@
     let proxies = [];         // { geometry, center, id, mesh? }
     let proxyTris = 0;
     let proxyTruncated = false;
+    let proxySimplified = false; // true once any stand-in was decimated
+    let proxyFirstTarget = PROXY_TARGET; // the first part's target, for tests
     let explodeGroup = null;
 
-    function collectProxy(geo, id) {
+    function collectProxy(geo, id, target) {
         if (proxyTruncated) return;
         const tris = geo.getIndex().count / 3;
         let g;
         try {
-            g = tris > PROXY_TARGET ? CutCore.simplifyToTarget(geo, PROXY_TARGET) : geo.clone();
+            g = tris > target ? CutCore.simplifyToTarget(geo, target) : geo.clone();
         } catch (err) { return; } // display-only — never fail the export over it
         const kept = g.getIndex() ? g.getIndex().count / 3 : 0;
         if (proxyTris + kept > PROXY_TRI_BUDGET) {
@@ -1527,6 +1534,7 @@
         g.computeBoundingBox();
         const center = new THREE.Vector3();
         g.boundingBox.getCenter(center);
+        if (tris > target) proxySimplified = true;
         proxies.push({ geometry: g, center, id });
     }
 
@@ -1536,6 +1544,8 @@
         proxies = [];
         proxyTris = 0;
         proxyTruncated = false;
+        proxySimplified = false;
+        proxyFirstTarget = PROXY_TARGET;
         explodeBtn.style.display = "none";
     }
 
@@ -1564,8 +1574,7 @@
         CC.scene.add(explodeGroup);
         updateExplode();
         explodeRow.style.display = "";
-        explodeNote.textContent = proxyTruncated
-            ? `showing the first ${proxies.length} parts (memory budget)` : `${proxies.length} parts`;
+        explodeNote.textContent = Core.explodeNoteText(proxies.length, proxyTruncated, proxySimplified);
         explodeBtn.textContent = "Assembled view";
     }
 
@@ -1830,7 +1839,12 @@
                     skippedEngravings++;
                 }
                 occupied.add(cell.id);
-                collectProxy(geo, cell.id); // budgeted stand-in for the exploded view
+                // budgeted stand-in; i was bumped before the cut, so this cell
+                // and everything after it is totalCells - (i - 1)
+                const proxyGoal = Core.proxyTargetFor(
+                    totalCells - (i - 1), PROXY_TRI_BUDGET - proxyTris, PROXY_TARGET);
+                if (!proxies.length) proxyFirstTarget = proxyGoal;
+                collectProxy(geo, cell.id, proxyGoal);
                 geo.dispose(); // streaming: only rows + proxies accumulate
             }
 
@@ -1877,7 +1891,7 @@
             const files = await writer.end();
 
             CC.bigPrint._lastExport = { parts: rows.length, files, skippedEngravings, rows,
-                proxies: proxies.length, proxyTruncated };
+                proxies: proxies.length, proxyTruncated, proxySimplified, proxyFirstTarget };
             exportCompleted = true;
             if (proxies.length) explodeBtn.style.display = "";
             const story = Core.partStory(rows.length, !!settings.hollow);

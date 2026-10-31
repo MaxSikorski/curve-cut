@@ -294,6 +294,20 @@ window.BigPrintCore = (() => {
         };
     }
 
+    /* Exploded-view stand-ins: every part gets the same triangle target, the
+       budget split evenly across the candidate cells but never below `floor`. */
+    function proxyTargetFor(totalCells, budget, floor) {
+        const cells = Math.max(totalCells | 0, 1);
+        return Math.max(floor, Math.floor(budget / cells));
+    }
+
+    /* The note under the exploded-view slider: says honestly when the view is
+       cut short or simplified. */
+    function explodeNoteText(count, truncated, simplified) {
+        const base = truncated ? `showing the first ${count} parts (memory budget)` : `${count} parts`;
+        return simplified ? `${base} \u00b7 simplified preview \u2014 exported files are full detail` : base;
+    }
+
     /* Target size (longest side, mm) ⇄ multiplier, linked live in the UI. */
     const scaleForTarget = (baseLongest, targetMm) =>
         baseLongest > 0 ? targetMm / baseLongest : 1;
@@ -335,7 +349,7 @@ window.BigPrintCore = (() => {
     }
 
     return { PRINTERS, axisCuts, computeGrid, cellCount, gridCells, seamOf, seamGridPositions,
-        serializeSTL, serialize3MF, buildManifest, explodedPosition,
+        serializeSTL, serialize3MF, buildManifest, explodedPosition, proxyTargetFor, explodeNoteText,
         colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,
         partStory, hollowSavingsStory };
 })();

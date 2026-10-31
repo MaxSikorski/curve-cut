@@ -839,7 +839,10 @@
        Returns an indexed BufferGeometry, or null for an empty cell.
        conn (optional) adds deterministic seam connectors — pegs on +axis
        interior faces, tolerance-grown sockets on -axis ones; see
-       applyCellConnectors. */
+       applyCellConnectors.
+       ctx (optional, hollow models) is a createOuterContext result: solid
+       blocks carry the connectors and the ID goes on a pad. The geometry's
+       userData = { engraved, onPad, noPadRoom, label, connectors }. */
     function cutGridCell(solid, cell, gap = 0, conn = null, ctx = null) {
         const g2 = Math.max(gap, 0) / 2;
         const pad = 1; // mm past the model on exterior faces
@@ -920,7 +923,7 @@
             let engraved = false, onPad = false, noPadRoom = false, label = null;
             if (cell.engraveId) {
                 const r = ctx
-                    ? engraveOnPad(part, cell, cell.engraveId, { gap, ctx, box, avoid })
+                    ? engraveOnPad(part, cell, cell.engraveId, { gap, ctx, box, avoid, conn: connCfg })
                     : engraveCellId(part, cell, cell.engraveId, { gap });
                 part = r.part;
                 engraved = r.engraved;
@@ -962,7 +965,6 @@
     /* True when a wall-margin test prism (peg + wall, both directions from
        the plane) sits fully inside `solid`. */
     function connectorFits(solid, pos, normal, opts, wall) {
-        // test prism: peg + wall margin, both directions from the plane
         const probe = buildConnectorSolid(
             { pos: pos.clone().addScaledVector(normal, -(opts.depth + wall)),
               normal, shape: "circle", size: opts.size + 2 * wall,
@@ -1095,50 +1097,56 @@
         const Rb = conn ? R + 1 : 0;
         const Lc = conn ? conn.depth + (conn.tolD || 0) + gap / 2 + wall : 0;
         const H = Math.max(conn ? Lc + Rb + 1 : 0, 5);
-        const ctx = { planes: new Map(), R, Rb, Lc, H, wall, probeCache: new Map() };
-        const bb = outer.boundingBox();
+        const ctx = { planes: new Map(), R, Rb, Lc, H, wall, conn, probeCache: new Map(),
+            bounds: outer.boundingBox() };
         try {
-            for (const { axis, plane } of planes) {
-                const key = `${axis}:${plane}`;
-                if (ctx.planes.has(key)) continue;
-                const lo = [], hi = [];
-                for (const [i, c] of ["x", "y", "z"].entries()) {
-                    lo.push(c === axis ? plane - H : bb.min[i] - 1);
-                    hi.push(c === axis ? plane + H : bb.max[i] + 1);
-                }
-                const rawBox = wasm.Manifold.cube([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]);
-                let box;
-                try {
-                    box = rawBox.translate(lo);
-                } finally {
-                    rawBox.delete();
-                }
-                let slab;
-                try {
-                    slab = outer.intersect(box);
-                } finally {
-                    box.delete();
-                }
-                const entry = { slab, section: null, axes: CYCLIC[axis], skin: null };
-                ctx.planes.set(key, entry);
-                if (conn) {
-                    const [a1, a2] = CYCLIC[axis];
-                    const rot = new THREE.Matrix4().makeBasis(
-                        new THREE.Vector3(...AXIS_DIR[a1]), new THREE.Vector3(...AXIS_DIR[a2]),
-                        new THREE.Vector3(...AXIS_DIR[axis])).transpose();
-                    const rotated = slab.transform(rot.elements);
-                    try {
-                        entry.section = rotated.slice(plane);
-                    } finally {
-                        rotated.delete();
-                    }
-                }
-            }
+            for (const plane of planes) addOuterPlane(ctx, outer, plane);
         } catch (err) {
             disposeOuterContext(ctx);
             throw err;
         }
         return ctx;
+    }
+
+    /* One more seam plane for a context (the export adds them one at a time so
+       it can yield and honour Stop in between). `outer` must be the same solid. */
+    function addOuterPlane(ctx, outer, { axis, plane }) {
+        const key = `${axis}:${plane}`;
+        if (ctx.planes.has(key)) return;
+        const bb = ctx.bounds;
+        const lo = [], hi = [];
+        for (const [i, c] of ["x", "y", "z"].entries()) {
+            lo.push(c === axis ? plane - ctx.H : bb.min[i] - 1);
+            hi.push(c === axis ? plane + ctx.H : bb.max[i] + 1);
+        }
+        const rawBox = wasm.Manifold.cube([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]);
+        let box;
+        try {
+            box = rawBox.translate(lo);
+        } finally {
+            rawBox.delete();
+        }
+        let slab;
+        try {
+            slab = outer.intersect(box);
+        } finally {
+            box.delete();
+        }
+        slab.numTri(); // evaluate the lazy boolean now, not inside the part loop
+        const entry = { slab, section: null, axes: CYCLIC[axis], skin: null };
+        ctx.planes.set(key, entry);
+        if (ctx.conn) {
+            const [a1, a2] = CYCLIC[axis];
+            const rot = new THREE.Matrix4().makeBasis(
+                new THREE.Vector3(...AXIS_DIR[a1]), new THREE.Vector3(...AXIS_DIR[a2]),
+                new THREE.Vector3(...AXIS_DIR[axis])).transpose();
+            const rotated = slab.transform(rot.elements);
+            try {
+                entry.section = rotated.slice(plane);
+            } finally {
+                rotated.delete();
+            }
+        }
     }
 
     function disposeOuterContext(ctx) {
@@ -1224,7 +1232,7 @@
             if (kept.length >= 4 || probes >= 24) break;
             if (kept.some((q) => q.distanceTo(pos) < minGap)) continue;
             probes++;
-            const key = `${pos.x},${pos.y},${pos.z}`;
+            const key = `${seam.axis}:${pos.x},${pos.y},${pos.z}`;
             let fits = ctx.probeCache.get(key);
             if (fits === undefined) {
                 fits = connectorFits(entry.slab, pos, normal, conn, ctx.wall);
@@ -1239,7 +1247,11 @@
        rings (radius Rb, centred Lc either side of the seam plane) with 45
        degree cone ends. On x/z seams the axis is horizontal, so each ring also
        gets a point Rb*sqrt(2) straight below the centre: the underside becomes
-       45 degree flanks instead of a round overhang. */
+       45 degree flanks instead of a round overhang. Not support-free in every
+       spot: a block hanging from a cavity ceiling starts about Rb*sqrt(2) +
+       (R + 0.5) - wall below it, and a block hugging a side wall (or the lower
+       cone of a y seam) starts its bottom ridge R + 0.5 - wall into the air.
+       Check the slicer preview for islands. */
     function buildBossSolid(pos, axis, Rb, Lc) {
         const [ua, va] = CYCLIC[axis];
         const at = (along, u, v) => {
@@ -1526,10 +1538,11 @@
     /* Hollow parts: put the ID on a small solid pad inside the shell. Faces
        are tried bottom (y0, the face on the bed) first, then x/z faces by
        area, then the top face last. Pad spots follow the outer skin (an ellipse
-       erosion of its section, so the W x H pad fits inside the skin and still
-       overlaps the shell), away from every connector block. `part` is consumed
-       and a new Manifold returned, like engraveCellId.
-       opts = { gap, ctx, box, avoid: THREE.Vector3[], depth? } */
+       erosion of its section, so the W x H pad fits inside the skin with its
+       edges 0.5 mm off it and touches the shell), clear of every socket and
+       peg footprint. `part` is consumed and a new Manifold returned, like
+       engraveCellId.
+       opts = { gap, ctx, box, avoid: THREE.Vector3[], conn, depth? } */
     function engraveOnPad(part, cell, id, opts) {
         const input = part;
         let keepPart = false;
@@ -1549,6 +1562,7 @@
             const depth = opts.depth || 0.6;
             const padDepth = 3;
             const g2 = (opts.gap || 0) / 2;
+            let attachTests = 40; // one budget per part, so a hopeless part stays cheap
 
             for (const f of faces) {
                 const entry = ctx.planes.get(`${f.seam.axis}:${f.seam.plane}`);
@@ -1557,7 +1571,6 @@
                 if (th < 3.5) continue;
                 const textW = estimateTextWidth(font, id, th);
                 const W = textW + 4, Hp = th + 4;
-                const half = Math.hypot(W, Hp) / 2;
                 const { outward, e1, e2 } = textFrame(f.seam.axis, f.dir);
                 const centre = seamPoint(f.seam, {
                     u: (f.seam.u.lo + f.seam.u.hi) / 2,
@@ -1577,10 +1590,11 @@
                 let walk = [];
                 try {
                     // squash along the text so the W x H pad becomes H x H, erode
-                    // by its half-diagonal, stretch back
+                    // by half of it (its edges then sit 0.5 mm off the skin on
+                    // every side), stretch back
                     const squashed = cross.scale([Hp / W, 1]);
                     try {
-                        const eroded = squashed.offset(-(Hp / Math.SQRT2 + 0.5), "Round");
+                        const eroded = squashed.offset(-(Hp / 2 + 0.5), "Round");
                         try {
                             const back = eroded.scale([W / Hp, 1]);
                             try {
@@ -1598,20 +1612,40 @@
                     cross.delete();
                 }
 
+                // the pad is axis-aligned: half its width along e1's world axis, half
+                // its height along e2's
+                const halfOn = {};
+                for (const side of [f.seam.u, f.seam.v]) {
+                    halfOn[side.axis] = (Math.abs(e1[side.axis]) > 0.5 ? W : Hp) / 2;
+                }
                 const range = {};
                 for (const side of [f.seam.u, f.seam.v]) {
+                    const edge = halfOn[side.axis] + 0.5;
                     range[side.axis] = [
-                        side.lo + (cell.in[side.axis + "0"] ? half + 0.5 : 0),
-                        side.hi - (cell.in[side.axis + "1"] ? half + 0.5 : 0),
+                        side.lo + (cell.in[side.axis + "0"] ? edge : 0),
+                        side.hi - (cell.in[side.axis + "1"] ? edge : 0),
                     ];
                 }
-                const keepAway = half + ctx.Rb + 0.5;
+                // a pad may overlap a connector block (solid) but not a socket or
+                // peg footprint: reject only when the two boxes overlap
+                const hitsConnector = (pos) => avoid.some((q) => {
+                    const qAxis = ["x", "y", "z"].find((c) =>
+                        (cell.in[c + "1"] && q[c] === cell[c + "1"])
+                        || (cell.in[c + "0"] && q[c] === cell[c + "0"]));
+                    return ["x", "y", "z"].every((c) => {
+                        const reach = c === qAxis ? opts.conn.depth + (opts.conn.tolD || 0) + 0.5
+                            : opts.conn.size / 2 + (opts.conn.tolR || 0) / 2 + 0.5;
+                        const onFace = c === f.seam.axis; // the pad reaches padDepth inward
+                        const centreAt = onFace ? pos[c] - f.dir * padDepth / 2 : pos[c];
+                        return Math.abs(centreAt - q[c]) < reach + (onFace ? padDepth / 2 : halfOn[c]);
+                    });
+                });
                 const spots = [];
                 for (const [a, b] of walk) {
                     const pos = new THREE.Vector3().addScaledVector(e1, a)
                         .addScaledVector(e2, b).addScaledVector(outward, h);
                     if (!Object.entries(range).every(([c, [lo, hi]]) => pos[c] >= lo && pos[c] <= hi)) continue;
-                    if (avoid.some((q) => q.distanceTo(pos) < keepAway)) continue;
+                    if (avoid.length && hitsConnector(pos)) continue;
                     spots.push(pos);
                 }
                 const away = (p) => p.distanceTo(centre);
@@ -1619,7 +1653,7 @@
                     ? (p, q) => away(p) - away(q)
                     : (p, q) => (Math.round(p.y / 2) - Math.round(q.y / 2)) || (away(p) - away(q)));
 
-                for (const pos of spots.slice(0, 12)) {
+                for (const pos of spots.slice(0, 40)) {
                     const boxAt = (w, hh, back, front) => {
                         const raw = wasm.Manifold.cube([w, hh, front - back]);
                         let placed;
@@ -1662,6 +1696,7 @@
                     } finally {
                         raw.delete();
                     }
+                    if (attachTests-- <= 0) { padded.delete(); break; }
                     let attached;
                     try {
                         const overlap = padded.intersect(part);
@@ -1676,8 +1711,13 @@
                     }
                     if (!attached) { padded.delete(); continue; }
 
-                    const label = buildTextSolid(font, id,
-                        { height: th, depth, pos, e1, e2, outward });
+                    let label;
+                    try {
+                        label = buildTextSolid(font, id, { height: th, depth, pos, e1, e2, outward });
+                    } catch (err) {
+                        padded.delete();
+                        throw err;
+                    }
                     if (!label) { padded.delete(); return finish({ part, engraved: false }); }
                     let withPad = null, carved;
                     try {
@@ -1784,7 +1824,7 @@
         buildPlanarCutter, buildDovetailCutter, dovetailEdgeY,
         buildConnectorSolid, cutGridCell, placeSeamConnectors, applyCellConnectors,
         buildTextSolid, engraveCellId, engraveOnPad,
-        createOuterContext, disposeOuterContext, buildBossSolid,
+        createOuterContext, addOuterPlane, disposeOuterContext, buildBossSolid,
         simplifyGeometry, simplifyToTarget, geometryVolume,
     };
 })();

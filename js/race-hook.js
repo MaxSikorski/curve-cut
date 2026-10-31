@@ -11,6 +11,9 @@
         location.hostname === "localhost" || location.hostname === "127.0.0.1";
     if (window.location.hash !== "#racetest" || !isDev) return;
     const CC = window.CurveCut;
+    // Chromium ships the File System Access save picker (Brave hides it); the
+    // scenarios assume no picker unless one injects its own.
+    window.showSaveFilePicker = undefined;
 
     const TIMEOUT = 120000;
     const exportBtn = document.getElementById("bp-export");
@@ -305,7 +308,7 @@
                 await waitFor(() => CC.ops.busyName() === "bigprint", "fallback Big Print export");
                 await once("curvecut:op-ended", (event) => event.detail.name === "bigprint");
             } finally {
-                delete window.showSaveFilePicker;
+                window.showSaveFilePicker = undefined;
             }
             const result = CC.bigPrint._lastExport;
             assert(result, "fallback export did not publish _lastExport");

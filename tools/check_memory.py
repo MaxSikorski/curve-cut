@@ -1,30 +1,20 @@
 #!/usr/bin/env python3
-"""check_memory.py — run the memory lifecycle test over real-time CDP.
+"""check_memory.py — run the memory lifecycle test in real-time headless Chromium.
 
 The page exercises automatic cache-aware recycling, directional worker
 memoryStats, degraded prime disposal, and the history retained-triangle cap.
-It uses real time because virtual time can starve worker messages and the
-timer-driven recycle handoff.
+It runs in real time through tools/browser.py (Playwright) because virtual time
+would starve worker messages and the timer-driven recycle handoff.
 
-SKIPS politely (exit 0) if no Chromium-family browser is installed.
+SKIPS politely (exit 0) if that browser is not installed.
 
 Run: uv run --no-project python tools/check_memory.py
 """
 
-import asyncio
-import json
-import os
-import subprocess
 import sys
-import tempfile
-import time
-import urllib.request
-from pathlib import Path
 
+from browser import ensure_playwright, page_url, run_page, skip_or_fail
 
-ROOT = Path(__file__).resolve().parent.parent
-TEST_URL = f"file://{ROOT}/tests/memory-test.html"
-PORT = 9348
 REAL_TIME_LIMIT_S = 180
 REQUIRED_CHECKS = (
     "memoryReport exposes the budget fields",
@@ -39,98 +29,6 @@ REQUIRED_CHECKS = (
     "degraded-after-prime release disposes the main-thread cache",
     "history stays under the retained triangle cap",
 )
-
-BROWSERS = [
-    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-]
-
-
-def ensure_websockets() -> None:
-    """Re-exec through uv with the websockets extra when it is missing."""
-    try:
-        import websockets  # noqa: F401
-    except ImportError:
-        if os.environ.get("CHECK_MEMORY_REEXEC"):
-            print("FAIL: websockets unavailable even after uv re-exec")
-            sys.exit(1)
-        env = dict(os.environ, CHECK_MEMORY_REEXEC="1")
-        os.execvpe(
-            "uv",
-            ["uv", "run", "--no-project", "--with", "websockets",
-             "python", __file__],
-            env,
-        )
-
-
-async def run_harness(browser: str, profile: str) -> tuple[str, str]:
-    import websockets
-
-    proc = subprocess.Popen(
-        [browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-         f"--remote-debugging-port={PORT}", f"--user-data-dir={profile}",
-         "about:blank"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        ws_url = None
-        for _ in range(50):
-            try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json") as response:
-                    tabs = json.load(response)
-                page = next(tab for tab in tabs if tab["type"] == "page")
-                ws_url = page["webSocketDebuggerUrl"]
-                break
-            except Exception:
-                await asyncio.sleep(0.2)
-        if not ws_url:
-            return "(browser never exposed a debug target)", ""
-
-        async with websockets.connect(ws_url, max_size=10 * 1024 * 1024) as ws:
-            message_id = [0]
-
-            async def command(method: str, **params):
-                message_id[0] += 1
-                current_id = message_id[0]
-                await ws.send(json.dumps({
-                    "id": current_id, "method": method, "params": params,
-                }))
-                while True:
-                    message = json.loads(await ws.recv())
-                    if message.get("id") != current_id:
-                        continue
-                    if "error" in message:
-                        raise RuntimeError(message["error"])
-                    return message.get("result", {})
-
-            async def evaluate(expression: str):
-                result = await command(
-                    "Runtime.evaluate", expression=expression, returnByValue=True,
-                )
-                return result.get("result", {}).get("value")
-
-            await command("Page.enable")
-            await command("Page.navigate", url=TEST_URL)
-            deadline = time.monotonic() + REAL_TIME_LIMIT_S
-            title = "(no title)"
-            while time.monotonic() < deadline:
-                await asyncio.sleep(1)
-                title = await evaluate("document.title") or "(no title)"
-                if title == "PASS" or title.startswith("FAIL"):
-                    log = await evaluate(
-                        "document.getElementById('log').textContent"
-                    ) or ""
-                    return title, log
-            return title, ""
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
 
 
 def print_failures(log: str) -> None:
@@ -150,14 +48,11 @@ def missing_checks(log: str) -> list[str]:
 
 
 def main() -> int:
-    browser = next((candidate for candidate in BROWSERS if Path(candidate).exists()), None)
-    if not browser:
-        print("SKIPPED: no Chromium-family browser found for memory lifecycle tests.")
-        return 0
-
-    ensure_websockets()
-    with tempfile.TemporaryDirectory(prefix="curvecut-memory-") as profile:
-        title, log = asyncio.run(run_harness(browser, profile))
+    ensure_playwright()
+    result = run_page(page_url("tests/memory-test.html"), REAL_TIME_LIMIT_S)
+    if result.skipped:
+        return skip_or_fail(result.skipped)
+    title, log = result.title, result.log
 
     if title == "PASS":
         missing = missing_checks(log)
@@ -167,10 +62,11 @@ def main() -> int:
                 print(f"  {name}")
             return 1
         print("memory check ok — automatic recycle/cache flow, directional memoryStats, "
-              "degraded disposal, and history cap passed (real-time CDP)")
+              "degraded disposal, and history cap passed (real-time Playwright)")
         return 0
 
     print_failures(log)
+    result.print_errors()
     print(f"FAIL: memory test result: {title}")
     return 1
 

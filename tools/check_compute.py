@@ -1,33 +1,24 @@
-#!/usr/bin/env python3
 """check_compute.py — run the compute worker and fallback test headlessly.
 
 The page is deliberately opened as file:// so the Blob URL worker path is
 tested in the same offline mode as the product.
 
-Unlike the older dump-dom check, this uses a real-time CDP connection.
-Chromium's virtual time can starve worker messages, leaving the page at
-RUNNING forever. The script re-execs itself through ``uv run --with
-websockets`` so the normal ``uv run --no-project python tools/check_compute.py``
-command works without a project environment.
+Runs in real time through tools/browser.py (Playwright's headless Chromium):
+virtual time would starve worker messages and leave the page at RUNNING
+forever.
 
-SKIPS politely (exit 0) if no Chromium-family browser is installed.
+SKIPS politely (exit 0) if that browser is not installed.
 
 Run: uv run --no-project python tools/check_compute.py
 """
 
 import json
-import os
 import subprocess
 import sys
-import tempfile
-import time
-import urllib.request
 from pathlib import Path
 
+from browser import ROOT, ensure_playwright, page_url, run_page, skip_or_fail
 
-ROOT = Path(__file__).resolve().parent.parent
-TEST_URL = f"file://{ROOT}/tests/compute-test.html"
-PORT = 9345
 REAL_TIME_LIMIT_S = 180
 REQUIRED_COVERAGE_CHECKS = (
     "repairGeometry uses one fused worker round-trip",
@@ -45,13 +36,6 @@ REQUIRED_COVERAGE_CHECKS = (
     "cutWithCutter detaches transferred geometry",
     "cutWithCutter builds connector solids worker-side",
 )
-
-BROWSERS = [
-    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-]
 
 
 def check_worker_source() -> bool:
@@ -87,7 +71,6 @@ def check_embedded_syntax() -> bool:
     paren in the shell shipped exactly that way; the degraded fallback then
     masked it for 10 of 20 checks). Extract the string, run jsc on it.
     """
-    import json
     import re
     import shutil
     import tempfile
@@ -123,89 +106,6 @@ def check_embedded_syntax() -> bool:
     return True
 
 
-def ensure_websockets() -> None:
-    """Re-exec through uv with the websockets extra when it's missing."""
-    try:
-        import websockets  # noqa: F401
-    except ImportError:
-        if os.environ.get("CHECK_COMPUTE_REEXEC"):
-            print("FAIL: websockets unavailable even after uv re-exec")
-            sys.exit(1)
-        env = dict(os.environ, CHECK_COMPUTE_REEXEC="1")
-        os.execvpe(
-            "uv",
-            ["uv", "run", "--no-project", "--with", "websockets",
-             "python", __file__],
-            env,
-        )
-
-
-async def run_harness(browser: str, profile: str) -> tuple[str, str]:
-    import asyncio
-    import websockets
-
-    proc = subprocess.Popen(
-        [browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-         f"--remote-debugging-port={PORT}", f"--user-data-dir={profile}",
-         "about:blank"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    try:
-        ws_url = None
-        for _ in range(50):
-            try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json") as response:
-                    tabs = json.load(response)
-                page = next(tab for tab in tabs if tab["type"] == "page")
-                ws_url = page["webSocketDebuggerUrl"]
-                break
-            except Exception:
-                time.sleep(0.2)
-        if not ws_url:
-            return "(browser never exposed a debug target)", ""
-
-        async with websockets.connect(ws_url, max_size=10 * 1024 * 1024) as ws:
-            message_id = [0]
-
-            async def cmd(method, **params):
-                message_id[0] += 1
-                current_id = message_id[0]
-                await ws.send(json.dumps({
-                    "id": current_id, "method": method, "params": params,
-                }))
-                while True:
-                    message = json.loads(await ws.recv())
-                    if message.get("id") != current_id:
-                        continue
-                    if "error" in message:
-                        raise RuntimeError(message["error"])
-                    return message.get("result", {})
-
-            async def evaluate(expression):
-                result = await cmd("Runtime.evaluate", expression=expression,
-                                   returnByValue=True)
-                return result.get("result", {}).get("value")
-
-            await cmd("Page.enable")
-            await cmd("Page.navigate", url=TEST_URL)
-            deadline = time.monotonic() + REAL_TIME_LIMIT_S
-            title = "(no title)"
-            while time.monotonic() < deadline:
-                await asyncio.sleep(1)
-                title = await evaluate("document.title") or "(no title)"
-                if title == "PASS" or title.startswith("FAIL"):
-                    log = await evaluate(
-                        "document.getElementById('log').textContent") or ""
-                    return title, log
-            return title, ""
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-
 def print_failures(log: str) -> None:
     failures = [line for line in log.splitlines() if line.lstrip().startswith("FAIL")]
     if not failures:
@@ -227,16 +127,11 @@ def main() -> int:
     if not check_embedded_syntax():
         return 1
 
-    browser = next((candidate for candidate in BROWSERS if Path(candidate).exists()), None)
-    if not browser:
-        print("SKIPPED: no Chromium-family browser found for headless compute tests.")
-        return 0
-
-    ensure_websockets()
-    import asyncio
-
-    with tempfile.TemporaryDirectory(prefix="curvecut-compute-") as profile:
-        title, log = asyncio.run(run_harness(browser, profile))
+    ensure_playwright()
+    result = run_page(page_url("tests/compute-test.html"), REAL_TIME_LIMIT_S)
+    if result.skipped:
+        return skip_or_fail(result.skipped)
+    title, log = result.title, result.log
 
     if title == "PASS":
         missing = missing_coverage(log)
@@ -245,10 +140,11 @@ def main() -> int:
             for name in missing:
                 print(f"  {name}")
             return 1
-        print("compute check ok — worker and fallback tests passed (real-time CDP)")
+        print("compute check ok — worker and fallback tests passed (real-time Playwright)")
         return 0
 
     print_failures(log)
+    result.print_errors()
     print(f"FAIL: compute test result: {title}")
     return 1
 

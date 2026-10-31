@@ -532,6 +532,36 @@
             assert(toastLive.textContent.includes("could not be read"),
                 "junk file did not show the could-not-be-read toast");
         }],
+
+        ["progress-pill-under-load", async () => {
+            await resetState();
+            // Big Print's export pattern: each part blocks the main thread for
+            // seconds, then yields one tick and updates the pill. gsap's lag
+            // smoothing counts each block as ~33 ms, so a fade crawls ~10% per
+            // part (Max saw it go solid only around part 8 of 20).
+            const pill = document.getElementById("progress-pill");
+            gsap.killTweensOf(pill);
+            gsap.set(pill, { autoAlpha: 0 }); // idle: hidden, as before any real export
+            const held = CC.ops.begin("race-hold");
+            assert(held, "could not hold an op for the pill test");
+            try {
+                CC.progress.show("Preparing the model…");
+                const opacityNow = () => parseFloat(getComputedStyle(pill).opacity);
+                assert(opacityNow() >= 0.99,
+                    `pill opacity ${opacityNow().toFixed(2)} right after show(), not solid`);
+                for (let part = 1; part <= 2; part++) {
+                    const until = performance.now() + 1500;
+                    while (performance.now() < until) { /* a part's boolean work */ }
+                    await new Promise((r) => setTimeout(r));
+                    CC.progress.update(`Cutting part ${part}…`, part / 20);
+                    assert(opacityNow() >= 0.99,
+                        `pill opacity ${opacityNow().toFixed(2)} during part ${part}, not solid`);
+                }
+            } finally {
+                CC.progress.hide();
+                CC.ops.end(held);
+            }
+        }],
     ];
 
     (async () => {

@@ -20,7 +20,7 @@ import sys
 from browser import ensure_playwright, page_url, run_page, skip_or_fail
 
 REAL_TIME_LIMIT_S = 180
-EXPECTED_SCENARIOS = 9
+EXPECTED_SCENARIOS = 10
 
 
 def main() -> int:
@@ -44,7 +44,7 @@ def main() -> int:
     if fail or ok < EXPECTED_SCENARIOS:
         print("FAIL: coordinator race scenarios failed (names above)")
         return 1
-    print("race check ok — all 9 coordinator race scenarios pass (real-time Playwright)")
+    print("race check ok — all 10 coordinator race scenarios pass (real-time Playwright)")
     return 0
 
 

@@ -501,7 +501,6 @@
             await Promise.all([loaded, loadEnded, loading]);
             assert(CC.pieces.length === 1, `load left ${CC.pieces.length} pieces instead of 1`);
             assert(!CC.ops.busy(), "load token remained live after the model loaded");
-            await waitFor(() => !CC.ops.busy(), "load repair to end");
 
             // refused while another op runs, and refused BEFORE parsing
             const realParse = THREE.STLLoader.prototype.parse;

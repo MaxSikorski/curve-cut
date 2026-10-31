@@ -218,6 +218,9 @@
             toast("An operation is still running — load the new model when it finishes.");
             return;
         }
+        // the parse blocks gsap's ticker, so a fade would freeze part-way
+        gsap.killTweensOf(progressPill);
+        gsap.set(progressPill, { autoAlpha: 1, y: 0 });
         try {
             await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
             const buffer = await file.arrayBuffer();

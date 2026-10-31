@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/three/STLLoader.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../js/cut-core.js"></script>
+<script>
+/* Headless tests for boundary-loop repair. Run via tools/check_repair.py.
+   Result lands in document.title: "PASS" or "FAIL: <reason>". */
+(async () => {
+    "use strict";
+
+    const log = (message) => { document.getElementById("log").textContent += message + "\n"; };
+    const failures = [];
+    const check = (name, condition, detail) => {
+        log(`${condition ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!condition) failures.push(name);
+    };
+
+    const geometryFromArrays = (positions, triangles) => {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+        geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(triangles), 1));
+        return geometry;
+    };
+    const geometryFromResult = (result) => geometryFromArrays(result.vertProperties, result.triVerts);
+    const accepted = (geometry) => {
+        try { CutCore.toManifold(geometry).delete(); return true; }
+        catch (error) { return false; }
+    };
+    const manifoldVolume = (geometry) => {
+        const solid = CutCore.toManifold(geometry);
+        try { return solid.volume(); }
+        finally { solid.delete(); }
+    };
+
+    function boxGeometry(size, includeBottom = true) {
+        const s = size;
+        const positions = [
+            0, 0, 0, s, 0, 0, s, s, 0, 0, s, 0,
+            0, 0, s, s, 0, s, s, s, s, 0, s, s,
+        ];
+        const triangles = [
+            0, 2, 1, 0, 3, 2,
+            4, 5, 6, 4, 6, 7,
+            0, 4, 7, 0, 7, 3,
+            1, 2, 6, 1, 6, 5,
+            3, 7, 6, 3, 6, 2,
+        ];
+        if (includeBottom) triangles.push(0, 1, 5, 0, 5, 4);
+        return geometryFromArrays(positions, triangles);
+    }
+
+    function subdividedBottomBox(size) {
+        const s = size;
+        const positions = [
+            0, 0, 0, s, 0, 0, s, s, 0, 0, s, 0,
+            0, 0, s, s, 0, s, s, s, s, 0, s, s,
+            s / 2, 0, 0, 0, 0, s / 2, s / 2, 0, s, s, 0, s / 2,
+        ];
+        const triangles = [
+            0, 2, 8, 8, 2, 1, 0, 3, 2,
+            4, 10, 6, 10, 5, 6, 4, 6, 7,
+            0, 9, 7, 9, 4, 7, 0, 7, 3,
+            1, 2, 6, 1, 6, 11, 11, 6, 5,
+            3, 7, 6, 3, 6, 2,
+        ];
+        return geometryFromArrays(positions, triangles);
+    }
+
+    function openCylinder(radius, height, segments) {
+        const positions = [], triangles = [];
+        for (let y of [0, height]) {
+            for (let i = 0; i < segments; i++) {
+                const angle = 2 * Math.PI * i / segments;
+                positions.push(radius * Math.cos(angle), y, radius * Math.sin(angle));
+            }
+        }
+        const topCenter = positions.length / 3;
+        positions.push(0, height, 0);
+        for (let i = 0; i < segments; i++) {
+            const next = (i + 1) % segments;
+            const bottom = i, bottomNext = next;
+            const top = segments + i, topNext = segments + next;
+            triangles.push(bottom, topNext, bottomNext, bottom, top, topNext);
+            triangles.push(topCenter, topNext, top);
+        }
+        return geometryFromArrays(positions, triangles);
+    }
+
+    function hollowBox(size, wall, height) {
+        const half = size / 2, inner = half - wall;
+        const ring = (extent, y) => [
+            -extent, y, -extent, extent, y, -extent,
+            extent, y, extent, -extent, y, extent,
+        ];
+        const positions = ring(half, 0).concat(ring(half, height), ring(inner, 0), ring(inner, height));
+        const outerBottom = 0, outerTop = 4, innerBottom = 8, innerTop = 12;
+        const triangles = [];
+        for (let i = 0; i < 4; i++) {
+            const next = (i + 1) % 4, previous = (i + 3) % 4;
+            triangles.push(
+                outerBottom + i, outerTop + next, outerBottom + next,
+                outerBottom + i, outerTop + i, outerTop + next,
+                innerBottom + i, innerBottom + next, innerTop + next,
+                innerBottom + i, innerTop + next, innerTop + i,
+                outerTop + i, outerTop + previous, innerTop + previous,
+                outerTop + i, innerTop + previous, innerTop + i
+            );
+        }
+        return geometryFromArrays(positions, triangles);
+    }
+
+    function openLPrism(height) {
+        const outline = [[0, 0], [4, 0], [4, 2], [2, 2], [2, 4], [0, 4]];
+        const positions = [];
+        for (const [x, z] of outline) positions.push(x, 0, z);
+        for (const [x, z] of outline) positions.push(x, height, z);
+        const triangles = [];
+        for (let i = 0; i < outline.length; i++) {
+            const next = (i + 1) % outline.length;
+            triangles.push(i, outline.length + next, next,
+                i, outline.length + i, outline.length + next);
+        }
+        const top = outline.length;
+        triangles.push(top, top + 2, top + 1, top, top + 3, top + 2,
+            top, top + 4, top + 3, top, top + 5, top + 4);
+        return geometryFromArrays(positions, triangles);
+    }
+
+    try {
+        await CutCore.init();
+
+        const openCube = boxGeometry(10, false);
+        const cubeBoundary = CutCore.findBoundaryLoops(openCube);
+        check("cube hole finds one loop", cubeBoundary.loops.length === 1,
+            String(cubeBoundary.loops.length));
+        check("cube hole has four boundary edges", cubeBoundary.boundaryEdges === 4,
+            String(cubeBoundary.boundaryEdges));
+        check("cube hole has no dangling chain", cubeBoundary.openChains === 0,
+            String(cubeBoundary.openChains));
+        const cubeCap = CutCore.capBoundaryLoops(openCube, cubeBoundary);
+        const cappedCube = cubeCap && geometryFromResult(cubeCap);
+        check("cube cap adds two triangles", !!cubeCap && cubeCap.capTris === 2,
+            cubeCap && String(cubeCap.capTris));
+        check("capped cube is watertight", !!cappedCube && accepted(cappedCube));
+        if (cappedCube) {
+            const volume = manifoldVolume(cappedCube);
+            check("capped cube volume", Math.abs(volume - 1000) / 1000 < 1e-6,
+                volume.toFixed(9));
+        }
+
+        const cylinder = openCylinder(5, 12, 48);
+        const cylinderBoundary = CutCore.findBoundaryLoops(cylinder);
+        check("open cylinder finds one round loop", cylinderBoundary.loops.length === 1
+            && cylinderBoundary.loops[0].length === 48,
+            cylinderBoundary.loops.map((loop) => loop.length).join(","));
+        const cappedCylinder = geometryFromResult(CutCore.capBoundaryLoops(cylinder, cylinderBoundary));
+        const cylinderVolume = manifoldVolume(cappedCylinder);
+        check("capped cylinder is watertight", accepted(cappedCylinder));
+        check("capped cylinder volume", Math.abs(cylinderVolume - Math.PI * 25 * 12)
+            / (Math.PI * 25 * 12) < 0.01, cylinderVolume.toFixed(3));
+
+        const hollow = hollowBox(20, 4, 20);
+        const hollowBoundary = CutCore.findBoundaryLoops(hollow);
+        check("hollow box finds two concentric loops", hollowBoundary.loops.length === 2,
+            String(hollowBoundary.loops.length));
+        check("hollow box loops are square", hollowBoundary.loops.every((loop) => loop.length === 4),
+            hollowBoundary.loops.map((loop) => loop.length).join(","));
+        const cappedHollow = geometryFromResult(CutCore.capBoundaryLoops(hollow, hollowBoundary));
+        const hollowVolume = manifoldVolume(cappedHollow);
+        check("capped hollow box is watertight", accepted(cappedHollow));
+        check("capped hollow box keeps its cavity", hollowVolume < 20 * 20 * 20,
+            `${hollowVolume.toFixed(3)} < 8000`);
+
+        const lPrism = openLPrism(6);
+        const lBoundary = CutCore.findBoundaryLoops(lPrism);
+        check("L pocket finds one non-convex loop", lBoundary.loops.length === 1
+            && lBoundary.loops[0].length === 6, lBoundary.loops.map((loop) => loop.length).join(","));
+        const cappedL = geometryFromResult(CutCore.capBoundaryLoops(lPrism, lBoundary));
+        check("non-convex L pocket caps watertight", accepted(cappedL));
+
+        const closedCube = boxGeometry(10, true);
+        const closedBoundary = CutCore.findBoundaryLoops(closedCube);
+        check("watertight cube finds no loops", closedBoundary.loops.length === 0,
+            String(closedBoundary.loops.length));
+        const closedRepair = CutCore.repairGeometry(closedCube);
+        check("watertight repair keeps the existing weld-first behavior",
+            !!closedRepair && closedRepair.method === "weld" && closedRepair.loops === 0,
+            closedRepair && `${closedRepair.method}/${closedRepair.loops}`);
+
+        const junk = geometryFromArrays([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]);
+        check("unfixable junk returns null", CutCore.repairGeometry(junk) === null);
+
+        const seam = new THREE.BoxGeometry(10, 10, 10).toNonIndexed();
+        const seamPosition = seam.getAttribute("position");
+        for (let i = 0; i < seamPosition.count; i += 3) {
+            if (seamPosition.getY(i) === -5 && seamPosition.getY(i + 1) === -5
+                && seamPosition.getY(i + 2) === -5) {
+                for (let j = 0; j < 3; j++) seamPosition.setY(i + j, -4.98);
+            }
+        }
+        const seamRepair = CutCore.repairGeometry(seam);
+        check("seam repair takes the weld rung", !!seamRepair && seamRepair.method === "weld",
+            seamRepair && `${seamRepair.method}/${seamRepair.tol}`);
+
+        const ladderRepair = CutCore.repairGeometry(openCube);
+        check("open cube ladder uses cap", !!ladderRepair && ladderRepair.method === "cap"
+            && ladderRepair.loops === 1, ladderRepair && `${ladderRepair.method}/${ladderRepair.loops}`);
+        if (ladderRepair) {
+            const repaired = geometryFromResult(ladderRepair);
+            check("ladder cap is Manifold-validated", accepted(repaired));
+        }
+
+        const subdividedBox = subdividedBottomBox(10);
+        const subdividedBoundary = CutCore.findBoundaryLoops(subdividedBox);
+        check("subdivided box keeps all eight hole vertices", subdividedBoundary.loops.length === 1
+            && subdividedBoundary.loops[0].length === 8,
+            subdividedBoundary.loops.map((loop) => loop.length).join(","));
+        const subdividedCap = CutCore.capBoundaryLoops(subdividedBox, subdividedBoundary);
+        check("subdivided box takes the full-loop fan", !!subdividedCap && subdividedCap.capTris === 8,
+            subdividedCap && String(subdividedCap.capTris));
+        const subdividedRepair = CutCore.repairGeometry(subdividedBox);
+        check("subdivided box ladder uses cap", !!subdividedRepair && subdividedRepair.method === "cap",
+            subdividedRepair && subdividedRepair.method);
+        if (subdividedRepair) {
+            const repairedSubdividedBox = geometryFromResult(subdividedRepair);
+            check("subdivided box cap is Manifold-validated", accepted(repairedSubdividedBox));
+            const volume = manifoldVolume(repairedSubdividedBox);
+            check("subdivided box volume", Math.abs(volume - 1000) / 1000 < 1e-6,
+                volume.toFixed(9));
+        }
+
+        let fixtureBuffer;
+        try {
+            fixtureBuffer = await (await fetch("../test-assets/Jesus-modified-hollow.stl")).arrayBuffer();
+        } catch (error) {
+            log("SKIP: Jesus-modified-hollow.stl not present — fixture acceptance skipped.");
+        }
+        if (fixtureBuffer) {
+            const t0 = performance.now();
+            const fixture = new THREE.STLLoader().parse(fixtureBuffer);
+            const fixtureRepair = CutCore.repairGeometry(fixture);
+            check("Jesus hollow fixture caps two loops", !!fixtureRepair
+                && fixtureRepair.method === "cap" && fixtureRepair.loops === 2,
+                fixtureRepair && `${fixtureRepair.method}/${fixtureRepair.loops}`);
+            if (fixtureRepair) {
+                const repairedFixture = geometryFromResult(fixtureRepair);
+                check("Jesus hollow fixture is watertight", accepted(repairedFixture));
+            }
+            log(`Jesus fixture repair ${(performance.now() - t0) / 1000 | 0}s`);
+        }
+
+        document.title = failures.length ? `FAIL: ${failures.join("; ")}` : "PASS";
+    } catch (error) {
+        log("EXCEPTION: " + (error.stack || error));
+        document.title = "FAIL: exception — " + error.message;
+    }
+})();
+</script>
+</body>
+</html>

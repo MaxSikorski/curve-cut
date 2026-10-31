@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../js/bigprint-core.js"></script>
+<script src="../js/cut-core.js"></script>
+<script src="../js/hollow-core.js"></script>
+<script src="../js/compute-worker-src.js"></script>
+<script src="../js/compute.js"></script>
+<script>
+(() => {
+    "use strict";
+
+    const CC = window.CurveCut;
+    const log = (message) => { document.getElementById("log").textContent += message + "\n"; };
+    const failures = [];
+    const check = (name, condition, detail) => {
+        log(`${condition ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!condition) failures.push(name);
+    };
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const waitFor = async (test, timeout = 8000) => {
+        const deadline = performance.now() + timeout;
+        while (performance.now() < deadline) {
+            if (test()) return true;
+            await sleep(20);
+        }
+        return test();
+    };
+
+    const elementIds = [
+        "bigprint-panel", "action-dock", "view-dock", "bp-printer", "bp-bed-w",
+        "bp-bed-d", "bp-bed-h", "bp-margin", "bp-scale-slider", "bp-scale",
+        "bp-size", "bp-nudge-x", "bp-nudge-y", "bp-nudge-z", "bp-hollow-on",
+        "bp-hollow-fields", "bp-hollow-wall", "bp-hollow-hint", "bp-hollow-apply",
+        "bp-hollow-teaser", "bp-hollow-status", "bp-status", "bp-export",
+        "stats-reset", "bp-gap", "bp-connectors", "bp-conn-shape", "bp-conn-size",
+        "bp-conn-tol", "bp-engrave", "bp-cancel", "bp-explode", "bp-explode-row",
+        "bp-explode-amt", "bp-explode-note", "bp-format", "bigprint-btn",
+        "undo-btn", "redo-btn",
+    ];
+    const selectIds = new Set(["bp-printer", "bp-conn-shape", "bp-format"]);
+    const buttonIds = new Set(["stats-reset", "bp-hollow-apply", "bp-export", "bp-cancel",
+        "bp-explode", "bigprint-btn", "undo-btn", "redo-btn"]);
+    for (const id of elementIds) {
+        const element = document.createElement(selectIds.has(id) ? "select"
+            : (buttonIds.has(id) ? "button" : "input"));
+        element.id = id;
+        if (element.tagName === "INPUT") element.type = "text";
+        document.body.appendChild(element);
+    }
+    document.getElementById("bp-hollow-on").type = "checkbox";
+    document.getElementById("bp-hollow-on").checked = false;
+    document.getElementById("bp-hollow-wall").value = "2";
+
+    CC.scene = new THREE.Scene();
+    CC.pieces = [];
+    CC.makeCollapsible = () => ({ });
+    CC.toast = () => {};
+    CC.progress = { show: () => {}, hide: () => {}, update: () => {} };
+    CC.ops = {
+        busy: () => false,
+        begin: () => ({ alive: () => true }),
+        end: () => {},
+        cancel: () => {},
+    };
+    CC.cutFlow = { RIBBON_COLOR: 0xffffff, isEngineReady: () => true };
+    CC.baseMaterial = new THREE.MeshBasicMaterial();
+    CC.getModel = () => CC.pieces[0] || null;
+    CC.showStats = () => {};
+    CC.flyHome = () => {};
+
+    const geometryFromArrays = (positions, triangles) => ({
+        vertProperties: new Float32Array(positions),
+        triVerts: new Uint32Array(triangles),
+    });
+    const closedBox = () => geometryFromArrays([
+        0, 0, 0, 10, 0, 0, 10, 10, 0, 0, 10, 0,
+        0, 0, 10, 10, 0, 10, 10, 10, 10, 0, 10, 10,
+    ], [
+        0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7,
+        0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5,
+        3, 7, 6, 3, 6, 2, 0, 1, 5, 0, 5, 4,
+    ]);
+    const allocatingBox = (cells = 96) => {
+        const positions = [], triangles = [];
+        const addFace = (origin, u, v) => {
+            const point = (i, j) => [
+                origin[0] + (u[0] * i + v[0] * j) / cells,
+                origin[1] + (u[1] * i + v[1] * j) / cells,
+                origin[2] + (u[2] * i + v[2] * j) / cells,
+            ];
+            for (let i = 0; i < cells; i++) for (let j = 0; j < cells; j++) {
+                const quad = [point(i, j), point(i + 1, j), point(i + 1, j + 1),
+                    point(i, j + 1)];
+                const base = positions.length / 3;
+                for (const vertex of quad) positions.push(...vertex);
+                triangles.push(base, base + 1, base + 2, base, base + 2, base + 3);
+            }
+        };
+        addFace([0, 0, 10], [10, 0, 0], [0, 10, 0]);
+        addFace([0, 10, 0], [10, 0, 0], [0, -10, 0]);
+        addFace([10, 0, 0], [0, 10, 0], [0, 0, 10]);
+        addFace([0, 0, 10], [0, 10, 0], [0, 0, -10]);
+        addFace([0, 10, 0], [0, 0, 10], [10, 0, 0]);
+        addFace([10, 0, 0], [0, 0, 10], [-10, 0, 0]);
+        return geometryFromArrays(positions, triangles);
+    };
+    const setLive = (mesh) => {
+        for (const piece of CC.pieces) CC.scene.remove(piece);
+        CC.pieces.length = 0;
+        CC.pieces.push(mesh);
+        CC.scene.add(mesh);
+    };
+
+    const makeHistoryMesh = (triangles) => {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(
+            new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), 3));
+        const indices = new Uint32Array(triangles * 3);
+        for (let i = 0; i < triangles; i++) {
+            const at = i * 3;
+            indices[at] = 0;
+            indices[at + 1] = 1;
+            indices[at + 2] = 2;
+        }
+        geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+        return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    };
+
+    setTimeout(() => { (async () => {
+        let savedWorker = window.Worker;
+        let fallbackModel = null;
+        try {
+            const reportShape = CC.memoryReport();
+            check("memoryReport exposes the budget fields",
+                Object.prototype.hasOwnProperty.call(reportShape, "jsHeapBytes")
+                && Object.prototype.hasOwnProperty.call(reportShape, "workerWasmBytes")
+                && Object.prototype.hasOwnProperty.call(reportShape, "historyRetainedBytes")
+                && Object.prototype.hasOwnProperty.call(reportShape, "liveManifoldCacheCount"));
+
+            const booted = await CC.compute.ready();
+            check("memory test worker boots", booted && !CC.compute.degraded);
+            if (booted && !CC.compute.degraded) {
+                const defaultThreshold = CC.memoryReport().workerWasmThresholdBytes;
+                check("worker recycle threshold is finite",
+                    Number.isFinite(defaultThreshold) && defaultThreshold > 0,
+                    String(defaultThreshold));
+                const beforeStats = await CC.compute.run("memoryStats");
+                const oldWorker = CC.compute._worker;
+                const thresholdSeam = CC.compute._testSetWasmRecycleThreshold;
+                check("memory test exposes the automatic recycle seam",
+                    typeof thresholdSeam === "function");
+                thresholdSeam(beforeStats.wasmHeapBytes);
+
+                const growthInput = allocatingBox();
+                const growthToken = "memory-test-automatic-cache";
+                const primed = await CC.compute.run("prime", {
+                    token: growthToken, geometry: growthInput, scale: 1,
+                }, { transfer: [growthInput.vertProperties.buffer, growthInput.triVerts.buffer] });
+                const afterOpStats = await CC.compute.run("memoryStats");
+                const heldEstimate = await CC.compute.run("hollowEstimate", {
+                    token: growthToken, wallMm: 2,
+                });
+                const heldReport = CC.memoryReport();
+                check("threshold recycle defers while cache token is live",
+                    primed && Number.isFinite(heldEstimate)
+                    && CC.compute._worker === oldWorker
+                    && heldReport.workerCacheTokenCount === 1
+                    && heldReport.recyclePending,
+                    JSON.stringify(heldReport));
+
+                await CC.compute.run("release", { token: growthToken });
+                const recycled = await waitFor(() => CC.compute._worker
+                    && CC.compute._worker !== oldWorker
+                    && CC.compute._workerCount === 1
+                    && !CC.compute.degraded);
+                const recycledWorker = CC.compute._worker;
+                const afterRecycleStats = await CC.compute.run("memoryStats");
+                const statsTolerance = 64 * 1024;
+                const grew = afterOpStats && beforeStats
+                    && afterOpStats.wasmHeapBytes > beforeStats.wasmHeapBytes
+                    && afterOpStats.wasmHeapBytes - beforeStats.wasmHeapBytes >= statsTolerance;
+                const shrank = afterRecycleStats && afterOpStats
+                    && afterRecycleStats.wasmHeapBytes < afterOpStats.wasmHeapBytes
+                    && afterOpStats.wasmHeapBytes - afterRecycleStats.wasmHeapBytes >= statsTolerance;
+                check("memoryStats grows after an allocating op", grew,
+                    `${beforeStats.wasmHeapBytes} -> ${afterOpStats && afterOpStats.wasmHeapBytes}`);
+                check("memoryStats shrinks after recycle", shrank,
+                    `${afterOpStats && afterOpStats.wasmHeapBytes} -> `
+                    + `${afterRecycleStats && afterRecycleStats.wasmHeapBytes}`);
+                const recycleReport = CC.memoryReport();
+                check("automatic threshold recycle fires with worker-wasm-threshold",
+                    recycled && recycledWorker && recycledWorker !== oldWorker
+                    && CC.compute._lastTerminatedWorker === oldWorker
+                    && recycleReport.lastRecycleReason === "worker-wasm-threshold",
+                    JSON.stringify(recycleReport));
+                check("memoryReport reports the memoryStats snapshot",
+                    recycleReport.workerWasmBytes === afterRecycleStats.wasmHeapBytes
+                    && recycleReport.workerWasmSource === "worker.memoryStats",
+                    JSON.stringify(recycleReport));
+
+                thresholdSeam(defaultThreshold);
+                const postInput = allocatingBox();
+                const postToken = "memory-test-post-recycle-cache";
+                const postPrime = await CC.compute.run("prime", {
+                    token: postToken, geometry: postInput, scale: 1,
+                }, { transfer: [postInput.vertProperties.buffer, postInput.triVerts.buffer] });
+                const postEstimate = await CC.compute.run("hollowEstimate", {
+                    token: postToken, wallMm: 2,
+                });
+                check("post-recycle prime and estimate preserve cache flow",
+                    postPrime && Number.isFinite(postEstimate),
+                    `${postPrime && postPrime.token}/${postEstimate}`);
+                await CC.compute.run("release", { token: postToken });
+            }
+
+            savedWorker = window.Worker;
+            window.Worker = function ForcedMemoryTestWorker() {
+                throw new Error("forced memory-test worker construction failure");
+            };
+            const degradedReady = await CC.compute.recycle();
+            check("degraded mode is available for the prime-release probe",
+                degradedReady === false && CC.compute.degraded);
+
+            const fallbackToken = "memory-test-degraded-prime";
+            const primeInput = closedBox();
+            const primed = await CC.compute.run("prime", {
+                token: fallbackToken, geometry: primeInput, scale: 1,
+            }, { transfer: [primeInput.vertProperties.buffer, primeInput.triVerts.buffer] });
+            const beforeRelease = CC.memoryReport();
+            check("degraded prime creates one main-thread cache",
+                primed && beforeRelease.mainCachedManifoldCount === 1,
+                JSON.stringify(beforeRelease));
+
+            const modelGeometry = new THREE.BufferGeometry();
+            modelGeometry.setAttribute("position", new THREE.BufferAttribute(
+                new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), 3));
+            modelGeometry.setIndex([0, 1, 2]);
+            fallbackModel = new THREE.Mesh(modelGeometry, new THREE.MeshBasicMaterial());
+            setLive(fallbackModel);
+            window.dispatchEvent(new CustomEvent("curvecut:repair-cache", { detail: {
+                model: fallbackModel,
+                geometry: fallbackModel.geometry,
+                token: fallbackToken,
+                primeReady: true,
+            } }));
+            const released = await waitFor(() =>
+                CC.memoryReport().mainCachedManifoldCount === 0);
+            check("degraded-after-prime release disposes the main-thread cache", released,
+                JSON.stringify(CC.memoryReport()));
+
+            CC.history.clear();
+            setLive(makeHistoryMesh(400000));
+            for (let i = 0; i < 12; i++) {
+                CC.history.capture();
+                setLive(makeHistoryMesh(400000));
+            }
+            for (let i = 0; i < 10; i++) {
+                CC.history.undo();
+                CC.history.redo();
+            }
+            const history = CC.history.memoryReport();
+            const total = CC.memoryReport();
+            check("history stays under the retained triangle cap", history.withinCap
+                && history.retainedTris <= history.capTris
+                && total.historyRetainedTris <= total.historyCapTris,
+                `${history.retainedTris}/${history.capTris}; ${history.retainedBytes} bytes`);
+        } catch (error) {
+            failures.push(`uncaught: ${error.name}: ${error.message}`);
+            log(`FAIL uncaught — ${error.stack || error}`);
+        } finally {
+            window.Worker = savedWorker;
+            if (CC.compute.degraded) await CC.compute.recycle();
+            CC.history.clear();
+            for (const piece of CC.pieces) {
+                piece.geometry.dispose();
+                piece.material.dispose();
+                CC.scene.remove(piece);
+            }
+            CC.pieces.length = 0;
+            if (fallbackModel && fallbackModel.parent) fallbackModel.parent.remove(fallbackModel);
+        }
+        document.title = failures.length ? `FAIL: ${failures.join("; ")}` : "PASS";
+    })(); }, 0);
+})();
+</script>
+<script src="../js/bigprint.js"></script>
+<script src="../js/history.js"></script>
+</body>
+</html>

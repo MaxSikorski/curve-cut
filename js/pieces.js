@@ -41,18 +41,22 @@
             wireBtn.className = "piece-icon" + (piece.material.wireframe ? " on" : "");
             wireBtn.innerHTML = WIRE_SVG;
             wireBtn.setAttribute("aria-label", "Toggle wireframe");
+            wireBtn.setAttribute("aria-pressed", piece.material.wireframe ? "true" : "false");
             wireBtn.addEventListener("click", () => {
                 piece.material.wireframe = !piece.material.wireframe;
                 wireBtn.classList.toggle("on", piece.material.wireframe);
+                wireBtn.setAttribute("aria-pressed", piece.material.wireframe ? "true" : "false");
             });
 
             const eyeBtn = document.createElement("button");
             eyeBtn.className = "piece-icon" + (piece.visible ? " on" : "");
             eyeBtn.innerHTML = EYE_SVG;
             eyeBtn.setAttribute("aria-label", "Toggle visibility");
+            eyeBtn.setAttribute("aria-pressed", piece.visible ? "true" : "false");
             eyeBtn.addEventListener("click", () => {
                 piece.visible = !piece.visible;
                 eyeBtn.classList.toggle("on", piece.visible);
+                eyeBtn.setAttribute("aria-pressed", piece.visible ? "true" : "false");
                 row.classList.toggle("piece-hidden", !piece.visible);
             });
 
@@ -81,49 +85,96 @@
         }
     });
 
-    function exportVisible() {
+    function blobZipWriter() {
+        let chunks = [];
+        const zip = new fflate.Zip((err, chunk) => {
+            if (err) throw err;
+            if (chunk && chunk.length) chunks.push(new Blob([chunk]));
+        });
+        return {
+            add(name, bytes, format) {
+                const file = format === "stl"
+                    ? new fflate.ZipDeflate(name, { level: 6 })
+                    : new fflate.ZipPassThrough(name);
+                zip.add(file);
+                file.push(bytes, true);
+            },
+            end() {
+                zip.end();
+                const blob = new Blob(chunks, { type: "application/zip" });
+                chunks = [];
+                return blob;
+            },
+            abort() {
+                try { zip.end(); } catch (err) { /* already failed/closed */ }
+                chunks = [];
+            },
+        };
+    }
+
+    async function exportVisible() {
         const visible = CC.pieces.filter((p) => p.visible);
         if (!visible.length) {
             CC.toast("Every piece is hidden — nothing to export.");
             return;
         }
 
-        const exporter = new THREE.STLExporter();
-        const used = new Set();
-        const files = visible.map((piece, i) => {
-            const base = (piece.name || `piece-${i + 1}`)
-                .replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || `piece-${i + 1}`;
-            let name = base;
-            for (let n = 2; used.has(name); n++) name = `${base}-${n}`;
-            used.add(name);
-            if (exportFmt === "3mf") {
-                // serialize3MF handles the Y-up -> Z-up mapping itself
-                const bytes = window.BigPrintCore.serialize3MF(piece.geometry);
-                return { bytes, type: "model/3mf", name: `${name}.3mf` };
-            }
-            // scene is Y-up; STLs are printer Z-up — rotate back on the way out
-            const temp = new THREE.Mesh(piece.geometry, piece.material);
-            temp.rotation.x = Math.PI / 2;
-            temp.updateMatrixWorld(true);
-            const data = exporter.parse(temp, { binary: true });
-            return { bytes: new Uint8Array(data.buffer || data), type: "model/stl", name: `${name}.stl` };
-        });
+        const op = CC.ops.begin("export");
+        if (!op) {
+            CC.toast("Another operation is still running — one moment.");
+            return;
+        }
 
-        if (files.length >= 2) {
-            // two or more parts belong together — one zip, not a download storm
-            const entries = {};
-            for (const f of files) {
-                // 3MF is already deflated; storing it again would just burn CPU
-                entries[f.name] = exportFmt === "3mf" ? [f.bytes, { level: 0 }] : f.bytes;
+        let writer = null;
+        try {
+            const exporter = new THREE.STLExporter();
+            const used = new Set();
+            const serialize = (piece, i) => {
+                const base = (piece.name || `piece-${i + 1}`)
+                    .replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || `piece-${i + 1}`;
+                let name = base;
+                for (let n = 2; used.has(name); n++) name = `${base}-${n}`;
+                used.add(name);
+                if (exportFmt === "3mf") {
+                    // serialize3MF handles the Y-up -> Z-up mapping itself
+                    const bytes = window.BigPrintCore.serialize3MF(piece.geometry);
+                    return { bytes, type: "model/3mf", name: `${name}.3mf` };
+                }
+                // scene is Y-up; STLs are printer Z-up — rotate back on the way out
+                const temp = new THREE.Mesh(piece.geometry, piece.material);
+                temp.rotation.x = Math.PI / 2;
+                temp.updateMatrixWorld(true);
+                const data = exporter.parse(temp, { binary: true });
+                return { bytes: new Uint8Array(data.buffer || data), type: "model/stl", name: `${name}.stl` };
+            };
+
+            if (visible.length >= 2) {
+                // Stream one entry at a time so serialized meshes never accumulate.
+                writer = blobZipWriter();
+                CC.progress.show(`Exporting piece 1 of ${visible.length}…`);
+                for (let i = 0; i < visible.length; i++) {
+                    CC.progress.update(`Exporting piece ${i + 1} of ${visible.length}…`,
+                        i / visible.length);
+                    await new Promise((resolve) => setTimeout(resolve));
+                    const file = serialize(visible[i], i);
+                    writer.add(file.name, file.bytes, exportFmt);
+                }
+                CC.progress.update("Finishing zip…", 1);
+                const zipped = writer.end();
+                writer = null;
+                download(zipped, `curve-cut-${visible.length}-pieces.zip`);
+                CC.toast(`Exporting ${visible.length} pieces as one ${exportFmt.toUpperCase()} zip…`);
+            } else {
+                const file = serialize(visible[0], 0);
+                download(new Blob([file.bytes], { type: file.type }), file.name);
+                CC.toast(`Exporting 1 piece as ${exportFmt.toUpperCase()}…`);
             }
-            const zipped = fflate.zipSync(entries);
-            download(new Blob([zipped], { type: "application/zip" }),
-                `curve-cut-${files.length}-pieces.zip`);
-            CC.toast(`Exporting ${files.length} pieces as one ${exportFmt.toUpperCase()} zip…`);
-        } else {
-            const f = files[0];
-            download(new Blob([f.bytes], { type: f.type }), f.name);
-            CC.toast(`Exporting 1 piece as ${exportFmt.toUpperCase()}…`);
+        } catch (err) {
+            if (writer) writer.abort();
+            console.error("Piece export failed:", err);
+            CC.toast("The export failed — see the console for details.");
+        } finally {
+            try { CC.progress.hide(); } finally { CC.ops.end(op); }
         }
     }
 

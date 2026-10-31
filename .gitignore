@@ -1,0 +1,7 @@
+.DS_Store
+__pycache__/
+*.pyc
+.env
+*.local
+# Private test models (licenses forbid redistribution); tests skip without them
+test-assets/

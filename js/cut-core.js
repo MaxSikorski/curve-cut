@@ -1,3 +1,4 @@
+/* Embedded into js/compute-worker-src.js — run `uv run --no-project python tools/embed_worker.py` after editing. */
 /* Curve Cut — cut engine core (MVP step 3)
    Pure geometry: THREE <-> Manifold conversion, spline sampling, cutter
    solid construction, boolean split. No DOM, no UI — js/cut.js wires it up
@@ -70,6 +71,286 @@
         };
     }
 
+    function meshArrays(geometry) {
+        if (geometry.vertProperties && geometry.triVerts) {
+            return { vertProperties: geometry.vertProperties, triVerts: geometry.triVerts };
+        }
+        const pos = geometry.getAttribute("position");
+        const index = geometry.getIndex();
+        if (!index) return weldGeometry(geometry);
+
+        const vertProperties = new Float32Array(pos.count * 3);
+        for (let i = 0; i < pos.count; i++) {
+            vertProperties[i * 3] = pos.getX(i);
+            vertProperties[i * 3 + 1] = pos.getY(i);
+            vertProperties[i * 3 + 2] = pos.getZ(i);
+        }
+        const triVerts = new Uint32Array(index.count);
+        for (let i = 0; i < index.count; i++) triVerts[i] = index.getX(i);
+        return { vertProperties, triVerts };
+    }
+
+    function findBoundaryLoops(geometry) {
+        const { triVerts } = meshArrays(geometry);
+        const edges = new Map();
+        const addEdge = (a, b) => {
+            const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+            let edge = edges.get(key);
+            if (!edge) {
+                edge = { from: a, to: b, count: 0 };
+                edges.set(key, edge);
+            }
+            edge.count++;
+        };
+
+        for (let i = 0; i + 2 < triVerts.length; i += 3) {
+            const a = triVerts[i], b = triVerts[i + 1], c = triVerts[i + 2];
+            addEdge(a, b); addEdge(b, c); addEdge(c, a);
+        }
+
+        const boundaryEdges = [];
+        for (const edge of edges.values()) {
+            if (edge.count === 1) boundaryEdges.push(edge);
+        }
+
+        const outgoing = new Map();
+        const ambiguous = new Set();
+        for (const edge of boundaryEdges) {
+            if (outgoing.has(edge.from)) {
+                outgoing.delete(edge.from);
+                ambiguous.add(edge.from);
+            } else if (!ambiguous.has(edge.from)) {
+                outgoing.set(edge.from, edge);
+            }
+        }
+
+        const unused = new Set(boundaryEdges.map((edge, i) => {
+            edge.index = i;
+            return i;
+        }));
+        const loops = [];
+        let openChains = 0;
+
+        while (unused.size) {
+            const seedIndex = unused.values().next().value;
+            const seed = boundaryEdges[seedIndex];
+            const start = seed.from;
+            const path = [start];
+            const visited = new Set([start]);
+            let current = start;
+            let first = true;
+            let closed = false;
+
+            while (true) {
+                const edge = first ? seed : outgoing.get(current);
+                first = false;
+                if (!edge || !unused.has(edge.index)) break;
+                unused.delete(edge.index);
+                current = edge.to;
+                if (current === start) {
+                    closed = path.length >= 3;
+                    break;
+                }
+                if (visited.has(current)) break;
+                visited.add(current);
+                path.push(current);
+            }
+
+            if (closed) loops.push(path);
+            else openChains++;
+        }
+
+        return { loops, openChains, boundaryEdges: boundaryEdges.length };
+    }
+
+    function loopProjection(loop, vertProperties) {
+        const points = loop.map((index) => ({
+            x: vertProperties[index * 3],
+            y: vertProperties[index * 3 + 1],
+            z: vertProperties[index * 3 + 2],
+        }));
+        const centroid = { x: 0, y: 0, z: 0 };
+        const min = { x: Infinity, y: Infinity, z: Infinity };
+        const max = { x: -Infinity, y: -Infinity, z: -Infinity };
+        for (const point of points) {
+            centroid.x += point.x; centroid.y += point.y; centroid.z += point.z;
+            min.x = Math.min(min.x, point.x); min.y = Math.min(min.y, point.y); min.z = Math.min(min.z, point.z);
+            max.x = Math.max(max.x, point.x); max.y = Math.max(max.y, point.y); max.z = Math.max(max.z, point.z);
+        }
+        centroid.x /= points.length; centroid.y /= points.length; centroid.z /= points.length;
+
+        let nx = 0, ny = 0, nz = 0;
+        for (let i = 0; i < points.length; i++) {
+            const a = points[i], b = points[(i + 1) % points.length];
+            nx += (a.y - b.y) * (a.z + b.z);
+            ny += (a.z - b.z) * (a.x + b.x);
+            nz += (a.x - b.x) * (a.y + b.y);
+        }
+        const scale = Math.max(max.x - min.x, max.y - min.y, max.z - min.z);
+        const areaEps = scale * scale * 1e-12;
+        let normalLength = Math.hypot(nx, ny, nz);
+        if (normalLength <= areaEps) {
+            const dx = max.x - min.x, dy = max.y - min.y, dz = max.z - min.z;
+            if (dy <= dx && dy <= dz) { nx = 0; ny = 1; nz = 0; }
+            else if (dx <= dz) { nx = 1; ny = 0; nz = 0; }
+            else { nx = 0; ny = 0; nz = 1; }
+            normalLength = 1;
+        }
+        nx /= normalLength; ny /= normalLength; nz /= normalLength;
+
+        const rx = Math.abs(nx) < 0.9 ? 1 : 0;
+        const ry = Math.abs(ny) < 0.9 ? 1 : 0;
+        const rz = Math.abs(nz) < 0.9 ? 0 : 1;
+        let e1x = ry * nz - rz * ny;
+        let e1y = rz * nx - rx * nz;
+        let e1z = rx * ny - ry * nx;
+        const e1Length = Math.hypot(e1x, e1y, e1z) || 1;
+        e1x /= e1Length; e1y /= e1Length; e1z /= e1Length;
+        const e2x = ny * e1z - nz * e1y;
+        const e2y = nz * e1x - nx * e1z;
+        const e2z = nx * e1y - ny * e1x;
+        const projected = points.map((point, i) => {
+            const dx = point.x - centroid.x, dy = point.y - centroid.y, dz = point.z - centroid.z;
+            return { index: loop[i], x: dx * e1x + dy * e1y + dz * e1z,
+                y: dx * e2x + dy * e2y + dz * e2z };
+        });
+        return { projected, centroid, scale, areaEps };
+    }
+
+    function projectedCross(a, b, c) {
+        return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    }
+
+    function cleanProjectedPolygon(points, areaEps, lengthEps) {
+        const cleaned = [];
+        const lengthEps2 = lengthEps * lengthEps;
+        for (const point of points) {
+            const previous = cleaned[cleaned.length - 1];
+            if (!previous || (point.x - previous.x) ** 2 + (point.y - previous.y) ** 2 > lengthEps2) {
+                cleaned.push(point);
+            }
+        }
+        if (cleaned.length > 1) {
+            const first = cleaned[0], last = cleaned[cleaned.length - 1];
+            if ((first.x - last.x) ** 2 + (first.y - last.y) ** 2 <= lengthEps2) cleaned.pop();
+        }
+        let changed = true;
+        while (changed && cleaned.length > 3) {
+            changed = false;
+            for (let i = 0; i < cleaned.length; i++) {
+                const previous = cleaned[(i + cleaned.length - 1) % cleaned.length];
+                const point = cleaned[i];
+                const next = cleaned[(i + 1) % cleaned.length];
+                if (Math.abs(projectedCross(previous, point, next)) > areaEps) continue;
+                const dot = (point.x - previous.x) * (point.x - next.x)
+                    + (point.y - previous.y) * (point.y - next.y);
+                if (dot <= lengthEps2) {
+                    cleaned.splice(i, 1);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    function pointInsideTriangle(point, a, b, c, orientation, areaEps) {
+        return projectedCross(a, b, point) * orientation > areaEps
+            && projectedCross(b, c, point) * orientation > areaEps
+            && projectedCross(c, a, point) * orientation > areaEps;
+    }
+
+    function earClip(points, areaEps) {
+        if (points.length < 3) return null;
+        let area = 0;
+        for (let i = 0; i < points.length; i++) {
+            const a = points[i], b = points[(i + 1) % points.length];
+            area += a.x * b.y - b.x * a.y;
+        }
+        if (Math.abs(area) <= areaEps) return null;
+        const orientation = area > 0 ? 1 : -1;
+        const work = points.slice();
+        const triangles = [];
+        let guard = work.length * work.length;
+        while (work.length > 3 && guard-- > 0) {
+            let ear = -1;
+            for (let i = 0; i < work.length; i++) {
+                const previous = work[(i + work.length - 1) % work.length];
+                const point = work[i];
+                const next = work[(i + 1) % work.length];
+                if (projectedCross(previous, point, next) * orientation <= areaEps) continue;
+                let contains = false;
+                for (let j = 0; j < work.length; j++) {
+                    if (j === i || j === (i + work.length - 1) % work.length
+                        || j === (i + 1) % work.length) continue;
+                    if (pointInsideTriangle(work[j], previous, point, next, orientation, areaEps)) {
+                        contains = true;
+                        break;
+                    }
+                }
+                if (!contains) { ear = i; break; }
+            }
+            if (ear < 0) return null;
+            const previous = work[(ear + work.length - 1) % work.length];
+            const point = work[ear];
+            const next = work[(ear + 1) % work.length];
+            triangles.push([previous.index, point.index, next.index]);
+            work.splice(ear, 1);
+        }
+        if (work.length !== 3 || Math.abs(projectedCross(work[0], work[1], work[2])) <= areaEps) return null;
+        triangles.push([work[0].index, work[1].index, work[2].index]);
+        return triangles;
+    }
+
+    function capBoundaryLoops(geometry, precomputed) {
+        const data = meshArrays(geometry);
+        const found = precomputed && !Array.isArray(precomputed) ? precomputed : null;
+        const loops = Array.isArray(precomputed) ? precomputed : (found ? found.loops : findBoundaryLoops(data).loops);
+        if (!loops || !loops.length) return null;
+
+        const vertices = Array.from(data.vertProperties);
+        const triangles = Array.from(data.triVerts);
+        const originalTriCount = triangles.length;
+        for (const loop of loops) {
+            if (loop.length < 3) continue;
+            const projected = loopProjection(loop, data.vertProperties);
+            const cleaned = cleanProjectedPolygon(projected.projected, projected.areaEps,
+                projected.scale * 1e-10);
+            const clipped = cleaned.length === projected.projected.length
+                ? earClip(cleaned, projected.areaEps) : null;
+            if (clipped) {
+                for (const tri of clipped) triangles.push(tri[0], tri[2], tri[1]);
+                continue;
+            }
+
+            const centerIndex = vertices.length / 3;
+            vertices.push(projected.centroid.x, projected.centroid.y, projected.centroid.z);
+            for (let i = 0; i < loop.length; i++) {
+                const a = loop[i], b = loop[(i + 1) % loop.length];
+                triangles.push(b, a, centerIndex);
+            }
+        }
+
+        return {
+            vertProperties: new Float32Array(vertices),
+            triVerts: new Uint32Array(triangles),
+            capTris: (triangles.length - originalTriCount) / 3,
+            loops,
+        };
+    }
+
+    function manifoldAccepts(vertProperties, triVerts) {
+        try {
+            const mesh = new wasm.Mesh({ numProp: 3, vertProperties, triVerts });
+            mesh.merge();
+            const solid = new wasm.Manifold(mesh);
+            solid.delete();
+            return true;
+        } catch (err) {
+            return false;
+        }
+    }
+
     /* THREE.BufferGeometry -> Manifold. Throws if the mesh isn't a closed,
        watertight solid (caller turns that into a friendly message). */
     function toManifold(geometry) {
@@ -90,23 +371,30 @@
         }
     }
 
-    /* Basic repair ladder (v1.6): OBJ/3MF (and sloppy STL) meshes often have
-       hairline seams — re-weld at coarser tolerances until Manifold accepts
-       the result. Returns { vertProperties, triVerts, tol } for the first
-       tolerance that produces a closed solid, or null when nothing under
-       0.1 mm helps (a real hole, not a seam — welding can't invent surface). */
+    /* Repair ladder: weld small seams, then cap genuine boundary loops. */
     function repairGeometry(geometry) {
+        let finest = null;
         for (const tol of [0.01, 0.05, 0.1]) {
             const { vertProperties, triVerts } = weldGeometry(geometry, tol);
-            try {
-                const mesh = new wasm.Mesh({ numProp: 3, vertProperties, triVerts });
-                mesh.merge();
-                const solid = new wasm.Manifold(mesh);
-                solid.delete();
-                return { vertProperties, triVerts, tol };
-            } catch (err) { /* try the next rung */ }
+            if (!finest) finest = { vertProperties, triVerts };
+            if (manifoldAccepts(vertProperties, triVerts)) {
+                return { vertProperties, triVerts, tol, method: "weld", loops: 0 };
+            }
         }
-        return null;
+
+        const boundary = findBoundaryLoops(finest);
+        if (!boundary.loops.length) return null;
+        const capped = capBoundaryLoops(finest, boundary);
+        if (!capped || !manifoldAccepts(capped.vertProperties, capped.triVerts)) {
+            return null;
+        }
+        return {
+            vertProperties: capped.vertProperties,
+            triVerts: capped.triVerts,
+            tol: 0.01,
+            method: "cap",
+            loops: capped.loops.length,
+        };
     }
 
     /* Manifold -> THREE.BufferGeometry (copies out of wasm heap).
@@ -191,21 +479,25 @@
 
         // CrossSection sanitizes winding and self-intersections
         let cross = new wasm.CrossSection([polygon], "Positive");
-        if (grow > 0) {
-            const grown = cross.offset(grow, "Miter");
+        try {
+            if (grow > 0) {
+                const grown = cross.offset(grow, "Miter");
+                cross.delete();
+                cross = grown;
+            }
+            const cutter = wasm.Manifold.extrude(cross, halfDepth * 2);
+            try {
+                // extrude() builds from z=0..h in plane space; recenter and move to world
+                const m = new THREE.Matrix4().makeBasis(e1, e2, n).setPosition(
+                    P0.clone().addScaledVector(n, -halfDepth)
+                );
+                return cutter.transform(m.elements);
+            } finally {
+                cutter.delete();
+            }
+        } finally {
             cross.delete();
-            cross = grown;
         }
-        let cutter = wasm.Manifold.extrude(cross, halfDepth * 2);
-        cross.delete();
-
-        // extrude() builds from z=0..h in plane space; recenter and move to world
-        const m = new THREE.Matrix4().makeBasis(e1, e2, n).setPosition(
-            P0.clone().addScaledVector(n, -halfDepth)
-        );
-        const placed = cutter.transform(m.elements);
-        cutter.delete();
-        return placed;
     }
 
     // ------------------------------------------- planar / dovetail cutters
@@ -226,15 +518,19 @@
         const half = reach;
         const cross = new wasm.CrossSection(
             [[[-half, -half], [half, -half], [half, half], [-half, half]]], "Positive");
-        const slab = wasm.Manifold.extrude(cross, reach); // z = 0..reach in plane space
-        cross.delete();
-
-        // place so the slab fills the -normal side, ending exactly at the plane
-        const m = new THREE.Matrix4().makeBasis(e1, e2, n)
-            .setPosition(point.clone().addScaledVector(n, -reach));
-        const placed = slab.transform(m.elements);
-        slab.delete();
-        return placed;
+        try {
+            const slab = wasm.Manifold.extrude(cross, reach); // z = 0..reach in plane space
+            try {
+                // place so the slab fills the -normal side, ending exactly at the plane
+                const m = new THREE.Matrix4().makeBasis(e1, e2, n)
+                    .setPosition(point.clone().addScaledVector(n, -reach));
+                return slab.transform(m.elements);
+            } finally {
+                slab.delete();
+            }
+        } finally {
+            cross.delete();
+        }
     }
 
     /* Approximate parting-surface height at x for the SINGLE dovetail tooth
@@ -299,17 +595,33 @@
         if (area < 0) pts.reverse();
 
         const cross = new wasm.CrossSection([pts], "Positive");
-        let cutter = wasm.Manifold.extrude(cross, 2 * reach)
-            .translate([0, 0, center.z - reach]);
-        cross.delete();
+        let slab;
+        try {
+            slab = wasm.Manifold.extrude(cross, 2 * reach);
+        } finally {
+            cross.delete();
+        }
+        let cutter;
+        try {
+            cutter = slab.translate([0, 0, center.z - reach]);
+        } finally {
+            slab.delete();
+        }
 
         if (grooveDeg) {
             // rotate the tongue's slide direction in the horizontal plane
-            const moved = cutter.translate([-center.x, 0, -center.z])
-                .rotate([0, grooveDeg, 0])
-                .translate([center.x, 0, center.z]);
-            cutter.delete();
-            cutter = moved;
+            const original = cutter;
+            let centered = null;
+            let rotated = null;
+            try {
+                centered = original.translate([-center.x, 0, -center.z]);
+                rotated = centered.rotate([0, grooveDeg, 0]);
+                cutter = rotated.translate([center.x, 0, center.z]);
+            } finally {
+                if (rotated) rotated.delete();
+                if (centered) centered.delete();
+                original.delete();
+            }
         }
         return cutter;
     }
@@ -339,14 +651,19 @@
         const e2 = new THREE.Vector3().crossVectors(nv, e1).normalize();
 
         const cross = new wasm.CrossSection([poly], "Positive");
-        // start a hair below the plane so the union never leaves a seam
-        const prism = wasm.Manifold.extrude(cross, h + 0.05);
-        cross.delete();
-        const m = new THREE.Matrix4().makeBasis(e1, e2, nv)
-            .setPosition(pos.clone().addScaledVector(nv, -0.05));
-        const placed = prism.transform(m.elements);
-        prism.delete();
-        return placed;
+        try {
+            // start a hair below the plane so the union never leaves a seam
+            const prism = wasm.Manifold.extrude(cross, h + 0.05);
+            try {
+                const m = new THREE.Matrix4().makeBasis(e1, e2, nv)
+                    .setPosition(pos.clone().addScaledVector(nv, -0.05));
+                return prism.transform(m.elements);
+            } finally {
+                prism.delete();
+            }
+        } finally {
+            cross.delete();
+        }
     }
 
     // ------------------------------------------------------------- the cut
@@ -368,38 +685,57 @@
         } catch (err) {
             throw new Error("not-watertight");
         }
-        let a = solid.intersect(cutter);
-        let b = solid.subtract(cutterOut);
-        solid.delete();
+        let a = null;
+        let b = null;
+        try {
+            a = solid.intersect(cutter);
+            b = solid.subtract(cutterOut);
+            solid.delete();
+            solid = null;
 
-        if (connectors) {
-            let male = connectors.maleSide === "inside" ? a : b;
-            let female = connectors.maleSide === "inside" ? b : a;
+            if (connectors) {
+                const maleInside = connectors.maleSide === "inside";
+                let male = maleInside ? a : b;
+                let female = maleInside ? b : a;
 
-            for (const peg of connectors.pegs) {
-                const touch = male.intersect(peg);
-                const touches = touch.numTri() > 0;
-                touch.delete();
-                if (!touches) continue; // multi-piece scenes: peg belongs elsewhere
-                const grown = male.add(peg);
-                male.delete();
-                male = grown;
+                for (const peg of connectors.pegs) {
+                    const touch = male.intersect(peg);
+                    let touches;
+                    try {
+                        touches = touch.numTri() > 0;
+                    } finally {
+                        touch.delete();
+                    }
+                    if (!touches) continue; // multi-piece scenes: peg belongs elsewhere
+                    const previous = male;
+                    male = previous.add(peg);
+                    if (maleInside) a = male; else b = male;
+                    previous.delete();
+                }
+                for (const socket of connectors.sockets) {
+                    const previous = female;
+                    female = previous.subtract(socket);
+                    if (maleInside) b = female; else a = female;
+                    previous.delete();
+                }
             }
-            for (const socket of connectors.sockets) {
-                const carved = female.subtract(socket);
-                female.delete();
-                female = carved;
+
+            let inside = null;
+            let outside = null;
+            try {
+                inside = a.numTri() > 0 ? toGeometry(a) : null;
+                outside = b.numTri() > 0 ? toGeometry(b) : null;
+                return { inside, outside };
+            } catch (err) {
+                if (inside) inside.dispose();
+                if (outside) outside.dispose();
+                throw err;
             }
-            a = connectors.maleSide === "inside" ? male : female;
-            b = connectors.maleSide === "inside" ? female : male;
+        } finally {
+            if (solid) solid.delete();
+            if (a) a.delete();
+            if (b) b.delete();
         }
-
-        const result = {
-            inside: a.numTri() > 0 ? toGeometry(a) : null,
-            outside: b.numTri() > 0 ? toGeometry(b) : null,
-        };
-        a.delete(); b.delete();
-        return result;
     }
 
     /* Split each geometry by the spline (same order as input). */
@@ -436,22 +772,36 @@
         const z1 = cell.z1 - (cell.in.z1 ? g2 : -pad);
         if (x1 - x0 <= 0 || y1 - y0 <= 0 || z1 - z0 <= 0) return null;
 
-        const box = wasm.Manifold.cube([x1 - x0, y1 - y0, z1 - z0])
-            .translate([x0, y0, z0]);
-        let part = solid.intersect(box);
-        box.delete();
-        if (part.numTri() === 0) { part.delete(); return null; }
-        if (conn) part = applyCellConnectors(part, solid, cell, { ...conn, gap });
-        let engraved = false;
-        if (cell.engraveId) {
-            const r = engraveCellId(part, cell, cell.engraveId, { gap });
-            part = r.part;
-            engraved = r.engraved;
+        const rawBox = wasm.Manifold.cube([x1 - x0, y1 - y0, z1 - z0]);
+        let box;
+        try {
+            box = rawBox.translate([x0, y0, z0]);
+        } finally {
+            rawBox.delete();
         }
-        const geometry = toGeometry(part);
-        geometry.userData = { engraved };
-        part.delete();
-        return geometry;
+        let part = null;
+        try {
+            part = solid.intersect(box);
+        } finally {
+            box.delete();
+        }
+        try {
+            if (part.numTri() === 0) return null;
+            if (conn) {
+                part = applyCellConnectors(part, solid, cell, { ...conn, gap });
+            }
+            let engraved = false;
+            if (cell.engraveId) {
+                const r = engraveCellId(part, cell, cell.engraveId, { gap });
+                part = r.part;
+                engraved = r.engraved;
+            }
+            const geometry = toGeometry(part);
+            geometry.userData = { engraved };
+            return geometry;
+        } finally {
+            if (part) part.delete();
+        }
     }
 
     /* World-space vector for a seam-plane point (seam from BigPrintCore.seamOf). */
@@ -487,10 +837,17 @@
                 { pos: pos.clone().addScaledVector(normal, -(opts.depth + wall)),
                   normal, shape: "circle", size: opts.size + 2 * wall,
                   depth: 2 * (opts.depth + wall), rotDeg: 0 });
-            const outside = probe.subtract(solid);
-            const fits = outside.numTri() === 0;
-            outside.delete();
-            probe.delete();
+            let fits;
+            try {
+                const outside = probe.subtract(solid);
+                try {
+                    fits = outside.numTri() === 0;
+                } finally {
+                    outside.delete();
+                }
+            } finally {
+                probe.delete();
+            }
             if (fits) kept.push(pos);
         }
         return kept;
@@ -510,44 +867,67 @@
             if (cell.in[axis + "0"]) seams.push({ axis, dir: -1 });
         }
         let out = part;
-        for (const { axis, dir } of seams) {
-            const seam = window.BigPrintCore.seamOf(cell, axis, dir);
-            const positions = placeSeamConnectors(solid, seam, conn);
-            if (!positions.length) continue;
-            const normal = new THREE.Vector3(...AXIS_DIR[axis]);
-            const g2 = (conn.gap || 0) / 2;
-            for (const pos of positions) {
-                let piece;
-                if (dir > 0) {
-                    // peg: stands on this part's face (gap/2 short of the
-                    // seam), reaches depth past the seam into the neighbor
-                    piece = buildConnectorSolid(
-                        { pos: pos.clone().addScaledVector(normal, -g2),
-                          normal, shape: conn.shape, size: conn.size,
-                          depth: conn.depth + g2, rotDeg: 0 });
-                    const touch = out.intersect(piece);
-                    const touches = touch.numTri() > 0;
-                    touch.delete();
-                    if (touches) {
-                        const grown = out.add(piece);
-                        out.delete();
-                        out = grown;
+        const owned = new Set();
+        let complete = false;
+        try {
+            for (const { axis, dir } of seams) {
+                const seam = window.BigPrintCore.seamOf(cell, axis, dir);
+                const positions = placeSeamConnectors(solid, seam, conn);
+                if (!positions.length) continue;
+                const normal = new THREE.Vector3(...AXIS_DIR[axis]);
+                const g2 = (conn.gap || 0) / 2;
+                for (const pos of positions) {
+                    let piece = null;
+                    try {
+                        if (dir > 0) {
+                            // peg: stands on this part's face (gap/2 short of the
+                            // seam), reaches depth past the seam into the neighbor
+                            piece = buildConnectorSolid(
+                                { pos: pos.clone().addScaledVector(normal, -g2),
+                                  normal, shape: conn.shape, size: conn.size,
+                                  depth: conn.depth + g2, rotDeg: 0 });
+                            const touch = out.intersect(piece);
+                            let touches;
+                            try {
+                                touches = touch.numTri() > 0;
+                            } finally {
+                                touch.delete();
+                            }
+                            if (touches) {
+                                const previous = out;
+                                out = previous.add(piece);
+                                owned.add(out);
+                                if (previous !== part) {
+                                    previous.delete();
+                                    owned.delete(previous);
+                                }
+                            }
+                        } else {
+                            // socket: the neighbor's peg, grown by the fit tolerance
+                            piece = buildConnectorSolid(
+                                { pos: pos.clone().addScaledVector(normal, -g2),
+                                  normal, shape: conn.shape, size: conn.size,
+                                  depth: conn.depth + g2, rotDeg: 0 },
+                                { r: (conn.tolR || 0) / 2, d: conn.tolD || 0 });
+                            const previous = out;
+                            out = previous.subtract(piece);
+                            owned.add(out);
+                            if (previous !== part) {
+                                previous.delete();
+                                owned.delete(previous);
+                            }
+                        }
+                    } finally {
+                        if (piece) piece.delete();
                     }
-                } else {
-                    // socket: the neighbor's peg, grown by the fit tolerance
-                    piece = buildConnectorSolid(
-                        { pos: pos.clone().addScaledVector(normal, -g2),
-                          normal, shape: conn.shape, size: conn.size,
-                          depth: conn.depth + g2, rotDeg: 0 },
-                        { r: (conn.tolR || 0) / 2, d: conn.tolD || 0 });
-                    const carved = out.subtract(piece);
-                    out.delete();
-                    out = carved;
                 }
-                piece.delete();
             }
+            if (out !== part) part.delete();
+            complete = true;
+            return out;
+        } finally {
+            if (!complete) for (const made of owned) made.delete();
         }
-        return out;
     }
 
     // ------------------------------------------------- Big Print engraving
@@ -607,18 +987,22 @@
         for (const poly of polys) for (const p of poly) { p[0] -= cx; p[1] -= cy; }
 
         const cross = new wasm.CrossSection(polys, "Positive");
-        const area = cross.area();
-        let prism = wasm.Manifold.extrude(cross, depth + 0.05);
-        cross.delete();
-
-        // extrusion runs 0..depth+0.05 along +z; place z=0 `depth` inside the
-        // surface so the solid ends 0.05 proud of the face
-        const m = new THREE.Matrix4()
-            .makeBasis(e1.clone().normalize(), e2.clone().normalize(), outward.clone().normalize())
-            .setPosition(pos.clone().addScaledVector(outward.clone().normalize(), -depth));
-        const placed = prism.transform(m.elements);
-        prism.delete();
-        return { solid: placed, area, width: maxX - minX };
+        try {
+            const area = cross.area();
+            const prism = wasm.Manifold.extrude(cross, depth + 0.05);
+            try {
+                // extrusion runs 0..depth+0.05 along +z; place z=0 `depth` inside the
+                // surface so the solid ends 0.05 proud of the face
+                const m = new THREE.Matrix4()
+                    .makeBasis(e1.clone().normalize(), e2.clone().normalize(), outward.clone().normalize())
+                    .setPosition(pos.clone().addScaledVector(outward.clone().normalize(), -depth));
+                return { solid: prism.transform(m.elements), area, width: maxX - minX };
+            } finally {
+                prism.delete();
+            }
+        } finally {
+            cross.delete();
+        }
     }
 
     /* Rough text width without building the solid (advance sum, a hair
@@ -643,112 +1027,145 @@
        returned when a placement genuinely landed on plastic. `part` is
        consumed and a new Manifold returned. opts = { gap, height?, depth? } */
     function engraveCellId(part, cell, id, opts) {
-        const font = window.HERSHEY_FONT;
-        const faces = [];
-        for (const axis of ["x", "y", "z"]) {
-            for (const dir of [+1, -1]) {
-                if (!cell.in[axis + (dir > 0 ? "1" : "0")]) continue;
-                const seam = window.BigPrintCore.seamOf(cell, axis, dir);
-                const du = seam.u.hi - seam.u.lo, dv = seam.v.hi - seam.v.lo;
-                faces.push({ seam, dir, du, dv, area: du * dv });
-            }
-        }
-        if (!faces.length || !font) return { part, engraved: false };
-        faces.sort((a, b) => b.area - a.area);
-        const depth = opts.depth || 0.6;
-        const g2 = (opts.gap || 0) / 2;
-        let probesLeft = 48; // depth-backing booleans, hard budget per part
-
-        for (const f of faces) {
-            const outward = new THREE.Vector3(...AXIS_DIR[f.seam.axis]).multiplyScalar(f.dir);
-            // text up = world up on vertical faces (x/z seams); on horizontal
-            // (y) seams the baseline runs along X
-            let e1, e2;
-            if (f.seam.axis === "y") {
-                e1 = new THREE.Vector3(1, 0, 0);
-                e2 = new THREE.Vector3().crossVectors(outward, e1);
-            } else {
-                e2 = new THREE.Vector3(0, 1, 0);
-                e1 = new THREE.Vector3().crossVectors(e2, outward);
-            }
-
-            // the part's REAL material footprint on this face: rotate so the
-            // face plane becomes z = h, slice just inside the surface.
-            // {e1, e2, outward} is right-handed, so rows(e1,e2,outward) is a
-            // pure rotation and slice (x, y) coordinates are (p·e1, p·e2).
-            const surfacePoint = seamPoint(f.seam, {
-                u: (f.seam.u.lo + f.seam.u.hi) / 2,
-                v: (f.seam.v.lo + f.seam.v.hi) / 2,
-            }).addScaledVector(outward, -g2);
-            const h = surfacePoint.dot(outward);
-            const rot = new THREE.Matrix4().makeBasis(e1, e2, outward).transpose();
-            const rotated = part.transform(rot.elements);
-            const cross = rotated.slice(h - 0.25);
-            rotated.delete();
-            if (!cross.toPolygons().length) { cross.delete(); continue; }
-
-            const maxH = Math.min(opts.height || 10, 0.35 * Math.min(f.du, f.dv));
-            for (const height of [maxH, 7, 5, 3.5]) {
-                if (height < 3 || height > maxH + 1e-9) continue;
-                const textW = estimateTextWidth(font, id, height);
-                const probeW = textW + 3, probeH = height + 3;
-
-                // two erosions of the footprint, tried in order:
-                //  1) half-diagonal — anywhere left fits the whole label, so
-                //     the first candidates on solid faces land immediately;
-                //  2) short-half — survivors trace thin strips' centerlines
-                //     (curved hull walls), where only the real box probe can
-                //     judge the fit.
-                const verts = [];
-                for (const d of [Math.hypot(probeW, probeH) / 2, probeH / 2 + 0.5]) {
-                    const eroded = cross.offset(-d, "Round");
-                    const polys = eroded.toPolygons();
-                    if (!polys.length) { eroded.delete(); continue; }
-                    const b = eroded.bounds();
-                    const mid = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2];
-                    eroded.delete();
-                    verts.push(...polys.flat()
-                        .sort((p, q) => (p[0] - mid[0]) ** 2 + (p[1] - mid[1]) ** 2
-                            - ((q[0] - mid[0]) ** 2 + (q[1] - mid[1]) ** 2))
-                        .slice(0, 6));
+        const input = part;
+        let keepPart = false;
+        const finish = (result) => { keepPart = true; return result; };
+        try {
+            const font = window.HERSHEY_FONT;
+            const faces = [];
+            for (const axis of ["x", "y", "z"]) {
+                for (const dir of [+1, -1]) {
+                    if (!cell.in[axis + (dir > 0 ? "1" : "0")]) continue;
+                    const seam = window.BigPrintCore.seamOf(cell, axis, dir);
+                    const du = seam.u.hi - seam.u.lo, dv = seam.v.hi - seam.v.lo;
+                    faces.push({ seam, dir, du, dv, area: du * dv });
                 }
-                if (!verts.length) continue;
+            }
+            if (!faces.length || !font) return finish({ part, engraved: false });
+            faces.sort((a, b) => b.area - a.area);
+            const depth = opts.depth || 0.6;
+            const g2 = (opts.gap || 0) / 2;
+            let probesLeft = 48; // depth-backing booleans, hard budget per part
 
-                for (const [a, bV] of verts) {
-                    if (probesLeft-- <= 0) break;
-                    const pos = new THREE.Vector3()
-                        .addScaledVector(e1, a).addScaledVector(e2, bV)
-                        .addScaledVector(outward, h);
-                    // one boolean check: the slice proves the footprint, this
-                    // proves the 0.6 mm of DEPTH behind it (thin shells)
-                    const inward = outward.clone().negate();
-                    const m = new THREE.Matrix4().makeBasis(e1, e2, inward)
-                        .setPosition(pos.clone()
-                            .addScaledVector(e1, -probeW / 2)
-                            .addScaledVector(e2, -probeH / 2)
-                            .addScaledVector(inward, 0.05));
-                    let probe = wasm.Manifold.cube([probeW, probeH, depth + 1]);
-                    const placed = probe.transform(m.elements);
-                    probe.delete();
-                    const leak = placed.subtract(part);
-                    const fits = leak.numTri() === 0;
-                    leak.delete();
-                    placed.delete();
-                    if (!fits) continue;
+            for (const f of faces) {
+                const outward = new THREE.Vector3(...AXIS_DIR[f.seam.axis]).multiplyScalar(f.dir);
+                // text up = world up on vertical faces (x/z seams); on horizontal
+                // (y) seams the baseline runs along X
+                let e1, e2;
+                if (f.seam.axis === "y") {
+                    e1 = new THREE.Vector3(1, 0, 0);
+                    e2 = new THREE.Vector3().crossVectors(outward, e1);
+                } else {
+                    e2 = new THREE.Vector3(0, 1, 0);
+                    e1 = new THREE.Vector3().crossVectors(e2, outward);
+                }
 
+                // the part's REAL material footprint on this face: rotate so the
+                // face plane becomes z = h, slice just inside the surface.
+                // {e1, e2, outward} is right-handed, so rows(e1,e2,outward) is a
+                // pure rotation and slice (x, y) coordinates are (p·e1, p·e2).
+                const surfacePoint = seamPoint(f.seam, {
+                    u: (f.seam.u.lo + f.seam.u.hi) / 2,
+                    v: (f.seam.v.lo + f.seam.v.hi) / 2,
+                }).addScaledVector(outward, -g2);
+                const h = surfacePoint.dot(outward);
+                const rot = new THREE.Matrix4().makeBasis(e1, e2, outward).transpose();
+                const rotated = part.transform(rot.elements);
+                let cross;
+                try {
+                    cross = rotated.slice(h - 0.25);
+                } finally {
+                    rotated.delete();
+                }
+                try {
+                    if (!cross.toPolygons().length) continue;
+
+                    const maxH = Math.min(opts.height || 10, 0.35 * Math.min(f.du, f.dv));
+                    for (const height of [maxH, 7, 5, 3.5]) {
+                        if (height < 3 || height > maxH + 1e-9) continue;
+                        const textW = estimateTextWidth(font, id, height);
+                        const probeW = textW + 3, probeH = height + 3;
+
+                        // two erosions of the footprint, tried in order:
+                        //  1) half-diagonal — anywhere left fits the whole label, so
+                        //     the first candidates on solid faces land immediately;
+                        //  2) short-half — survivors trace thin strips' centerlines
+                        //     (curved hull walls), where only the real box probe can
+                        //     judge the fit.
+                        const verts = [];
+                        for (const d of [Math.hypot(probeW, probeH) / 2, probeH / 2 + 0.5]) {
+                            const eroded = cross.offset(-d, "Round");
+                            try {
+                                const polys = eroded.toPolygons();
+                                if (!polys.length) continue;
+                                const b = eroded.bounds();
+                                const mid = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2];
+                                verts.push(...polys.flat()
+                                    .sort((p, q) => (p[0] - mid[0]) ** 2 + (p[1] - mid[1]) ** 2
+                                        - ((q[0] - mid[0]) ** 2 + (q[1] - mid[1]) ** 2))
+                                    .slice(0, 6));
+                            } finally {
+                                eroded.delete();
+                            }
+                        }
+                        if (!verts.length) continue;
+
+                        for (const [a, bV] of verts) {
+                            if (probesLeft-- <= 0) break;
+                            const pos = new THREE.Vector3()
+                                .addScaledVector(e1, a).addScaledVector(e2, bV)
+                                .addScaledVector(outward, h);
+                            // one boolean check: the slice proves the footprint, this
+                            // proves the 0.6 mm of DEPTH behind it (thin shells)
+                            const inward = outward.clone().negate();
+                            const m = new THREE.Matrix4().makeBasis(e1, e2, inward)
+                                .setPosition(pos.clone()
+                                    .addScaledVector(e1, -probeW / 2)
+                                    .addScaledVector(e2, -probeH / 2)
+                                    .addScaledVector(inward, 0.05));
+                            const probe = wasm.Manifold.cube([probeW, probeH, depth + 1]);
+                            let placed;
+                            try {
+                                placed = probe.transform(m.elements);
+                            } finally {
+                                probe.delete();
+                            }
+                            let fits;
+                            try {
+                                const leak = placed.subtract(part);
+                                try {
+                                    fits = leak.numTri() === 0;
+                                } finally {
+                                    leak.delete();
+                                }
+                            } finally {
+                                placed.delete();
+                            }
+                            if (!fits) continue;
+
+                            const label = buildTextSolid(font, id,
+                                { height, depth, pos, e1, e2, outward });
+                            if (!label) return finish({ part, engraved: false });
+                            let carved;
+                            try {
+                                carved = part.subtract(label.solid);
+                            } finally {
+                                label.solid.delete();
+                            }
+                            const previous = part;
+                            part = carved;
+                            previous.delete();
+                            return finish({ part, engraved: true, area: label.area, depth, height });
+                        }
+                    }
+                } finally {
                     cross.delete();
-                    const label = buildTextSolid(font, id,
-                        { height, depth, pos, e1, e2, outward });
-                    if (!label) return { part, engraved: false };
-                    const carved = part.subtract(label.solid);
-                    label.solid.delete();
-                    part.delete();
-                    return { part: carved, engraved: true, area: label.area, depth, height };
                 }
             }
-            cross.delete();
+            return finish({ part, engraved: false }); // nowhere to land it — manifest says so
+        } finally {
+            if (!keepPart && part !== input) part.delete();
         }
-        return { part, engraved: false }; // nowhere to land it — manifest says so
     }
 
     /* Reduce triangle count within a geometric tolerance (mm). Throws
@@ -760,11 +1177,16 @@
         } catch (err) {
             throw new Error("not-watertight");
         }
-        const slim = solid.simplify(tolerance);
-        const out = toGeometry(slim);
-        slim.delete();
-        solid.delete();
-        return out;
+        try {
+            const slim = solid.simplify(tolerance);
+            try {
+                return toGeometry(slim);
+            } finally {
+                slim.delete();
+            }
+        } finally {
+            solid.delete();
+        }
     }
 
     /* Reduce toward a target triangle count (not a fixed tolerance), so
@@ -779,23 +1201,25 @@
             throw new Error("not-watertight");
         }
         const original = current;
-        geometry.computeBoundingBox();
-        const size = new THREE.Vector3();
-        geometry.boundingBox.getSize(size);
-        const diag = size.length();
+        try {
+            geometry.computeBoundingBox();
+            const size = new THREE.Vector3();
+            geometry.boundingBox.getSize(size);
+            const diag = size.length();
 
-        let eps = diag * 2e-6;
-        const epsMax = diag * 0.01;
-        for (let i = 0; current.numTri() > targetTris && eps < epsMax && i < 24; i++) {
-            const next = current.simplify(eps);
+            let eps = diag * 2e-6;
+            const epsMax = diag * 0.01;
+            for (let i = 0; current.numTri() > targetTris && eps < epsMax && i < 24; i++) {
+                const next = current.simplify(eps);
+                if (current !== original) current.delete();
+                current = next;
+                eps *= 1.7;
+            }
+            return toGeometry(current);
+        } finally {
             if (current !== original) current.delete();
-            current = next;
-            eps *= 1.7;
+            original.delete();
         }
-        const out = toGeometry(current);
-        if (current !== original) current.delete();
-        original.delete();
-        return out;
     }
 
     // signed volume of a geometry, indexed or not (for tests / sanity checks)
@@ -818,7 +1242,8 @@
     window.CutCore = {
         init,
         isReady: () => !!wasm,
-        weldGeometry, toManifold, toGeometry, isWatertight, repairGeometry,
+        weldGeometry, findBoundaryLoops, capBoundaryLoops,
+        toManifold, toGeometry, isWatertight, repairGeometry,
         sampleSpline, buildCutter, cutWithCutter, cutGeometries,
         buildPlanarCutter, buildDovetailCutter, dovetailEdgeY,
         buildConnectorSolid, cutGridCell, placeSeamConnectors, applyCellConnectors,

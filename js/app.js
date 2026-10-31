@@ -46,6 +46,8 @@
         }
         document.body.setAttribute("data-theme", dark ? "dark" : "light");
         try { localStorage.setItem(THEME_KEY, dark ? "dark" : "light"); } catch (_) {}
+        // "pressed" = dark mode on, matching the sun icon shown to switch to light
+        themeBtn.setAttribute("aria-pressed", dark ? "true" : "false");
 
         const metaTheme = document.querySelector('meta[name="theme-color"]');
         if (metaTheme) metaTheme.content = dark ? "#000000" : "#f5f5f7";
@@ -84,7 +86,7 @@
         if (animate) {
             gsap.fromTo(themeIcon,
                 { rotation: 0, scale: 0.8 },
-                { rotation: 360, scale: 1, duration: 0.6, ease: "power2.out" });
+                { rotation: 360, scale: 1, duration: window.CurveCut.a11y.dur(0.6), ease: "power2.out" });
         }
     };
 
@@ -163,13 +165,22 @@
     const pieces = [];      // THREE.Mesh list — starts as [whole STL], grows with cuts
     let fitDist = 120;      // camera distance that frames the model
     let modelCenter = new THREE.Vector3(0, 10, 0);
+    let repairCacheSerial = 0;
 
     function clearPieces() {
+        const materials = new Set();
         for (const p of pieces) {
             scene.remove(p);
             p.geometry.dispose();
+            materials.add(p.material);
         }
         pieces.length = 0;
+        // history clears on the model-loaded event just after this; leave its
+        // shared materials for that sweep, and dispose each live-only one once
+        for (const material of materials) {
+            if (!window.CurveCut.history || !window.CurveCut.history.isMaterialReferenced ||
+                !window.CurveCut.history.isMaterialReferenced(material)) material.dispose();
+        }
     }
 
     /* OBJ/3MF loaders return a Group (possibly nested, possibly transformed
@@ -223,7 +234,7 @@
                 toast(`No printable mesh found in that ${ext.toUpperCase()}.`);
                 return;
             }
-            loadGeometry(geometry, file.name);
+            loadGeometry(geometry, file.name, { upAxis: ext === "obj" ? "y" : "z" });
         }).catch((err) => {
             // arrayBuffer() itself can reject (file moved/locked mid-read)
             console.error("file read failed:", err);
@@ -233,7 +244,14 @@
 
     /* Shared entry for STL loads and test harnesses: takes a Y-up geometry,
        centers it on the floor, and makes it the scene's single piece. */
-    function loadGeometry(geometry, name) {
+    function loadGeometry(geometry, name, options = {}) {
+        // a cut/simplify/export in flight owns the piece set — replacing the
+        // model under it would commit results onto a corpse
+        if (window.CurveCut.ops && window.CurveCut.ops.busy()) {
+            geometry.dispose();
+            toast("An operation is still running — load the new model when it finishes.");
+            return;
+        }
         // reject junk BEFORE nuking the current scene: NaN/Inf coordinates
         // poison every boolean downstream, and an empty bbox means no mesh
         geometry.computeBoundingBox();
@@ -263,26 +281,205 @@
             geometry.deleteAttribute("normal");
         }
 
-        geometry.computeBoundingBox();
-        const bb = geometry.boundingBox;
-        const size = new THREE.Vector3();
-        bb.getSize(size);
-
-        // Center on origin, seat the lowest point on the grid floor.
-        geometry.translate(
-            -(bb.min.x + bb.max.x) / 2,
-            -bb.min.y,
-            -(bb.min.z + bb.max.z) / 2
-        );
-
         const model = new THREE.Mesh(geometry, meshMaterial.clone());
         model.name = name.replace(/\.(stl|obj|3mf)$/i, "");
+        model.userData.sourceName = name;
         scene.add(model);
         pieces.push(model);
+        recenterAndRefresh(model);
+        revealWorkspace();
+        window.dispatchEvent(new CustomEvent("curvecut:pieces-changed",
+            { detail: { source: "load" } }));
+        if (window.CurveCut.units) window.CurveCut.units.modelLoaded(options);
+        scheduleWatertightCheck(model);
+    }
 
+    function repairMessage(result) {
+        if (result.method === "cap") {
+            const holes = result.loops;
+            return `Closed ${holes} open hole${holes === 1 ? "" : "s"} — the model is now watertight. (⌘Z to undo)`;
+        }
+        return `Small gaps repaired — vertices welded within ${result.tol} mm.`;
+    }
+
+    function swapRepair(model, result, computeCache = null) {
+        let geometry = null;
+        try {
+            geometry = new THREE.BufferGeometry();
+            geometry.setAttribute("position", new THREE.BufferAttribute(result.vertProperties, 3));
+            geometry.setIndex(new THREE.BufferAttribute(result.triVerts, 1));
+            const next = new THREE.Mesh(geometry, model.material);
+            next.name = model.name;
+            next.visible = model.visible;
+            next.userData = Object.assign({}, model.userData);
+            // Big Print is the one flow allowed to leave mesh scale above 1×; preserve it across the swap.
+            next.position.copy(model.position);
+            next.rotation.copy(model.rotation);
+            next.scale.copy(model.scale);
+            if (result.method === "cap") {
+                next.userData.capRepair = { loops: result.loops };
+            } else {
+                delete next.userData.capRepair;
+            }
+
+            const index = window.CurveCut.pieces.indexOf(model);
+            if (index < 0) return false;
+            window.CurveCut.history.capture();
+            scene.remove(model);
+            scene.add(next);
+            window.CurveCut.pieces.splice(index, 1, next);
+            geometry = null;
+            const detail = { source: "repair" };
+            if (computeCache) {
+                detail.computeCache = Object.assign({}, computeCache, {
+                    model: next, geometry: next.geometry,
+                });
+            }
+            window.dispatchEvent(new CustomEvent("curvecut:pieces-changed",
+                { detail }));
+            return true;
+        } finally {
+            if (geometry) geometry.dispose();
+        }
+    }
+
+    function runRepair(model, automatic = false) {
+        // a stale button or auto-check must not repair a replaced piece
+        if (pieces[0] !== model) return;
+        const ops = window.CurveCut.ops;
+        // do not overlap an operation that owns the live piece set
+        if (!ops || ops.busy()) {
+            if (!automatic) toast("An operation is still running — repair when it finishes.");
+            return;
+        }
+
+        const op = ops.begin("repair");
+        if (!op) {
+            if (!automatic) toast("Another operation is still running — one moment.");
+            return;
+        }
+        const compute = window.CurveCut.compute;
+        let directEngineStarting = false;
+        const run = async () => {
+            try {
+                if (!op.alive() || pieces[0] !== model) return;
+
+                let result;
+                let computeCache = null;
+                if (compute && !compute.degraded) {
+                    progress.show("Checking the mesh…");
+                    const payload = await compute.geometryPayloadAsync(model.geometry);
+                    if (!op.alive() || pieces[0] !== model) return;
+                    payload.checkWatertight = true;
+                    const primeToken = `hollow-repair-${++repairCacheSerial}`;
+                    payload.primeToken = primeToken;
+                    result = await compute.run("repairGeometry", payload, {
+                        transfer: [payload.vertProperties.buffer, payload.triVerts.buffer],
+                        onProgress: (message) => {
+                            progress.update("Checking the mesh…", message && message.fraction);
+                        },
+                    });
+                    if (!op.alive() || pieces[0] !== model) {
+                        if (!compute.degraded) {
+                            try { compute.run("release", { token: primeToken }); } catch (_) {}
+                        }
+                        return;
+                    }
+                    if (result && result.watertight) {
+                        window.dispatchEvent(new CustomEvent("curvecut:repair-cache", {
+                            detail: {
+                                model, geometry: model.geometry, scale: 1,
+                                token: primeToken, worker: compute._worker,
+                                primeReady: result.primeReady === true,
+                            },
+                        }));
+                        if (!automatic) toast("Mesh is already watertight — nothing to repair.");
+                        return;
+                    }
+                    computeCache = {
+                        token: primeToken, worker: compute._worker, scale: 1,
+                        primeReady: result && result.primeReady === true,
+                    };
+                } else {
+                    directEngineStarting = true;
+                    await CutCore.init();
+                    directEngineStarting = false;
+                    if (!op.alive() || pieces[0] !== model) return;
+                    if (!automatic) {
+                        progress.show("Checking the mesh…");
+                        if (CutCore.isWatertight(model.geometry)) {
+                            progress.hide();
+                            toast("Mesh is already watertight — nothing to repair.");
+                            return;
+                        }
+                    } else if (CutCore.isWatertight(model.geometry)) {
+                        return;
+                    }
+                    result = CutCore.repairGeometry(model.geometry);
+                }
+
+                progress.show("This mesh has gaps — attempting a repair…");
+                if (!op.alive() || pieces[0] !== model) return;
+                if (!result) {
+                    toast("This mesh has damage the repair tool can't fix yet — cutting will warn before proceeding.");
+                    return;
+                }
+
+                if (!window.CurveCut.repair.swapIn(model, result, computeCache)) {
+                    if (computeCache && compute && !compute.degraded) {
+                        try { compute.run("release", { token: computeCache.token }); } catch (_) {}
+                    }
+                    return;
+                }
+                toast(window.CurveCut.repair.message(result));
+            } catch (err) {
+                console.error("Repair failed:", err);
+                toast(directEngineStarting
+                    ? "The cutting engine failed to start — the model was not changed."
+                    : "Repair failed — the model was not changed.");
+            } finally {
+                ops.end(op);
+                progress.hide();
+            }
+        };
+        setTimeout(run, 60);
+    }
+
+    /* v1.6: OBJ/3MF (and sloppy STL) files often have hairline seams. Check
+       once after load; the repair ladder reports whether it welded or capped
+       the mesh, and leaves whatever it cannot fix for the cutting warning. */
+    function scheduleWatertightCheck(model) {
+        if (!window.CutCore) return;
+        setTimeout(() => {
+            if (pieces[0] !== model) return; // replaced in the meantime
+            runRepair(model, true);
+        }, 400);
+    }
+
+    function niceSpan(raw) {
+        const steps = [10, 20, 50, 100, 200, 400, 800, 1600, 3200];
+        return steps.find((s) => s >= raw) || Math.ceil(raw / 1000) * 1000;
+    }
+
+    /* Shared after-load/after-rescale path: floor-seat, then update every
+       viewport measurement derived from the model's bounding box. */
+    function recenterAndRefresh(model, options = {}) {
+        const geometry = model.geometry;
+        geometry.computeBoundingBox();
+        let bb = geometry.boundingBox;
+        if (options.recenter !== false) {
+            geometry.translate(
+                -(bb.min.x + bb.max.x) / 2,
+                -bb.min.y,
+                -(bb.min.z + bb.max.z) / 2
+            );
+            geometry.computeBoundingBox();
+            bb = geometry.boundingBox;
+        }
+        const size = new THREE.Vector3();
+        bb.getSize(size);
         gridSpan = niceSpan(Math.max(size.x, size.z) * 2.5);
         rebuildGrid();
-
         modelCenter = new THREE.Vector3(0, size.y / 2, 0);
         const radius = size.length() / 2;
         fitDist = radius / Math.tan((camera.fov * Math.PI / 180) / 2) * 1.35;
@@ -290,46 +487,10 @@
         camera.far = fitDist * 50;
         camera.updateProjectionMatrix();
         flyTo(new THREE.Vector3(1, 0.55, 1).normalize());
-
         const index = geometry.getIndex();
         const tris = (index ? index.count : geometry.attributes.position.count) / 3;
-        showStats(name, tris, size);
-        revealWorkspace();
-        window.dispatchEvent(new CustomEvent("curvecut:pieces-changed"));
-        if (tris <= 500000) scheduleWatertightCheck(model);
-        // heavier meshes hit the simplify offer first; its own flow reports leaks
-    }
-
-    /* v1.6: OBJ/3MF (and sloppy STL) files often have hairline seams. Check
-       once after load; when a coarser weld closes the mesh, swap it in and
-       say so — when nothing helps, say that too (cuts will refuse it later). */
-    function scheduleWatertightCheck(model) {
-        if (!window.CutCore) return;
-        CutCore.init().then(() => setTimeout(() => {
-            if (pieces[0] !== model) return; // replaced in the meantime
-            if (CutCore.isWatertight(model.geometry)) return;
-            progress.show("This mesh has gaps — attempting a repair…");
-            setTimeout(() => {
-                const r = CutCore.repairGeometry(model.geometry);
-                progress.hide();
-                if (pieces[0] !== model) return;
-                if (r) {
-                    const g = new THREE.BufferGeometry();
-                    g.setAttribute("position", new THREE.BufferAttribute(r.vertProperties, 3));
-                    g.setIndex(new THREE.BufferAttribute(r.triVerts, 1));
-                    model.geometry.dispose();
-                    model.geometry = g;
-                    toast(`Small gaps repaired — vertices welded within ${r.tol} mm.`);
-                } else {
-                    toast("This model isn't watertight and couldn't be auto-repaired — cutting will refuse it.");
-                }
-            }, 60);
-        }, 400));
-    }
-
-    function niceSpan(raw) {
-        const steps = [10, 20, 50, 100, 200, 400, 800, 1600, 3200];
-        return steps.find((s) => s >= raw) || Math.ceil(raw / 1000) * 1000;
+        showStats(model.userData.sourceName || model.name, tris, size);
+        return size;
     }
 
     // ------------------------------------------------------------ snap views
@@ -404,13 +565,48 @@
 
     const heroOverlay = document.getElementById("hero-overlay");
     const statsChip = document.getElementById("stats-chip");
+    const statsReset = document.getElementById("stats-reset");
+    const statsRepair = document.getElementById("stats-repair");
+
+    function updateStatsResetVisibility() {
+        const single = pieces.length === 1;
+        statsReset.hidden = !(single && pieces[0].userData.bakedScale);
+        statsRepair.hidden = !single;
+    }
 
     function showStats(name, tris, size) {
         document.getElementById("stats-name").textContent = name;
-        document.getElementById("stats-detail").textContent =
+        let detail =
             `${Math.round(tris).toLocaleString()} triangles · ` +
             `${size.x.toFixed(1)} × ${size.z.toFixed(1)} × ${size.y.toFixed(1)} mm`;
+        const bakedScale = pieces[0] && pieces[0].userData.bakedScale;
+        if (Math.abs(bakedScale - 1) > 1e-9) {
+            detail += ` · ${window.BigPrintCore.bakedScaleLabel(bakedScale)}`;
+        }
+        const capRepair = pieces[0] && pieces[0].userData.capRepair;
+        if (capRepair) detail += ` · ${capRepair.loops} hole${capRepair.loops === 1 ? "" : "s"} capped`;
+        document.getElementById("stats-detail").textContent = detail;
+        updateStatsResetVisibility();
     }
+
+    function refreshStatsForModel(model) {
+        model.geometry.computeBoundingBox();
+        const size = new THREE.Vector3();
+        model.geometry.boundingBox.getSize(size);
+        const index = model.geometry.getIndex();
+        const tris = (index ? index.count : model.geometry.attributes.position.count) / 3;
+        showStats(model.userData.sourceName || model.name, tris, size);
+    }
+
+    window.addEventListener("curvecut:pieces-changed", () => {
+        if (pieces.length === 1) refreshStatsForModel(pieces[0]);
+        else updateStatsResetVisibility();
+    });
+
+    statsRepair.addEventListener("click", () => {
+        if (pieces.length !== 1) return;
+        runRepair(pieces[0]);
+    });
 
     let workspaceRevealed = false;
     function revealWorkspace() {
@@ -429,6 +625,10 @@
 
     /* Back to the empty state — new model, no page reload needed. */
     function startNew() {
+        if (window.CurveCut.ops && window.CurveCut.ops.busy()) {
+            toast("An operation is still running — one moment.");
+            return;
+        }
         clearPieces();
         window.dispatchEvent(new CustomEvent("curvecut:model-loaded"));   // clears spline/preview
         window.dispatchEvent(new CustomEvent("curvecut:pieces-changed")); // hides the panel
@@ -448,15 +648,26 @@
         tl.restart();
     }
 
+    // persistent aria-live region: screen readers announce text changes here
+    // reliably, unlike a freshly-inserted node carrying its own aria-live
+    const toastLive = document.createElement("div");
+    toastLive.id = "toast-live";
+    toastLive.className = "sr-only";
+    toastLive.setAttribute("role", "status");
+    toastLive.setAttribute("aria-live", "polite");
+    document.body.appendChild(toastLive);
+
     function toast(message) {
+        toastLive.textContent = message;
         const el = document.createElement("div");
-        el.className = "stats-chip glass";
+        el.className = "stats-chip toast glass";
         el.style.cssText = "left: 50%; transform: translateX(-50%); bottom: 84px; visibility: visible; z-index: 160;";
         el.innerHTML = `<span class="stats-name"></span>`;
         el.querySelector(".stats-name").textContent = message;
         document.body.appendChild(el);
-        gsap.fromTo(el, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.5, ease: "power4.out" });
-        gsap.to(el, { opacity: 0, duration: 0.5, delay: 3, onComplete: () => el.remove() });
+        const d = window.CurveCut.a11y ? window.CurveCut.a11y.dur(0.5) : 0.5;
+        gsap.fromTo(el, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: d, ease: "power4.out" });
+        gsap.to(el, { opacity: 0, duration: d, delay: 3, onComplete: () => el.remove() });
     }
 
     document.getElementById("logo-refresh").addEventListener("click", (e) => {
@@ -469,28 +680,152 @@
 
     const progressPill = document.getElementById("progress-pill");
     const progressLabel = document.getElementById("progress-label");
+    const progressEta = document.getElementById("progress-eta");
     const progressTrack = progressPill.querySelector(".progress-track");
     const progressFill = document.getElementById("progress-fill");
+
+    // Deliberately padded so real work tends to finish before the estimate.
+    const PADDED_ETA_SECONDS = Object.freeze({
+        repair: 30,
+        "repair-prime": 45,
+        "hollow-prep": 45,
+        "bigprint-warm": 45,
+        hollow: 120,
+        "cut-preview": 45,
+        cut: 45,
+        simplify: 60,
+        export: 45,
+        bigprint: 120,
+        units: 30,
+        orientation: 30,
+        calibration: 30,
+    });
+
+    let progressState = null;
+    let progressEtaTimer = null;
+
+    function motionDuration(seconds) {
+        const a11y = window.CurveCut && window.CurveCut.a11y;
+        return a11y ? a11y.dur(seconds) : seconds;
+    }
+
+    function currentOperation() {
+        const ops = window.CurveCut && window.CurveCut.ops;
+        return ops && typeof ops.busyName === "function" ? ops.busyName() : null;
+    }
+
+    function estimateFor(operation, label) {
+        if (operation && PADDED_ETA_SECONDS[operation]) return PADDED_ETA_SECONDS[operation];
+        const text = `${operation || ""} ${label || ""}`.toLowerCase();
+        if (text.includes("hollow")) return PADDED_ETA_SECONDS.hollow;
+        if (text.includes("repair")) return PADDED_ETA_SECONDS.repair;
+        if (text.includes("cut")) return PADDED_ETA_SECONDS.cut;
+        if (text.includes("simpl")) return PADDED_ETA_SECONDS.simplify;
+        if (text.includes("export") || text.includes("zip")) return PADDED_ETA_SECONDS.export;
+        return 30;
+    }
+
+    function formatEta(seconds) {
+        if (seconds < 60) return `~${Math.max(1, Math.ceil(seconds))} sec left`;
+        return `~${Math.ceil(seconds / 60)} min left`;
+    }
+
+    function motionAllowed() {
+        const a11y = window.CurveCut && window.CurveCut.a11y;
+        return !a11y || typeof a11y.motionOK !== "function" || a11y.motionOK();
+    }
+
+    function refreshEta() {
+        if (!progressState) return;
+        clearTimeout(progressEtaTimer);
+        const elapsed = (performance.now() - progressState.startedAt) / 1000;
+        const remaining = progressState.estimate - elapsed;
+        progressEta.textContent = progressState.fraction === 1
+            ? "Finishing…" : remaining > 0 ? formatEta(remaining) : "Still working…";
+        if (!motionAllowed()) return;
+        progressEtaTimer = setTimeout(refreshEta, 1000);
+    }
+
+    function stopEtaTimer() {
+        clearTimeout(progressEtaTimer);
+        progressEtaTimer = null;
+    }
+
+    function revealProgress() {
+        gsap.killTweensOf(progressPill);
+        progressPill.setAttribute("aria-hidden", "false");
+        gsap.to(progressPill, {
+            autoAlpha: 1, y: 0, duration: motionDuration(0.3), ease: "power2.out",
+        });
+    }
+
+    function updateProgressState(label, frac) {
+        const text = label || "Working…";
+        const numeric = frac === null || frac === undefined ? null : Number(frac);
+        const fraction = Number.isFinite(numeric)
+            ? Math.max(0, Math.min(1, numeric)) : null;
+        progressLabel.textContent = text;
+        progressTrack.classList.toggle("indeterminate", fraction === null);
+        if (fraction === null) {
+            progressFill.style.width = "";
+            progressTrack.removeAttribute("aria-valuenow");
+            progressTrack.setAttribute("aria-valuetext", "Working");
+        } else {
+            const percent = Math.round(fraction * 100);
+            progressFill.style.width = `${percent}%`;
+            progressTrack.setAttribute("aria-valuenow", String(percent));
+            progressTrack.setAttribute("aria-valuetext", `${percent}% complete`);
+        }
+        if (progressState) {
+            progressState.fraction = fraction;
+            refreshEta();
+        }
+    }
 
     /* frac: 0..1 for a real bar, null for indeterminate shimmer. */
     const progress = {
         show(label) {
-            progress.update(label, null);
-            gsap.to(progressPill, { autoAlpha: 1, y: 0, duration: 0.3, ease: "power2.out" });
+            stopEtaTimer();
+            const operation = currentOperation();
+            progressState = {
+                operation,
+                estimate: estimateFor(operation, label),
+                startedAt: performance.now(),
+                fraction: null,
+            };
+            progressPill.setAttribute("aria-busy", "true");
+            updateProgressState(label, null);
+            revealProgress();
+            refreshEta();
         },
         update(label, frac) {
-            progressLabel.textContent = label;
-            const indeterminate = frac === null || frac === undefined;
-            progressTrack.classList.toggle("indeterminate", indeterminate);
-            if (!indeterminate) progressFill.style.width = `${Math.round(frac * 100)}%`;
+            if (!progressState) {
+                progress.show(label);
+            }
+            updateProgressState(label, frac);
+            revealProgress();
         },
         hide() {
-            gsap.to(progressPill, { autoAlpha: 0, duration: 0.3, ease: "power2.out" });
+            stopEtaTimer();
+            progressState = null;
+            progressPill.setAttribute("aria-busy", "false");
+            progressPill.setAttribute("aria-hidden", "true");
+            gsap.killTweensOf(progressPill);
+            gsap.to(progressPill, {
+                autoAlpha: 0, duration: motionDuration(0.3), ease: "power2.out",
+            });
         },
     };
 
+    window.addEventListener("curvecut:op-ended", (event) => {
+        if (!progressState) return;
+        const ended = event.detail && event.detail.name;
+        if (!ended || ended === progressState.operation) progress.hide();
+    });
+
     // Shared surface for the other modules (pen tool, cut engine).
     window.CurveCut = {
+        VERSION: "2.0.2b",
         scene, camera, controls, renderer, canvas,
         drawActive: false,
         spline: null,
@@ -503,9 +838,44 @@
         baseMaterial: meshMaterial,
         toast,
         showStats,
+        repair: { message: repairMessage, swapIn: swapRepair },
         loadGeometry,
+        scheduleWatertightCheck,
+        recenterAndRefresh,
         progress,
     };
+
+    const PILL_OPERATION_LABELS = Object.freeze({
+        repair: "Working on the mesh…",
+        "repair-prime": "Preparing hollow…",
+        hollow: "Hollowing the model…",
+        "cut-preview": "Previewing the cut…",
+        cut: "Cutting the model…",
+        simplify: "Simplifying the model…",
+        export: "Preparing the export…",
+        bigprint: "Preparing Big Print…",
+        "hollow-prep": "Preparing hollow…",
+        "bigprint-warm": "Preparing Big Print…",
+        units: "Updating units…",
+        orientation: "Reorienting the model…",
+        calibration: "Calibrating the model…",
+    });
+
+    function installOpsProgressHook() {
+        const ops = window.CurveCut && window.CurveCut.ops;
+        if (!ops || typeof ops.begin !== "function" || ops.begin.progressHooked) return;
+        const begin = ops.begin;
+        const hookedBegin = function (name) {
+            const token = begin.apply(this, arguments);
+            if (token && PILL_OPERATION_LABELS[name]) progress.show(PILL_OPERATION_LABELS[name]);
+            return token;
+        };
+        hookedBegin.progressHooked = true;
+        ops.begin = hookedBegin;
+    }
+
+    setTimeout(installOpsProgressHook, 0);
+    window.addEventListener("load", installOpsProgressHook);
 
     // ------------------------------------------------------------- entrance
 

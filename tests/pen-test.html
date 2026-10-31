@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../js/pen-core.js"></script>
+<script>
+/* Headless tests for the v1.1 pen math. Run via tools/check_pen.py.
+   Result in document.title: "PASS" or "FAIL: <reason>". */
+(() => {
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+    const V = (x, y, z) => new THREE.Vector3(x, y, z);
+    const pt = (x, y, z) => ({ a: V(x, y, z), hIn: null, hOut: null, corner: false, custom: false });
+
+    try {
+        const Pen = window.PenCore;
+
+        // --- auto-smooth: middle point of a bend gets tangent-aligned handles
+        const pts = [pt(0, 0, 0), pt(10, 5, 0), pt(20, 0, 0)];
+        Pen.refreshAutoHandles(pts);
+        const mid = pts[1];
+        check("auto handles exist on middle point", !!(mid.hIn && mid.hOut));
+        if (mid.hIn && mid.hOut) {
+            // handles must be collinear through the anchor (smooth, no kink)
+            const din = mid.a.clone().sub(mid.hIn).normalize();
+            const dout = mid.hOut.clone().sub(mid.a).normalize();
+            check("auto handles are collinear (no kink)", din.dot(dout) > 0.999,
+                din.dot(dout).toFixed(5));
+            // tangent parallels the neighbor chord (Catmull-Rom style)
+            const chord = pts[2].a.clone().sub(pts[0].a).normalize();
+            check("tangent follows neighbor chord", Math.abs(dout.dot(chord)) > 0.999);
+        }
+        check("endpoints have one-sided handles", pts[0].hIn === null && !!pts[0].hOut
+            && pts[2].hOut === null && !!pts[2].hIn);
+
+        // --- corner flag wins over auto-smoothing
+        pts[1].corner = true;
+        Pen.refreshAutoHandles(pts);
+        check("corner point has no handles", pts[1].hIn === null && pts[1].hOut === null);
+        pts[1].corner = false;
+
+        // --- custom handles survive refresh
+        Pen.refreshAutoHandles(pts);
+        const bespoke = V(10, 9, 0);
+        pts[1].custom = true;
+        pts[1].hOut = bespoke.clone();
+        Pen.refreshAutoHandles(pts);
+        check("custom handles survive refresh", pts[1].hOut.equals(bespoke));
+        pts[1].custom = false;
+        Pen.refreshAutoHandles(pts);
+
+        // --- insertPoint preserves the curve shape exactly
+        const before = [];
+        for (let t = 0; t <= 1.0001; t += 0.05) before.push(Pen.bezierAt(pts[0], pts[1], t));
+        const fresh = Pen.insertPoint(pts, 0, 0.37);
+        check("insert adds a point", pts.length === 4 && pts[1] === fresh);
+        let maxDev = 0;
+        for (let i = 0; i < before.length; i++) {
+            const t = i * 0.05;
+            // the original segment [0..1] now spans two segments split at 0.37
+            const sampled = t <= 0.37
+                ? Pen.bezierAt(pts[0], pts[1], t / 0.37)
+                : Pen.bezierAt(pts[1], pts[2], (t - 0.37) / 0.63);
+            maxDev = Math.max(maxDev, sampled.distanceTo(before[i]));
+        }
+        check("insert preserves shape (<1e-6)", maxDev < 1e-6, maxDev.toExponential(2));
+
+        // --- rigid translation moves everything equally
+        const beforeA = pts.map((p) => p.a.clone());
+        Pen.translateAll(pts, V(3, -2, 1));
+        const rigid = pts.every((p, i) =>
+            Math.abs(p.a.x - beforeA[i].x - 3) < 1e-9 &&
+            Math.abs(p.a.y - beforeA[i].y + 2) < 1e-9 &&
+            Math.abs(p.a.z - beforeA[i].z - 1) < 1e-9);
+        check("translateAll is rigid", rigid);
+
+        // --- segment distance math
+        const r1 = Pen.distToSegment2D(5, 5, 0, 0, 10, 0);
+        check("distToSegment2D distance", Math.abs(r1.dist - 5) < 1e-9 && Math.abs(r1.t - 0.5) < 1e-9);
+        const r2 = Pen.distToSegment2D(-3, 4, 0, 0, 10, 0);
+        check("distToSegment2D clamps to endpoint", Math.abs(r2.dist - 5) < 1e-9 && r2.t === 0);
+
+        document.title = fails.length ? `FAIL: ${fails.join("; ")}` : "PASS";
+    } catch (err) {
+        log("EXCEPTION: " + (err.stack || err));
+        document.title = "FAIL: exception — " + err.message;
+    }
+})();
+</script>
+</body>
+</html>

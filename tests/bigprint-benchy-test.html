@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/three/STLLoader.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../vendor/hershey/hershey-font.js"></script>
+<script src="../js/cut-core.js"></script>
+<script src="../js/bigprint-core.js"></script>
+<script>
+/* Big Print acceptance (HANDOFF §4 #9 spirit, v2.0 flavor): 6× Benchy
+   through the WHOLE engine — grid cells, kerf gap, auto connectors,
+   engraved IDs — every part watertight, volumes accounted for, every part
+   fits the printable cell, heap inside the house budget.
+   Needs --allow-file-access-from-files (tools/check_bigprint.py passes it).
+   Skips (title "SKIPPED") when test-assets/3DBenchy.stl is absent. */
+(async () => {
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+
+    try {
+        const t0 = performance.now();
+        let buf;
+        try {
+            buf = await (await fetch("../test-assets/3DBenchy.stl")).arrayBuffer();
+        } catch (e) {
+            document.title = "SKIPPED";
+            log("3DBenchy.stl not present — acceptance skipped.");
+            return;
+        }
+        const geometry = new THREE.STLLoader().parse(buf);
+        geometry.rotateX(-Math.PI / 2);
+        geometry.computeBoundingBox();
+        const bb = geometry.boundingBox;
+        geometry.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+        const baseSize = new THREE.Vector3();
+        bb.getSize(baseSize);
+
+        await CutCore.init();
+        const B = window.BigPrintCore;
+
+        const K = 6; // 6× — a ~36 cm Benchy
+        const solidBase = CutCore.toManifold(geometry);
+        const v0 = CutCore.geometryVolume(CutCore.toGeometry(solidBase));
+        const scaleM = new THREE.Matrix4().makeScale(K, K, K);
+        const solid = solidBase.transform(scaleM.elements);
+        solidBase.delete();
+
+        const size = { x: baseSize.x * K, y: baseSize.y * K, z: baseSize.z * K };
+        const min = { x: -size.x / 2, y: 0, z: -size.z / 2 };
+        const bed = { w: 70, d: 70, h: 70 }, margin = 5; // tiny bed -> many parts
+        const grid = B.computeGrid({ size, bed, margin });
+        const cells = B.gridCells(grid, size, min);
+        log(`6× benchy: ${size.x.toFixed(0)}×${size.z.toFixed(0)}×${size.y.toFixed(0)} mm, `
+            + `grid ${grid.counts.x}×${grid.counts.z}×${grid.counts.y} = ${grid.total} candidate cells`);
+        check("a serious part count", grid.total >= 100, String(grid.total));
+
+        const GAP = 0.15;
+        const CONN = { size: 6, depth: 5, shape: "circle", tolR: 0.2, tolD: 0.2 };
+        const usable = grid.usable;
+
+        let parts = 0, engraved = 0, volSum = 0, allTight = true, allFit = true;
+        let worstOver = 0;
+        const tCut = performance.now();
+        for (const cell of cells) {
+            const geo = CutCore.cutGridCell(solid, { ...cell, engraveId: cell.id }, GAP, CONN);
+            if (!geo) continue;
+            parts++;
+            if (geo.userData.engraved) engraved++;
+            volSum += CutCore.geometryVolume(geo);
+            try { CutCore.toManifold(geo).delete(); } catch (e) { allTight = false; }
+            geo.computeBoundingBox();
+            const s = new THREE.Vector3();
+            geo.boundingBox.getSize(s);
+            // pegs may poke depth past the cell — that still has to fit the bed
+            const lim = { x: usable.x + CONN.depth, y: usable.y + CONN.depth, z: usable.z + CONN.depth };
+            if (s.x > lim.x + 0.01 || s.y > lim.y + 0.01 || s.z > lim.z + 0.01) {
+                allFit = false;
+                worstOver = Math.max(worstOver, s.x - lim.x, s.y - lim.y, s.z - lim.z);
+            }
+            geo.dispose();
+        }
+        const cutS = (performance.now() - tCut) / 1000;
+        solid.delete();
+
+        log(`${parts} parts in ${cutS.toFixed(1)}s (${(cutS / parts).toFixed(2)}s/part), `
+            + `${engraved} engraved`);
+        check("multi-hundred-cell run produced a real fleet of parts", parts >= 60, String(parts));
+        check("every part watertight", allTight);
+        // Torture-case calibration: at 6× on a 70mm bed most parts are thin
+        // curved hull slivers with no flat spot for even 3mm text — those are
+        // HONESTLY unengraved (flagged in the manifest) since the 2026-07-13
+        // fix that stopped labels being carved into empty air. Real jobs
+        // (thick-walled models, sane beds) engrave nearly everywhere.
+        check("a solid share of parts carry a genuinely carved ID",
+            engraved / parts > 0.3, `${engraved}/${parts}`);
+        const vScaled = v0 * K * K * K;
+        check("volumes account for the model minus kerf/connector allowances",
+            volSum < vScaled && volSum > 0.93 * vScaled,
+            `${(volSum / 1e6).toFixed(2)}L vs ${(vScaled / 1e6).toFixed(2)}L scaled`);
+        check("every part (pegs included) fits the printable cell", allFit,
+            allFit ? "" : `worst overshoot ${worstOver.toFixed(2)}mm`);
+        check("full run under 5 minutes", cutS < 300, `${cutS.toFixed(1)}s`);
+        if (performance.memory) {
+            const mb = performance.memory.usedJSHeapSize / 1048576;
+            check("JS heap inside the house 250MB budget", mb <= 250, `${mb.toFixed(1)} MB`);
+        }
+
+        log(`total ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+        document.title = fails.length ? `FAIL: ${fails.join("; ")}` : "PASS";
+    } catch (err) {
+        log("EXCEPTION: " + (err.stack || err));
+        document.title = "FAIL: exception — " + err.message;
+    }
+})();
+</script>
+</body>
+</html>

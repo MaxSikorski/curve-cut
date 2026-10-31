@@ -77,21 +77,27 @@ window.BigPrintCore = (() => {
         return layerCount > 1 && layer > 0 ? `${base}-L${layer + 1}` : base;
     }
 
-    /* Enumerate every grid cell in assembly order (layer → row → column),
+    /* Candidate-cell count from the grid spans. Kept separate from iteration
+       so estimates and safety checks never need to materialize cells. */
+    function cellCount(grid) {
+        return (grid.cuts.x.length + 1) * (grid.cuts.y.length + 1)
+            * (grid.cuts.z.length + 1);
+    }
+
+    /* Lazily enumerate grid cells in assembly order (layer → row → column),
        each with world bounds and interior-face flags for the kerf insets and
        (step 4) seam connectors. `min` = the scaled model's bbox minimum.
        Cells are candidates — the cutter skips the ones the model never enters. */
-    function gridCells(grid, size, min) {
+    function* gridCells(grid, size, min) {
         const bounds = (axis) => {
             const b = [0, ...grid.cuts[axis], size[axis]];
             return b;
         };
         const bx = bounds("x"), by = bounds("y"), bz = bounds("z");
-        const cells = [];
         for (let li = 0; li < grid.counts.y; li++) {
             for (let ri = 0; ri < grid.counts.z; ri++) {
                 for (let ci = 0; ci < grid.counts.x; ci++) {
-                    cells.push({
+                    yield {
                         ci, ri, li,
                         id: partId(ci, ri, li, grid.counts.y),
                         x0: min.x + bx[ci], x1: min.x + bx[ci + 1],
@@ -102,11 +108,10 @@ window.BigPrintCore = (() => {
                             y0: li > 0, y1: li < grid.counts.y - 1,
                             z0: ri > 0, z1: ri < grid.counts.z - 1,
                         },
-                    });
+                    };
                 }
             }
         }
-        return cells;
     }
 
     /* Canonical seam descriptor for one interior face of a cell. Both
@@ -232,11 +237,39 @@ window.BigPrintCore = (() => {
     }
 
     /* Human-readable manifest for the export zip. rows = [{ id, file, tris,
-       engraved }], settings = { name, scale, size, bed, printer, margin, gap,
-       connectors }. */
+       engraved }]; settings includes provenance plus the complete export UI
+       state (scale, size, bed, printer, margin, nudge, gap, format, IDs and
+       connectors). */
     function buildManifest(rows, s) {
         const L = [];
+        const nudge = s.nudge || { x: 0, y: 0, z: 0 };
         L.push(`Curve Cut — Big Print manifest`);
+        L.push(`Provenance:`);
+        L.push(`  Application: Curve Cut`);
+        L.push(`  Version: ${s.version || "unknown"}`);
+        L.push(`  Export date: ${s.exportDate || "unknown"}`);
+        L.push(`  Original model filename: ${s.name}`);
+        L.push(`  Settings:`);
+        L.push(`    Scale: ×${s.scale}`);
+        L.push(`    Final size (W×D×H): ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm`);
+        L.push(`    Printer: ${s.printer}`);
+        L.push(`    Bed (W×D×H): ${s.bed.w} × ${s.bed.d} × ${s.bed.h} mm`);
+        L.push(`    Margin: ${s.margin} mm`);
+        L.push(`    Nudge (W×D×H): ${nudge.x} × ${nudge.z} × ${nudge.y} mm`);
+        L.push(`    Assembly gap: ${s.gap} mm`);
+        L.push(`    Format: ${s.format || "not recorded"}`);
+        L.push(`    Connectors: ${s.connectors}`);
+        L.push(`    Engrave IDs: ${s.engraveIds === undefined ? "not recorded" : (s.engraveIds ? "on" : "off")}`);
+        L.push(`    Candidate cells: ${s.candidateCount === undefined ? rows.length : s.candidateCount}`);
+        if (s.hollow) {
+            L.push(`    Hollow:`);
+            L.push(`      Wall: ${s.hollow.wallMm} mm`);
+            L.push(`      Material saved: ${s.hollow.savedPct.toFixed(1)}%`);
+            L.push(`      Engine: ${s.hollow.engineUsed}`);
+            L.push(`      Fallback: ${s.hollow.fellBack ? "yes" : "no"}`);
+        }
+        L.push(`  Part count: ${rows.length}`);
+        L.push("");
         L.push(`Model: ${s.name}`);
         L.push(`Scale: ×${s.scale} → ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm (W×D×H)`);
         L.push(`Printer: ${s.printer} (bed ${s.bed.w}×${s.bed.d}×${s.bed.h} mm, margin ${s.margin} mm)`);
@@ -266,7 +299,43 @@ window.BigPrintCore = (() => {
         baseLongest > 0 ? targetMm / baseLongest : 1;
     const targetForScale = (baseLongest, k) => baseLongest * k;
 
-    return { PRINTERS, axisCuts, computeGrid, gridCells, seamOf, seamGridPositions,
+    function bakedScaleLabel(k) {
+        if (!Number.isFinite(k) || Math.abs(k - 1) <= 1e-9) return null;
+        const value = k.toFixed(9).replace(/\.?0+$/, "");
+        return `${value}× of imported`;
+    }
+
+    function partStory(count, hollowed) {
+        const onePiece = count === 1;
+        return {
+            statusSuffix: onePiece
+                ? " — fits the bed in one piece, no cuts needed"
+                    + (hollowed
+                        ? " (the cavity stays sealed — pick a smaller bed or bigger scale for open shells)"
+                        : "")
+                : "",
+            exportLabel: onePiece
+                ? (hollowed ? "1 sealed hollow part" : "1 part")
+                : `${count} parts`,
+        };
+    }
+
+    function hollowSavingsStory(savedPct, wallMm) {
+        if (!Number.isFinite(savedPct) || savedPct <= 5) {
+            return {
+                teaser: null,
+                status: "Not worth hollowing at this size and wall — the walls would fill the model.",
+            };
+        }
+        const rounded = Math.round(savedPct);
+        return {
+            teaser: savedPct >= 20 ? `could save ~${rounded}% material` : null,
+            status: `Hollowing could save ~${rounded}% of material at a ${wallMm} mm wall.`,
+        };
+    }
+
+    return { PRINTERS, axisCuts, computeGrid, cellCount, gridCells, seamOf, seamGridPositions,
         serializeSTL, serialize3MF, buildManifest, explodedPosition,
-        colLetter, partId, scaleForTarget, targetForScale };
+        colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,
+        partStory, hollowSavingsStory };
 })();

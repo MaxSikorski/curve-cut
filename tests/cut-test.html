@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/three/STLLoader.js"></script>
+<script src="../vendor/three/STLExporter.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../js/cut-core.js"></script>
+<script>
+/* Headless test for the cut engine. Run via tools/check_cut_engine.py.
+   Result lands in document.title: "PASS" or "FAIL: <reason>". */
+(async () => {
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+
+    try {
+        await CutCore.init();
+        check("wasm init", CutCore.isReady());
+
+        const V = (x, y, z) => new THREE.Vector3(x, y, z);
+        const trisOf = (g) => (g.getIndex() ? g.getIndex().count : g.getAttribute("position").count) / 3;
+
+        // 20mm cube as unindexed soup (simulates a parsed STL)
+        const cube = new THREE.BoxGeometry(20, 20, 20).toNonIndexed();
+        check("cube volume", Math.abs(CutCore.geometryVolume(cube) - 8000) < 1,
+            CutCore.geometryVolume(cube).toFixed(1));
+
+        // --- test 1: straight vertical cut through the middle -------------
+        const straight = {
+            points: [
+                { a: V(0, 30, 0), hIn: null, hOut: null },
+                { a: V(0, -30, 0), hIn: null, hOut: null },
+            ],
+            normal: V(0, 0, 1),
+            planePoint: V(0, 0, 0),
+        };
+        const r1 = CutCore.cutGeometries([cube], straight, 100, 100)[0];
+        check("straight cut: two pieces", !!(r1.inside && r1.outside));
+        if (r1.inside && r1.outside) {
+            const va = CutCore.geometryVolume(r1.inside);
+            const vb = CutCore.geometryVolume(r1.outside);
+            check("straight cut: volumes halve", Math.abs(va - 4000) < 10 && Math.abs(vb - 4000) < 10,
+                `${va.toFixed(1)} + ${vb.toFixed(1)}`);
+            check("straight cut: volume conserved", Math.abs(va + vb - 8000) < 1,
+                (va + vb).toFixed(2));
+        }
+
+        // --- test 2: curved (bezier) cut still splits cleanly --------------
+        const curved = {
+            points: [
+                { a: V(-4, 30, 0), hIn: null, hOut: V(-4, 12, 0) },
+                { a: V(4, -30, 0), hIn: V(4, -12, 0), hOut: null },
+            ],
+            normal: V(0, 0, 1),
+            planePoint: V(0, 0, 0),
+        };
+        const r2 = CutCore.cutGeometries([cube], curved, 100, 100)[0];
+        check("curved cut: two pieces", !!(r2.inside && r2.outside));
+        if (r2.inside && r2.outside) {
+            const sum = CutCore.geometryVolume(r2.inside) + CutCore.geometryVolume(r2.outside);
+            check("curved cut: volume conserved", Math.abs(sum - 8000) < 1, sum.toFixed(2));
+        }
+
+        // --- test 3: iterative cut — cut a half again ----------------------
+        const r3 = CutCore.cutGeometries([r1.inside], {
+            points: [
+                { a: V(-30, 5, 0), hIn: null, hOut: null },
+                { a: V(30, 5, 0), hIn: null, hOut: null },
+            ],
+            normal: V(0, 0, 1),
+            planePoint: V(0, 0, 0),
+        }, 100, 100)[0];
+        check("iterative cut: two pieces", !!(r3.inside && r3.outside));
+
+        // --- test 4: STL export round-trip (incl. Y-up -> Z-up rotation) ---
+        if (r1.inside) {
+            const exporter = new THREE.STLExporter();
+            const temp = new THREE.Mesh(r1.inside, new THREE.MeshBasicMaterial());
+            temp.rotation.x = Math.PI / 2;
+            temp.updateMatrixWorld(true);
+            const bin = exporter.parse(temp, { binary: true });
+            const back = new THREE.STLLoader().parse(bin.buffer);
+            const vBack = CutCore.geometryVolume(back);
+            check("export round-trip volume", Math.abs(vBack - 4000) < 10, vBack.toFixed(1));
+        }
+
+        // --- test 5: simplification cuts triangle count, keeps volume ------
+        const dense = new THREE.SphereGeometry(10, 128, 96).toNonIndexed();
+        const denseTris = trisOf(dense);
+        const slim = CutCore.simplifyGeometry(dense, 0.05);
+        const slimTris = trisOf(slim);
+        const vSphere = CutCore.geometryVolume(dense);
+        const vSlim = CutCore.geometryVolume(slim);
+        check("simplify reduces triangles",
+            slimTris < denseTris * 0.3, `${denseTris} -> ${slimTris}`);
+        check("simplify keeps volume (±1%)",
+            Math.abs(vSlim - vSphere) / vSphere < 0.01,
+            `${vSphere.toFixed(0)} -> ${vSlim.toFixed(0)}`);
+
+        // --- test 6: target-based simplify stops near the target -----------
+        const slim2 = CutCore.simplifyToTarget(dense, 6000);
+        const slim2Tris = trisOf(slim2);
+        const vSlim2 = CutCore.geometryVolume(slim2);
+        check("simplifyToTarget lands at/under target",
+            slim2Tris <= 6000, `${denseTris} -> ${slim2Tris}`);
+        check("simplifyToTarget doesn't overshoot (>25% of target)",
+            slim2Tris > 1500, `${slim2Tris}`);
+        check("simplifyToTarget keeps volume (±1%)",
+            Math.abs(vSlim2 - vSphere) / vSphere < 0.01, vSlim2.toFixed(0));
+
+        // --- test 7: planar cutter — exact volumes, plus a tilted plane ----
+        // cube spans y = -10..10; level plane at y=5 -> lower is 15/20 tall
+        const bounds = new THREE.Box3(V(-10, -10, -10), V(10, 10, 10));
+        const planarCutter = CutCore.buildPlanarCutter(V(0, 5, 0), V(0, 1, 0), bounds);
+        const rp = CutCore.cutWithCutter(cube, planarCutter);
+        planarCutter.delete();
+        check("planar cut: two pieces", !!(rp.inside && rp.outside));
+        if (rp.inside && rp.outside) {
+            const vLow = CutCore.geometryVolume(rp.inside);
+            const vHigh = CutCore.geometryVolume(rp.outside);
+            check("planar cut: exact volumes", Math.abs(vLow - 6000) < 1 && Math.abs(vHigh - 2000) < 1,
+                `${vLow.toFixed(1)} / ${vHigh.toFixed(1)}`);
+        }
+        const tilted = CutCore.buildPlanarCutter(
+            V(0, 0, 0), V(0, 1, 1).normalize(), bounds); // 45° through the center
+        const rt = CutCore.cutWithCutter(cube, tilted);
+        tilted.delete();
+        if (rt.inside && rt.outside) {
+            const vT = CutCore.geometryVolume(rt.inside) + CutCore.geometryVolume(rt.outside);
+            check("tilted planar cut: halves conserved",
+                Math.abs(vT - 8000) < 1 &&
+                Math.abs(CutCore.geometryVolume(rt.inside) - 4000) < 1,
+                `${CutCore.geometryVolume(rt.inside).toFixed(1)} + ${CutCore.geometryVolume(rt.outside).toFixed(1)}`);
+        } else {
+            check("tilted planar cut: halves conserved", false, "missing piece");
+        }
+
+        // --- test 8: dovetail — ONE tongue, exact expected volumes ---------
+        // flare = 4/tan(65°) = 1.8651; tongue = (6 + 9.7302)/2 * 4 * 20 = 629.2
+        const dtParams = { height: 0, depth: 4, width: 6, flapDeg: 65, grooveDeg: 0 };
+        const dtCutter = CutCore.buildDovetailCutter(dtParams, bounds);
+        const rd = CutCore.cutWithCutter(cube, dtCutter);
+        dtCutter.delete();
+        check("dovetail cut: two pieces", !!(rd.inside && rd.outside));
+        if (rd.inside && rd.outside) {
+            const vLower = CutCore.geometryVolume(rd.inside);
+            const vUpper = CutCore.geometryVolume(rd.outside);
+            check("dovetail: volume conserved", Math.abs(vLower + vUpper - 8000) < 1,
+                (vLower + vUpper).toFixed(2));
+            check("dovetail: single tongue on the upper piece (629 mm3)",
+                Math.abs(vUpper - 4629.2) < 5 && Math.abs(vLower - 3370.8) < 5,
+                `upper ${vUpper.toFixed(1)} / lower ${vLower.toFixed(1)}`);
+            let watertight = true;
+            for (const g of [rd.inside, rd.outside]) {
+                try { CutCore.toManifold(g).delete(); } catch (e) { watertight = false; }
+            }
+            check("dovetail pieces watertight", watertight);
+        }
+
+        // --- test 9: groove angle rotates the tongue, volume conserved -----
+        const dtCutter30 = CutCore.buildDovetailCutter(
+            { ...dtParams, grooveDeg: 30 }, bounds);
+        const rg = CutCore.cutWithCutter(cube, dtCutter30);
+        dtCutter30.delete();
+        const vG = (rg.inside ? CutCore.geometryVolume(rg.inside) : 0)
+            + (rg.outside ? CutCore.geometryVolume(rg.outside) : 0);
+        check("grooved dovetail: volume conserved", Math.abs(vG - 8000) < 1, vG.toFixed(2));
+
+        // --- test 10: tolerance pair leaves a real clearance gap -----------
+        // socket cutter full-size, tongue cutter shrunk by 0.1mm tolerances
+        const socketCutter = CutCore.buildDovetailCutter(dtParams, bounds);
+        const tongueCutter = CutCore.buildDovetailCutter(dtParams, bounds, { w: 0.1, d: 0.1 });
+        const rTol = CutCore.cutWithCutter(cube, socketCutter, tongueCutter);
+        socketCutter.delete();
+        tongueCutter.delete();
+        if (rTol.inside && rTol.outside) {
+            const vSum = CutCore.geometryVolume(rTol.inside) + CutCore.geometryVolume(rTol.outside);
+            check("tolerance: clearance gap exists (sum < 8000)",
+                vSum < 7995 && vSum > 7900, `${vSum.toFixed(1)} (gap ${(8000 - vSum).toFixed(1)})`);
+        } else {
+            check("tolerance: clearance gap exists (sum < 8000)", false, "missing piece");
+        }
+
+        // --- test 10.5: plug connectors — pegs, sockets, tolerance gap -----
+        // 32-gon peg r=3 h=5: area = 0.5*32*9*sin(11.25°) = 28.09 -> vol 140.5
+        {
+            const n = V(0, 1, 0);
+            const conn = { pos: V(0, 5, 0), normal: n, shape: "circle", size: 6, depth: 5, rotDeg: 0 };
+            const planar = CutCore.buildPlanarCutter(V(0, 5, 0), n, bounds);
+            const pegs = [CutCore.buildConnectorSolid(conn)];
+            const sockets = [CutCore.buildConnectorSolid(conn, { r: 0.1, d: 0.1 })];
+            const rc = CutCore.cutWithCutter(cube, planar, planar,
+                { pegs, sockets, maleSide: "inside" });
+            planar.delete();
+            for (const s of pegs.concat(sockets)) s.delete();
+
+            check("connectors: two pieces", !!(rc.inside && rc.outside));
+            if (rc.inside && rc.outside) {
+                const vMale = CutCore.geometryVolume(rc.inside);   // lower + peg
+                const vFemale = CutCore.geometryVolume(rc.outside); // upper - socket
+                const pegVol = 0.5 * 32 * 9 * Math.sin(Math.PI / 16) * 5;
+                const sockVol = 0.5 * 32 * 3.1 * 3.1 * Math.sin(Math.PI / 16) * 5.1;
+                check("connectors: male grows by the peg",
+                    Math.abs(vMale - (6000 + pegVol)) < 3, `${vMale.toFixed(1)} vs ${(6000 + pegVol).toFixed(1)}`);
+                check("connectors: female socket is tolerance-larger",
+                    Math.abs(vFemale - (2000 - sockVol)) < 3, `${vFemale.toFixed(1)} vs ${(2000 - sockVol).toFixed(1)}`);
+                let wt = true;
+                for (const g of [rc.inside, rc.outside]) {
+                    try { CutCore.toManifold(g).delete(); } catch (e) { wt = false; }
+                }
+                check("connectors: both pieces watertight", wt);
+            }
+        }
+
+        // --- test 10.7: kerf clearance — the assembled gap is real ---------
+        // cut face is 20x20 = 400 mm²; 0.3 mm gap should remove ~120 mm³
+        {
+            const exact = CutCore.buildCutter(straight, 100, 100);
+            const grown = CutCore.buildCutter(straight, 100, 100, 0.3);
+            const rk = CutCore.cutWithCutter(cube, exact, grown);
+            exact.delete(); grown.delete();
+            if (rk.inside && rk.outside) {
+                const sum = CutCore.geometryVolume(rk.inside) + CutCore.geometryVolume(rk.outside);
+                check("curve kerf: 0.3mm gap removes ~120 mm³",
+                    Math.abs(8000 - sum - 120) < 6, `${sum.toFixed(1)} (gap ${(8000 - sum).toFixed(1)})`);
+            } else {
+                check("curve kerf: 0.3mm gap removes ~120 mm³", false, "missing piece");
+            }
+
+            const pExact = CutCore.buildPlanarCutter(V(0, 5, 0), V(0, 1, 0), bounds);
+            const pGrown = CutCore.buildPlanarCutter(V(0, 5.3, 0), V(0, 1, 0), bounds);
+            const rpk = CutCore.cutWithCutter(cube, pExact, pGrown);
+            pExact.delete(); pGrown.delete();
+            if (rpk.inside && rpk.outside) {
+                const vL = CutCore.geometryVolume(rpk.inside);
+                const vU = CutCore.geometryVolume(rpk.outside);
+                check("planar kerf: lower exact, upper loses the gap slab",
+                    Math.abs(vL - 6000) < 1 && Math.abs(vU - 1880) < 1,
+                    `${vL.toFixed(1)} / ${vU.toFixed(1)}`);
+            } else {
+                check("planar kerf: lower exact, upper loses the gap slab", false, "missing piece");
+            }
+        }
+
+        // --- test 10: open (non-watertight) mesh is rejected politely ------
+        const openMesh = new THREE.PlaneGeometry(10, 10).toNonIndexed();
+        let rejected = false;
+        try {
+            CutCore.cutGeometries([openMesh], straight, 100, 100);
+        } catch (e) {
+            rejected = e.message === "not-watertight";
+        }
+        check("open mesh rejected as not-watertight", rejected);
+
+        document.title = fails.length ? `FAIL: ${fails.join("; ")}` : "PASS";
+    } catch (err) {
+        log("EXCEPTION: " + (err.stack || err));
+        document.title = "FAIL: exception — " + err.message;
+    }
+})();
+</script>
+</body>
+</html>

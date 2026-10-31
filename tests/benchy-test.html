@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/three/STLLoader.js"></script>
+<script src="../vendor/three/STLExporter.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../js/cut-core.js"></script>
+<script>
+/* Benchy acceptance test (the HANDOFF §4 "Benchy test", automated):
+   load 3DBenchy.stl -> wavy cut through the hull -> cut one half again ->
+   3 watertight pieces, volume conserved, export round-trips.
+   Needs --allow-file-access-from-files (tools/check_benchy.py passes it). */
+(async () => {
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+    const V = (x, y, z) => new THREE.Vector3(x, y, z);
+
+    try {
+        const t0 = performance.now();
+        const buf = await (await fetch("../test-assets/3DBenchy.stl")).arrayBuffer();
+        const geometry = new THREE.STLLoader().parse(buf);
+        geometry.rotateX(-Math.PI / 2); // mirror the app's Z-up -> Y-up
+        geometry.computeBoundingBox();
+        const bb = geometry.boundingBox;
+        geometry.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+        const size = new THREE.Vector3();
+        bb.getSize(size);
+        const tris = geometry.getAttribute("position").count / 3;
+        log(`benchy: ${tris} tris, ${size.x.toFixed(1)} x ${size.z.toFixed(1)} x ${size.y.toFixed(1)} mm`);
+        check("benchy loaded", tris > 100000);
+
+        await CutCore.init();
+        const center = V(0, size.y / 2, 0);
+
+        // manifold-normalized source volume is the conservation baseline
+        const solid = CutCore.toManifold(geometry);
+        const v0 = CutCore.geometryVolume(CutCore.toGeometry(solid));
+        solid.delete();
+        check("benchy is watertight (manifold accepts)", v0 > 0, v0.toFixed(0) + " mm3");
+
+        // wavy S-cut through the hull, drawn from the front
+        const wavy = {
+            points: [
+                { a: V(-6, size.y + 20, 0), hIn: null, hOut: V(14, size.y * 0.6, 0) },
+                { a: V(6, -20, 0), hIn: V(-14, size.y * 0.4, 0), hOut: null },
+            ],
+            normal: V(0, 0, 1),
+            planePoint: center,
+        };
+        const reach = size.length() * 2;
+        const tCut = performance.now();
+        const r1 = CutCore.cutGeometries([geometry], wavy, reach, reach)[0];
+        const cutMs = performance.now() - tCut;
+        log(`first cut took ${(cutMs / 1000).toFixed(2)}s`);
+        check("wavy cut: two pieces", !!(r1.inside && r1.outside));
+
+        const vA = CutCore.geometryVolume(r1.inside);
+        const vB = CutCore.geometryVolume(r1.outside);
+        check("wavy cut: volume conserved (±0.1%)",
+            Math.abs(vA + vB - v0) / v0 < 0.001,
+            `${vA.toFixed(0)} + ${vB.toFixed(0)} vs ${v0.toFixed(0)}`);
+
+        // both halves are themselves watertight solids
+        for (const [label, g] of [["A", r1.inside], ["B", r1.outside]]) {
+            let ok = true;
+            try { CutCore.toManifold(g).delete(); } catch (e) { ok = false; }
+            check(`piece ${label} watertight`, ok);
+        }
+
+        // iterative: horizontal cut through piece B
+        const flat = {
+            points: [
+                { a: V(-size.x, size.y * 0.4, 0), hIn: null, hOut: null },
+                { a: V(size.x, size.y * 0.5, 0), hIn: null, hOut: null },
+            ],
+            normal: V(0, 0, 1),
+            planePoint: center,
+        };
+        const r2 = CutCore.cutGeometries([r1.outside], flat, reach, reach)[0];
+        check("iterative cut: two more pieces", !!(r2.inside && r2.outside));
+        const v3 = CutCore.geometryVolume(r2.inside) + CutCore.geometryVolume(r2.outside);
+        check("iterative cut: volume conserved (±0.1%)",
+            Math.abs(v3 - vB) / vB < 0.001, `${v3.toFixed(0)} vs ${vB.toFixed(0)}`);
+
+        // export round-trip: all 3 final pieces re-import watertight
+        const exporter = new THREE.STLExporter();
+        const finals = [r1.inside, r2.inside, r2.outside];
+        let roundTrips = 0;
+        for (const g of finals) {
+            const temp = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
+            temp.rotation.x = Math.PI / 2;
+            temp.updateMatrixWorld(true);
+            const bin = exporter.parse(temp, { binary: true });
+            const back = new THREE.STLLoader().parse(bin.buffer);
+            try { CutCore.toManifold(back).delete(); roundTrips++; } catch (e) { /* counted */ }
+        }
+        check("all 3 exported pieces re-import watertight", roundTrips === 3, `${roundTrips}/3`);
+
+        log(`total ${(performance.now() - t0) / 1000 | 0}s`);
+        document.title = fails.length ? `FAIL: ${fails.join("; ")}` : "PASS";
+    } catch (err) {
+        log("EXCEPTION: " + (err.stack || err));
+        document.title = "FAIL: exception — " + err.message;
+    }
+})();
+</script>
+</body>
+</html>

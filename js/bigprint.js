@@ -10,6 +10,7 @@
     const Core = window.BigPrintCore;
 
     const panel = document.getElementById("bigprint-panel");
+    const panelCollapse = CC.makeCollapsible(panel); // pop-down chevron (feature #15)
     const actionDock = document.getElementById("action-dock");
     const viewDock = document.getElementById("view-dock");
     const printerSelect = document.getElementById("bp-printer");
@@ -23,16 +24,59 @@
     const nudgeX = document.getElementById("bp-nudge-x");
     const nudgeY = document.getElementById("bp-nudge-y");
     const nudgeZ = document.getElementById("bp-nudge-z");
+    const hollowOn = document.getElementById("bp-hollow-on");
+    const hollowFields = document.getElementById("bp-hollow-fields");
+    const hollowWall = document.getElementById("bp-hollow-wall");
+    const hollowHint = document.getElementById("bp-hollow-hint");
+    const hollowApply = document.getElementById("bp-hollow-apply");
+    const hollowTeaser = document.getElementById("bp-hollow-teaser");
+    const hollowStatus = document.getElementById("bp-hollow-status");
     const status = document.getElementById("bp-status");
     const exportBtn = document.getElementById("bp-export");
+    const statsReset = document.getElementById("stats-reset");
+    const WARN_CELL_COUNT = 512;
+    const HARD_CELL_COUNT = 4096;
+    const HOLLOW_WARNING_MAX_SAMPLES = 4096;
+    const PRINT_MANIFOLD_IDLE_TIMEOUT = 1000;
+    const CONFIRM_MS = 5000;
+
+    let confirmCount = 0;
+    let confirmUntil = 0;
+    let confirmTimer = null;
+
+    function resetExportConfirmation() {
+        confirmCount = 0;
+        confirmUntil = 0;
+        clearTimeout(confirmTimer);
+        confirmTimer = null;
+        exportBtn.textContent = "Cut & Export";
+    }
+
+    function armExportConfirmation(count) {
+        resetExportConfirmation();
+        confirmCount = count;
+        confirmUntil = Date.now() + CONFIRM_MS;
+        exportBtn.textContent = `Really export ${count.toLocaleString()} parts?`;
+        confirmTimer = setTimeout(resetExportConfirmation, CONFIRM_MS);
+    }
 
     let active = false;
     let model = null;          // the single piece Big Print scales
     let baseSize = null;       // THREE.Vector3, unscaled model dimensions
-    let savedCam = null;       // camera pose from before enter()'s fit flight
     let scale = 1;
+    let exportCompleted = false;
     let gridGroup = null;      // THREE.Group of preview planes
     let grid = null;           // last computeGrid result
+    let printManifoldCache = null; // panel owns it; invalidation retires borrowed entries
+    let printManifoldWarm = null;
+    let printManifoldWarmCancelSerial = 0;
+    let hollowComputeCache = null;
+    let hollowComputeJob = null;
+    let hollowComputeReleasePromise = null;
+    let hollowComputeBuildPromise = null;
+    let repairPrimeTask = null;
+    let hollowComputeSerial = 0;
+    const hollowStates = new WeakMap();
 
     // ------------------------------------------------------------ presets
 
@@ -74,7 +118,15 @@
     // ------------------------------------------------------- scale linking
 
     function setScale(k, from) {
-        scale = Math.min(Math.max(k || 1, 0.1), 100);
+        const nextScale = Math.min(Math.max(k || 1, 0.1), 100);
+        const scaleChanged = Math.abs(nextScale - scale) > 1e-9;
+        if (scaleChanged) {
+            cancelRepairPrimeTask();
+            disposePrintManifoldCache();
+        }
+        const removedHollow = active && model && hollowStates.has(model)
+            && scaleChanged && restorePreHollow();
+        scale = nextScale;
         if (from !== "scale") scaleInput.value = scale.toFixed(2).replace(/\.?0+$/, "");
         if (from !== "slider") scaleSlider.value = Math.min(scale, parseFloat(scaleSlider.max));
         if (from !== "size") {
@@ -82,6 +134,13 @@
         }
         refitCamera();
         refresh();
+        if (removedHollow) {
+            window.dispatchEvent(new CustomEvent("curvecut:pieces-changed",
+                { detail: { source: "hollow-revert" } }));
+            CC.toast("Scale changed — hollow removed, re-apply");
+        }
+        scheduleHollowUpdate();
+        schedulePrintManifoldWarm();
     }
 
     /* The camera was framed for the 1× model — zoom out as the model grows
@@ -108,6 +167,896 @@
     for (const el of [marginInput, nudgeX, nudgeY, nudgeZ]) {
         el.addEventListener("input", refresh);
     }
+
+    // ------------------------------------------------------ hollow controls
+
+    let hollowTimer = null;
+    let hollowWarningTimer = null;
+    let hollowWarningFrame = null;
+    let hollowRevision = 0;
+    let hollowStatusSettled = true;
+    let lastSavingsStory = null;
+
+    function wallMm() {
+        return parseFloat(hollowWall.value);
+    }
+
+    function updateWallHint() {
+        const wall = wallMm();
+        const count = Number.isFinite(wall) ? Math.round(wall / 0.4) : 0;
+        hollowHint.textContent = `≈ ${count} wall${count === 1 ? "" : "s"} @ 0.4 mm`;
+    }
+
+    function printManifoldTarget() {
+        return {
+            model,
+            geometry: model.geometry,
+            scale: hollowStates.has(model) ? 1 : scale,
+        };
+    }
+
+    function samePrintManifoldTarget(left, right) {
+        return left && right && left.model === right.model
+            && left.geometry === right.geometry
+            && Math.abs(left.scale - right.scale) <= 1e-9;
+    }
+
+    function currentPrintManifoldTarget(target) {
+        if (!active || model !== target.model || model.geometry !== target.geometry) return false;
+        const effectiveScale = hollowStates.has(model) ? 1 : scale;
+        return Math.abs(effectiveScale - target.scale) <= 1e-9;
+    }
+
+    function cancelPrintManifoldWarmTask(warm) {
+        if (warm.idleHandle !== null) {
+            if (typeof window.cancelIdleCallback === "function") {
+                window.cancelIdleCallback(warm.idleHandle);
+            }
+            warm.idleHandle = null;
+        }
+        clearTimeout(warm.timer);
+        warm.timer = null;
+        clearTimeout(warm.retryTimer);
+        warm.retryTimer = null;
+    }
+
+    function cancelRepairPrimeTask() {
+        const task = repairPrimeTask;
+        if (!task) return;
+        if (task.idleHandle !== null) {
+            if (typeof window.cancelIdleCallback === "function") {
+                window.cancelIdleCallback(task.idleHandle);
+            }
+            task.idleHandle = null;
+        }
+        clearTimeout(task.timer);
+        clearTimeout(task.retryTimer);
+        repairPrimeTask = null;
+    }
+
+    function settlePrintManifoldWarm(warm, result) {
+        if (!warm.resolve) return;
+        const resolve = warm.resolve;
+        warm.resolve = null;
+        resolve(result);
+    }
+
+    function cancelPrintManifoldWarmRecord(warm) {
+        if (!warm) return;
+        cancelPrintManifoldWarmTask(warm);
+        if (location.hash === "#racetest" && warm.resolve) printManifoldWarmCancelSerial++;
+        settlePrintManifoldWarm(warm, null);
+        if (printManifoldWarm === warm) printManifoldWarm = null;
+    }
+
+    function cancelPrintManifoldWarm() {
+        cancelPrintManifoldWarmRecord(printManifoldWarm);
+    }
+
+    function clearPrintManifoldCache() {
+        const cache = printManifoldCache;
+        if (!cache) return;
+        printManifoldCache = null;
+        cache.retired = true;
+        if (!cache.borrowCount && !cache.deleted) {
+            cache.manifold.delete();
+            cache.deleted = true;
+        }
+    }
+
+    function borrowPrintManifold(cache) {
+        cache.borrowCount++;
+        return cache;
+    }
+
+    function releasePrintManifold(cache) {
+        cache.borrowCount--;
+        if (cache.retired && cache.borrowCount === 0 && !cache.deleted) {
+            cache.manifold.delete();
+            cache.deleted = true;
+        }
+    }
+
+    function computeWorkerPath() {
+        return !!(CC.compute && !CC.compute.degraded);
+    }
+
+    function sameHollowComputeTarget(left, right) {
+        return left && right && left.model === right.model
+            && left.geometry === right.geometry
+            && Math.abs(left.scale - right.scale) <= 1e-9;
+    }
+
+    function validHollowComputeCache(target) {
+        return computeWorkerPath() && hollowComputeCache
+            && sameHollowComputeTarget(hollowComputeCache, target)
+            && hollowComputeCache.ready && !hollowComputeCache.retired
+            && hollowComputeCache.worker === CC.compute._worker;
+    }
+
+    function releaseHollowComputeCache(cache) {
+        if (!cache || !cache.retired || cache.borrowCount || !cache.ready
+            || cache.releaseRequested) return;
+        cache.releaseRequested = true;
+        let promise;
+        try {
+            promise = CC.compute.run("release", { token: cache.token });
+        } catch (_) {
+            cache.releaseRequested = false;
+            cache.releaseTimer = setTimeout(() => {
+                cache.releaseTimer = null;
+                releaseHollowComputeCache(cache);
+            }, 100);
+            return;
+        }
+        cache.releasePromise = promise.catch((error) => {
+            if (CC.compute.degraded) return;
+            console.warn("Hollow compute cache release failed:", error);
+        });
+        const releasePromise = cache.releasePromise;
+        const combinedRelease = releasePromise.finally(() => {
+            if (hollowComputeReleasePromise === combinedRelease) {
+                hollowComputeReleasePromise = null;
+            }
+        });
+        hollowComputeReleasePromise = combinedRelease;
+    }
+
+    function clearHollowComputeCache() {
+        const cache = hollowComputeCache;
+        if (!cache) return;
+        hollowComputeCache = null;
+        cache.retired = true;
+        releaseHollowComputeCache(cache);
+    }
+
+    async function runHollowComputeJob(op, payload, options, kind) {
+        const promise = CC.compute.run(op, payload, options || {});
+        const job = { id: promise.id, kind };
+        hollowComputeJob = job;
+        try {
+            return await promise;
+        } finally {
+            if (hollowComputeJob === job) hollowComputeJob = null;
+        }
+    }
+
+    function cancelHollowComputeJob(includeApply) {
+        const job = hollowComputeJob;
+        if (!job || (!includeApply && job.kind !== "beat") || !computeWorkerPath()) return false;
+        return CC.compute.cancel(job.id);
+    }
+
+    function cancelPrintManifoldWarmCompute() {
+        const job = hollowComputeJob;
+        if (!job || job.kind !== "bigprint-warm" || !computeWorkerPath()) return false;
+        return CC.compute.cancel(job.id);
+    }
+
+    async function ensureHollowComputeCache(target, kind) {
+        if (!computeWorkerPath()) return null;
+        const ready = await CC.compute.ready();
+        if (!ready || CC.compute.degraded) return null;
+        const currentWorker = CC.compute._worker;
+        if (hollowComputeReleasePromise) await hollowComputeReleasePromise;
+        if (hollowComputeCache && sameHollowComputeTarget(hollowComputeCache, target)
+            && !hollowComputeCache.retired
+            && hollowComputeCache.worker === currentWorker) {
+            if (hollowComputeCache.ready) return hollowComputeCache;
+            if (hollowComputeCache.primePromise) return hollowComputeCache.primePromise;
+        }
+        if (hollowComputeBuildPromise) await hollowComputeBuildPromise;
+        if (!computeWorkerPath()) return null;
+        if (hollowComputeCache && sameHollowComputeTarget(hollowComputeCache, target)
+            && hollowComputeCache.ready && !hollowComputeCache.retired
+            && hollowComputeCache.worker === CC.compute._worker) {
+            return hollowComputeCache;
+        }
+        clearHollowComputeCache();
+        const cache = Object.assign({}, target, {
+            token: target.token || `hollow-${++hollowComputeSerial}`,
+            ready: false,
+            retired: false,
+            borrowCount: 0,
+            releaseRequested: false,
+            releasePromise: null,
+            releaseTimer: null,
+            worker: CC.compute._worker,
+            primePromise: null,
+        });
+        hollowComputeCache = cache;
+        const build = (async () => {
+            try {
+                const geometry = await CC.compute.geometryPayloadAsync(target.geometry);
+                await runHollowComputeJob("prime", {
+                    token: cache.token, geometry, scale: target.scale,
+                }, {
+                    transfer: [geometry.vertProperties.buffer, geometry.triVerts.buffer],
+                }, kind);
+                cache.ready = true;
+                if (cache.retired || hollowComputeCache !== cache
+                    || cache.worker !== CC.compute._worker) {
+                    releaseHollowComputeCache(cache);
+                    return null;
+                }
+                return cache;
+            } catch (error) {
+                cache.ready = true;
+                cache.retired = true;
+                if (hollowComputeCache === cache) hollowComputeCache = null;
+                releaseHollowComputeCache(cache);
+                throw error;
+            }
+        })();
+        cache.primePromise = build;
+        const gate = build.then(
+            () => undefined,
+            () => undefined);
+        hollowComputeBuildPromise = gate;
+        gate.then(() => {
+            if (hollowComputeBuildPromise === gate) hollowComputeBuildPromise = null;
+        });
+        return build;
+    }
+
+    function releaseWorkerCacheToken(detail) {
+        if (!detail || typeof detail.token !== "string" || !CC.compute
+            || (detail.worker && detail.worker !== CC.compute._worker && !CC.compute.degraded)) return;
+        try { CC.compute.run("release", { token: detail.token }); } catch (_) {}
+    }
+
+    function currentRepairPrimeTask(task) {
+        return repairPrimeTask === task && CC.pieces[0] === task.model
+            && task.model.geometry === task.geometry;
+    }
+
+    function adoptHollowComputeCache(detail) {
+        if (!detail || typeof detail.token !== "string" || !detail.model
+            || !detail.geometry || CC.pieces[0] !== detail.model) {
+            releaseWorkerCacheToken(detail);
+            return false;
+        }
+        if (!computeWorkerPath()
+            || (detail.worker && detail.worker !== CC.compute._worker)) {
+            releaseWorkerCacheToken(detail);
+            return false;
+        }
+        cancelRepairPrimeTask();
+        clearPrintManifoldCache();
+        clearHollowComputeCache();
+        const install = () => {
+            if (CC.pieces[0] !== detail.model || detail.model.geometry !== detail.geometry) {
+                releaseWorkerCacheToken(detail);
+                return;
+            }
+            hollowComputeCache = Object.assign({}, detail, {
+                ready: true,
+                retired: false,
+                borrowCount: 0,
+                releaseRequested: false,
+                releasePromise: null,
+                releaseTimer: null,
+                worker: CC.compute._worker,
+                primePromise: null,
+            });
+        };
+        if (hollowComputeReleasePromise) {
+            hollowComputeReleasePromise.then(install, install);
+        } else install();
+        return true;
+    }
+
+    function scheduleRepairPrime(detail) {
+        if (!detail || typeof detail.token !== "string" || !detail.model
+            || !detail.geometry || !computeWorkerPath()) return;
+        cancelRepairPrimeTask();
+        const task = Object.assign({}, detail, {
+            idleHandle: null, timer: null, retryTimer: null,
+        });
+        repairPrimeTask = task;
+        const run = () => {
+            task.idleHandle = null;
+            task.timer = null;
+            if (!currentRepairPrimeTask(task)) {
+                if (repairPrimeTask === task) repairPrimeTask = null;
+                return;
+            }
+            if (CC.ops.busy()) {
+                task.retryTimer = setTimeout(() => {
+                    task.retryTimer = null;
+                    run();
+                }, 100);
+                return;
+            }
+            sanctionedHollowCache({
+                model: task.model, geometry: task.geometry, scale: 1, token: task.token,
+            }, "repair-prime", "Preparing hollow…").then((cache) => {
+                if (!cache && currentRepairPrimeTask(task)) {
+                    console.warn("Repair cache prime unavailable");
+                }
+                if (repairPrimeTask === task) repairPrimeTask = null;
+            }, (error) => {
+                if (currentRepairPrimeTask(task)) {
+                    console.warn("Repair cache prime unavailable:", error);
+                }
+                if (repairPrimeTask === task) repairPrimeTask = null;
+            });
+        };
+        if (typeof window.requestIdleCallback === "function") {
+            task.idleHandle = window.requestIdleCallback(run, { timeout: 1000 });
+        } else {
+            task.timer = setTimeout(run, 50);
+        }
+    }
+
+    async function sanctionedHollowCache(target, kind, label) {
+        let op = null;
+        if (!CC.ops.busy()) {
+            op = CC.ops.begin(kind);
+            if (!op) return null;
+            CC.progress.show(label);
+        }
+        try {
+            return await ensureHollowComputeCache(target, kind);
+        } finally {
+            if (op) {
+                CC.progress.hide();
+                CC.ops.end(op);
+            }
+        }
+    }
+
+    async function runWorkerHollow(target, op, payload, options, kind = "beat") {
+        const cacheKind = kind === "apply" ? kind : "hollow-prep";
+        const cache = await sanctionedHollowCache(target, cacheKind, "Preparing hollow…");
+        if (!cache) return null;
+        cache.borrowCount++;
+        try {
+            const value = await runHollowComputeJob(op,
+                Object.assign({}, payload, { token: cache.token }), options, kind);
+            return { value };
+        } finally {
+            cache.borrowCount--;
+            releaseHollowComputeCache(cache);
+        }
+    }
+
+    function disposePrintManifoldCache() {
+        cancelPrintManifoldWarm();
+        clearPrintManifoldCache();
+        clearHollowComputeCache();
+    }
+
+    function createPrintManifoldWarm(target, worker = false) {
+        const warm = Object.assign({}, target, {
+            idleHandle: null,
+            timer: null,
+            retryTimer: null,
+            started: false,
+            worker,
+            manifold: null,
+            error: null,
+            resolve: null,
+        });
+        warm.promise = new Promise((resolve) => { warm.resolve = resolve; });
+        printManifoldWarm = warm;
+        return warm;
+    }
+
+    function buildPrintManifold(warm) {
+        const target = warm;
+        if (warm.started) {
+            if (warm.error) throw warm.error;
+            return warm.manifold;
+        }
+        warm.started = true;
+
+        let base = null;
+        try {
+            base = CutCore.toManifold(target.geometry);
+            let source = base;
+            if (Math.abs(target.scale - 1) > 1e-9) {
+                source = base.transform(new THREE.Matrix4()
+                    .makeScale(target.scale, target.scale, target.scale).elements);
+                base.delete();
+                base = null;
+            }
+            if (!currentPrintManifoldTarget(target)) {
+                source.delete();
+                cancelPrintManifoldWarmTask(warm);
+                settlePrintManifoldWarm(warm, null);
+                if (printManifoldWarm === warm) printManifoldWarm = null;
+                return null;
+            }
+            printManifoldCache = {
+                model: target.model, geometry: target.geometry, scale: target.scale,
+                manifold: source,
+                borrowCount: 0,
+                retired: false,
+                deleted: false,
+            };
+            warm.manifold = source;
+            cancelPrintManifoldWarmTask(warm);
+            settlePrintManifoldWarm(warm, source);
+            if (printManifoldWarm === warm) printManifoldWarm = null;
+            return source;
+        } catch (error) {
+            if (base) base.delete();
+            warm.error = error;
+            cancelPrintManifoldWarmTask(warm);
+            settlePrintManifoldWarm(warm, null);
+            if (printManifoldWarm === warm) printManifoldWarm = null;
+            throw error;
+        }
+    }
+
+    function retryPrintManifoldWarm(warm) {
+        if (warm.retryTimer !== null) return;
+        warm.retryTimer = setTimeout(() => {
+            warm.retryTimer = null;
+            runPrintManifoldWarm(warm);
+        }, 100);
+    }
+
+    function buildPrintManifoldInOp(warm) {
+        const op = CC.ops.begin("bigprint-warm");
+        if (!op) return false;
+        CC.progress.show("Preparing Big Print…");
+        try {
+            buildPrintManifold(warm);
+        } catch (error) {
+            console.warn("Big Print manifold warm unavailable:", error);
+        } finally {
+            CC.progress.hide();
+            CC.ops.end(op);
+        }
+        return true;
+    }
+
+    function currentPrintManifoldWarm(warm) {
+        return printManifoldWarm === warm && !hollowStates.has(warm.model)
+            && currentPrintManifoldTarget(warm);
+    }
+
+    function runPrintManifoldWarm(warm) {
+        if (!currentPrintManifoldWarm(warm)) {
+            cancelPrintManifoldWarmRecord(warm);
+            return;
+        }
+        if (warm.worker) {
+            warm.started = true;
+            sanctionedHollowCache(warm, "bigprint-warm", "Preparing Big Print…").then((cache) => {
+                if (!cache || !currentPrintManifoldWarm(warm)) {
+                    cancelPrintManifoldWarmRecord(warm);
+                    return;
+                }
+                settlePrintManifoldWarm(warm, cache);
+                if (printManifoldWarm === warm) {
+                    printManifoldWarm = null;
+                    const mainWarm = createPrintManifoldWarm(warm);
+                    queuePrintManifoldWarm(mainWarm);
+                }
+            }, (error) => {
+                cancelPrintManifoldWarmRecord(warm);
+                console.warn("Big Print compute warm unavailable:", error);
+                if (!computeWorkerPath()) schedulePrintManifoldWarm();
+            });
+            return;
+        }
+        if (!CutCore.isReady()) {
+            retryPrintManifoldWarm(warm);
+            return;
+        }
+        if (!hollowStatusSettled || CC.ops.busy()) {
+            retryPrintManifoldWarm(warm);
+            return;
+        }
+        if (!buildPrintManifoldInOp(warm)) retryPrintManifoldWarm(warm);
+    }
+
+    function queuePrintManifoldWarm(warm) {
+        if (!currentPrintManifoldWarm(warm)) {
+            cancelPrintManifoldWarmRecord(warm);
+            return;
+        }
+        if (warm.started) return;
+        if (typeof window.requestIdleCallback === "function") {
+            warm.idleHandle = window.requestIdleCallback(() => {
+                warm.idleHandle = null;
+                runPrintManifoldWarm(warm);
+            }, { timeout: PRINT_MANIFOLD_IDLE_TIMEOUT });
+        } else {
+            warm.timer = setTimeout(() => {
+                warm.timer = null;
+                runPrintManifoldWarm(warm);
+            }, 50);
+        }
+    }
+
+    function schedulePrintManifoldWarm() {
+        if (!active || !model || hollowStates.has(model)) {
+            cancelPrintManifoldWarm();
+            return;
+        }
+        const target = printManifoldTarget();
+        if (computeWorkerPath()) {
+            if (printManifoldCache && !samePrintManifoldTarget(printManifoldCache, target)) {
+                clearPrintManifoldCache();
+            }
+            if (printManifoldCache) return;
+            if (printManifoldWarm && samePrintManifoldTarget(printManifoldWarm, target)) return;
+            if (validHollowComputeCache(target)) {
+                cancelPrintManifoldWarm();
+                const warm = createPrintManifoldWarm(target);
+                queuePrintManifoldWarm(warm);
+                return;
+            }
+            cancelPrintManifoldWarm();
+            clearHollowComputeCache();
+            const warm = createPrintManifoldWarm(target, true);
+            queuePrintManifoldWarm(warm);
+            return;
+        }
+        clearHollowComputeCache();
+        if (printManifoldCache && !samePrintManifoldTarget(printManifoldCache, target)) {
+            clearPrintManifoldCache();
+        }
+        if (printManifoldCache || (printManifoldWarm
+            && samePrintManifoldTarget(printManifoldWarm, target))) return;
+        cancelPrintManifoldWarm();
+        const warm = createPrintManifoldWarm(target);
+        queuePrintManifoldWarm(warm);
+    }
+
+    async function manifoldForPrint() {
+        const target = printManifoldTarget();
+        if (printManifoldCache && !samePrintManifoldTarget(printManifoldCache, target)) {
+            clearPrintManifoldCache();
+        }
+        if (printManifoldCache) return borrowPrintManifold(printManifoldCache);
+        if (printManifoldWarm && !samePrintManifoldTarget(printManifoldWarm, target)) {
+            cancelPrintManifoldWarm();
+        }
+        let warm = printManifoldWarm;
+        if (!warm) {
+            warm = createPrintManifoldWarm(target);
+        }
+        if (warm.worker && !validHollowComputeCache(target)) {
+            cancelPrintManifoldWarmCompute();
+            cancelPrintManifoldWarmRecord(warm);
+            warm = createPrintManifoldWarm(target);
+        }
+        if (!warm.started) {
+            cancelPrintManifoldWarmTask(warm);
+            if (warm.worker) {
+                runPrintManifoldWarm(warm);
+            } else {
+                if (!CutCore.isReady()) {
+                    settlePrintManifoldWarm(warm, null);
+                    if (printManifoldWarm === warm) printManifoldWarm = null;
+                    throw new Error("Hollow engine is not ready");
+                }
+                if (CC.ops.busy()) buildPrintManifold(warm);
+                else if (!buildPrintManifoldInOp(warm)) {
+                    settlePrintManifoldWarm(warm, null);
+                    if (printManifoldWarm === warm) printManifoldWarm = null;
+                }
+            }
+        }
+        const source = await warm.promise;
+        if (!source && warm.error) throw warm.error;
+        if (warm.worker) {
+            if (!source) return null;
+            return manifoldForPrint();
+        }
+        if (!source || !printManifoldCache || printManifoldCache.manifold !== source) return null;
+        return borrowPrintManifold(printManifoldCache);
+    }
+
+    function warningText(warnings) {
+        return warnings.map((warning) => warning.detail).join(" · ");
+    }
+
+    function previewWallStats(displacementsMm) {
+        const values = Array.from(displacementsMm).sort((a, b) => a - b);
+        const pick = (fraction) => values[Math.floor(fraction * (values.length - 1))];
+        return {
+            minMm: values[0],
+            p05Mm: pick(0.05),
+            medianMm: pick(0.5),
+        };
+    }
+
+    function appendPreviewWarnings(warnings) {
+        if (!warnings.length) return;
+        hollowStatus.append(document.createTextNode(" · warnings: "));
+        warnings.forEach((warning, index) => {
+            if (index) hollowStatus.append(document.createTextNode(", "));
+            const code = document.createElement("span");
+            code.textContent = warning.code;
+            code.title = warning.detail;
+            if (warning.code === "thin-wall-hard") code.className = "bp-hollow-warning-hard";
+            hollowStatus.append(code);
+        });
+    }
+
+    function cancelHollowWarningBeat() {
+        clearTimeout(hollowWarningTimer);
+        hollowWarningTimer = null;
+        if (hollowWarningFrame !== null) {
+            cancelAnimationFrame(hollowWarningFrame);
+            hollowWarningFrame = null;
+        }
+    }
+
+    function cancelHollowUpdate() {
+        cancelHollowComputeJob(false);
+        clearTimeout(hollowTimer);
+        hollowTimer = null;
+        cancelHollowWarningBeat();
+        hollowRevision++;
+        hollowStatusSettled = true;
+    }
+
+    function currentHollowBeat(revision, targetModel, targetGeometry, targetScale) {
+        return active && hollowOn.checked && !hollowStates.has(targetModel)
+            && revision === hollowRevision && model === targetModel
+            && model.geometry === targetGeometry && Math.abs(scale - targetScale) <= 1e-9;
+    }
+
+    function settleHollowBeat(revision) {
+        if (revision === hollowRevision) hollowStatusSettled = true;
+    }
+
+    function queueHollowWarnings(revision, targetModel, targetGeometry, targetScale, wall, story) {
+        const run = () => {
+            hollowWarningTimer = setTimeout(() => {
+                hollowWarningTimer = null;
+                updateHollowWarnings(revision, targetModel, targetGeometry,
+                    targetScale, wall, story);
+            }, 0);
+        };
+        if (typeof window.requestAnimationFrame === "function") {
+            hollowWarningFrame = window.requestAnimationFrame(() => {
+                hollowWarningFrame = null;
+                if (currentHollowBeat(revision, targetModel, targetGeometry, targetScale)) run();
+                else settleHollowBeat(revision);
+            });
+        } else {
+            run();
+        }
+    }
+
+    async function updateHollowWarnings(revision, targetModel, targetGeometry, targetScale, wall, story) {
+        if (!currentHollowBeat(revision, targetModel, targetGeometry, targetScale)) {
+            settleHollowBeat(revision);
+            return;
+        }
+        let preview = null;
+        let lease = null;
+        try {
+            const target = { model: targetModel, geometry: targetGeometry, scale: targetScale };
+            const workerResult = computeWorkerPath()
+                ? await runWorkerHollow(target, "previewShell", { wallMm: wall,
+                    opts: { maxSamples: HOLLOW_WARNING_MAX_SAMPLES } }, {}, "beat")
+                : null;
+            if (workerResult) preview = workerResult.value;
+            else {
+                lease = await manifoldForPrint();
+                if (!lease || !currentHollowBeat(revision, targetModel, targetGeometry, targetScale)) return;
+                preview = CC.hollowCore.previewShell(lease.manifold, wall, {
+                    maxSamples: HOLLOW_WARNING_MAX_SAMPLES,
+                });
+            }
+            const wallStats = previewWallStats(preview.displacementsMm);
+            const warnings = CC.hollowCore.wallWarnings(wallStats, wall);
+            if (!currentHollowBeat(revision, targetModel, targetGeometry, targetScale)) return;
+
+            hollowStatus.textContent = story.status;
+            appendPreviewWarnings(warnings);
+            hollowStatus.append(document.createTextNode(
+                " · coarse preview — exact result on Apply."));
+            hollowStatus.classList.toggle("warning", warnings.length > 0);
+            hollowStatusSettled = true;
+        } catch (error) {
+            if (!currentHollowBeat(revision, targetModel, targetGeometry, targetScale)) return;
+            console.warn("Hollow wall warnings unavailable:", error);
+            hollowStatus.textContent = story.status
+                + " Wall warnings unavailable — exact result on Apply.";
+            hollowStatus.classList.add("warning");
+            hollowStatusSettled = true;
+        } finally {
+            settleHollowBeat(revision);
+            preview = null;
+            if (lease) releasePrintManifold(lease);
+        }
+    }
+
+    async function updateHollowEstimate(revision) {
+        if (!active || !model || !hollowOn.checked || hollowStates.has(model)
+            || revision !== hollowRevision) {
+            settleHollowBeat(revision);
+            return;
+        }
+        const wall = wallMm();
+        if (!Number.isFinite(wall) || wall < 0.8) {
+            hollowStatus.textContent = "Wall thickness must be at least 0.8 mm.";
+            hollowStatus.classList.add("warning");
+            hollowStatusSettled = true;
+            return;
+        }
+        if (!computeWorkerPath() && !CutCore.isReady()) {
+            hollowStatus.textContent = "Hollow engine is warming up…";
+            hollowStatusSettled = true;
+            return;
+        }
+
+        let story = null;
+        let lease = null;
+        let warningsQueued = false;
+        try {
+            const targetModel = model;
+            const targetGeometry = model.geometry;
+            const targetScale = scale;
+            const target = { model: targetModel, geometry: targetGeometry, scale: targetScale };
+            const workerResult = computeWorkerPath()
+                ? await runWorkerHollow(target, "hollowEstimate", { wallMm: wall }, {}, "beat")
+                : null;
+            let estimate;
+            if (workerResult) estimate = workerResult.value;
+            else {
+                lease = await manifoldForPrint();
+                if (!lease || !currentHollowBeat(revision, targetModel, targetGeometry, targetScale)) return;
+                estimate = CC.hollowCore.estimate(lease.manifold, wall);
+            }
+            if (!currentHollowBeat(revision, targetModel, targetGeometry, targetScale)) return;
+            if (estimate === null) {
+                hollowStatusSettled = true;
+                return;
+            }
+            const savedPct = typeof estimate === "number" ? estimate : estimate.savedPct;
+            story = Core.hollowSavingsStory(savedPct, wall);
+            lastSavingsStory = story;
+            if (!currentHollowBeat(revision, targetModel, targetGeometry, targetScale)) return;
+            hollowStatus.textContent = story.status + " Checking walls…";
+            hollowStatus.classList.remove("warning");
+            warningsQueued = true;
+            queueHollowWarnings(revision, targetModel, targetGeometry, targetScale, wall, story);
+        } catch (error) {
+            if (revision !== hollowRevision) return;
+            console.warn("Hollow estimate unavailable:", error);
+            hollowStatus.textContent = story
+                ? story.status + " Wall warnings unavailable — exact result on Apply."
+                : "Hollow estimate unavailable at this wall thickness — exact result on Apply.";
+            hollowStatus.classList.add("warning");
+            hollowStatusSettled = true;
+        } finally {
+            if (!warningsQueued) settleHollowBeat(revision);
+            if (lease) releasePrintManifold(lease);
+        }
+    }
+
+    async function updateHollowTeaser(revision) {
+        if (!active || !model || hollowOn.checked || hollowStates.has(model)
+            || revision !== hollowRevision) {
+            settleHollowBeat(revision);
+            return;
+        }
+        hollowTeaser.textContent = "";
+        let lease = null;
+        try {
+            const targetModel = model;
+            const targetGeometry = model.geometry;
+            const targetScale = scale;
+            const target = { model: targetModel, geometry: targetGeometry, scale: targetScale };
+            const workerResult = computeWorkerPath()
+                ? await runWorkerHollow(target, "hollowEstimate", { wallMm: wallMm() }, {}, "beat")
+                : null;
+            let estimate;
+            if (workerResult) estimate = workerResult.value;
+            else {
+                lease = await manifoldForPrint();
+                if (!lease || !active || model !== targetModel || model.geometry !== targetGeometry
+                    || Math.abs(scale - targetScale) > 1e-9 || revision !== hollowRevision) return;
+                estimate = CC.hollowCore.estimate(lease.manifold, wallMm());
+            }
+            if (!active || hollowOn.checked || hollowStates.has(model)
+                || revision !== hollowRevision || model !== targetModel
+                || model.geometry !== targetGeometry || Math.abs(scale - targetScale) > 1e-9) return;
+            const savedPct = typeof estimate === "number" ? estimate : estimate.savedPct;
+            lastSavingsStory = Core.hollowSavingsStory(savedPct, wallMm());
+            hollowTeaser.textContent = lastSavingsStory.teaser || "";
+            hollowStatusSettled = true;
+        } catch (error) {
+            console.warn("Hollow teaser unavailable:", error);
+            if (revision === hollowRevision) hollowStatusSettled = true;
+        } finally {
+            settleHollowBeat(revision);
+            if (lease) releasePrintManifold(lease);
+        }
+    }
+
+    function scheduleHollowUpdate() {
+        cancelHollowUpdate();
+        if (!active || !model || hollowStates.has(model)) return;
+        hollowStatusSettled = false;
+        lastSavingsStory = null;
+        if (!hollowOn.checked) hollowTeaser.textContent = "";
+        const revision = hollowRevision;
+        hollowTimer = setTimeout(() => {
+            hollowTimer = null;
+            if (hollowOn.checked) updateHollowEstimate(revision);
+            else updateHollowTeaser(revision);
+        }, 180);
+    }
+
+    function restorePreHollow() {
+        const state = hollowStates.get(model);
+        if (!state) return false;
+        disposePrintManifoldCache();
+        model.geometry.dispose();
+        model.geometry = state.preHollowGeometry;
+        model.scale.setScalar(1);
+        delete model.userData.bigPrintHollow;
+        if (state.bakedScaleRecorded) {
+            const prior = model.userData.bakedScale / state.scale;
+            if (Math.abs(prior - 1) <= 1e-9) delete model.userData.bakedScale;
+            else model.userData.bakedScale = prior;
+        }
+        hollowStates.delete(model);
+        baseSize.copy(state.baseSize);
+        hollowOn.checked = true;
+        hollowOn.disabled = false;
+        hollowFields.style.display = "";
+        hollowTeaser.textContent = "";
+        hollowWall.disabled = false;
+        hollowApply.disabled = false;
+        hollowStatus.textContent = "";
+        hollowStatus.classList.remove("warning");
+        hollowStatusSettled = true;
+        return true;
+    }
+
+    hollowWall.addEventListener("input", () => {
+        if (!hollowOn.checked) return;
+        updateWallHint();
+        scheduleHollowUpdate();
+    });
+
+    hollowOn.addEventListener("change", () => {
+        hollowFields.style.display = hollowOn.checked ? "" : "none";
+        cancelHollowUpdate();
+        hollowStatusSettled = !hollowOn.checked;
+        hollowStatus.textContent = "";
+        hollowStatus.classList.remove("warning");
+        if (hollowOn.checked) {
+            hollowTeaser.textContent = "";
+            updateWallHint();
+            scheduleHollowUpdate();
+        } else {
+            hollowTeaser.textContent = lastSavingsStory && lastSavingsStory.teaser || "";
+        }
+    });
 
     // ------------------------------------------------------- grid preview
 
@@ -140,12 +1089,14 @@
 
     function refresh() {
         if (!active || explodeGroup) return; // frozen while exploded
-        model.scale.setScalar(scale);
+        resetExportConfirmation();
+        model.scale.setScalar(hollowStates.has(model) ? 1 : scale);
         const p = params();
         grid = Core.computeGrid(p);
         removeGrid();
 
         if (!grid) {
+            status.classList.remove("warning");
             status.textContent = "The margin eats the whole bed — shrink one of them.";
             exportBtn.disabled = true;
             return;
@@ -182,10 +1133,14 @@
         CC.scene.add(gridGroup);
 
         const c = grid.counts;
+        const count = Core.cellCount(grid);
+        const story = Core.partStory(count, hollowStates.has(model));
         status.textContent =
             `Final ${p.size.x.toFixed(0)} × ${p.size.z.toFixed(0)} × ${p.size.y.toFixed(0)} mm` +
             ` · grid ${c.x}×${c.z}×${c.y}` +
-            ` · up to ${grid.total} part${grid.total === 1 ? "" : "s"}`;
+            ` · up to ${count.toLocaleString()} part${count === 1 ? "" : "s"}` +
+            story.statusSuffix;
+        status.classList.toggle("warning", count > WARN_CELL_COUNT);
         exportBtn.disabled = false;
 
         // Nudge range follows the usable cell size.
@@ -196,29 +1151,72 @@
 
     // ------------------------------------------------------------ mode flow
 
+    function appliedHollowStatus(receipt, warnings = []) {
+        hollowStatus.textContent = `Hollowed · saved ${receipt.savedPct.toFixed(1)}%`
+            + ` · used ${receipt.engineUsed} engine${receipt.fellBack ? " (fallback)" : ""}`
+            + (warnings.length ? ` · ${warningText(warnings)}` : "");
+        hollowStatus.classList.toggle("warning", warnings.length > 0 || receipt.fellBack);
+        hollowOn.checked = true;
+        hollowOn.disabled = true;
+        hollowFields.style.display = "";
+        hollowTeaser.textContent = "";
+        hollowWall.disabled = true;
+        hollowApply.disabled = true;
+        hollowStatusSettled = true;
+    }
+
     function enter() {
         if (active) return;
         if (!CC.getModel()) return;
+        if (CC.ops.busy()) {
+            CC.toast("Another operation is still running — one moment.");
+            return;
+        }
         if (CC.pieces.length !== 1) {
             CC.toast("Big Print slices the whole model — use it before other cuts.");
             return;
         }
+        cancelPrintManifoldWarm();
+        clearPrintManifoldCache();
         active = true;
         CC.bigPrintActive = true;
-        savedCam = { pos: CC.camera.position.clone(), target: CC.controls.target.clone() };
+        exportCompleted = false;
         model = CC.pieces[0];
-        model.geometry.computeBoundingBox();
-        const bb = model.geometry.boundingBox;
-        baseSize = new THREE.Vector3();
-        bb.getSize(baseSize);
+        const hollowState = hollowStates.get(model);
+        if (hollowState) {
+            baseSize = hollowState.baseSize.clone();
+            scale = hollowState.scale;
+        } else {
+            model.geometry.computeBoundingBox();
+            const bb = model.geometry.boundingBox;
+            baseSize = new THREE.Vector3();
+            bb.getSize(baseSize);
+            scale = 1;
+        }
 
         printerSelect.value = "0";
         applyPreset();
         marginInput.value = 5;
         nudgeX.value = 0; nudgeY.value = 0; nudgeZ.value = 0;
-        setScale(1);
+        hollowWall.value = hollowState ? model.userData.bigPrintHollow.wallMm : 6;
+        hollowOn.checked = !!hollowState;
+        hollowOn.disabled = !!hollowState;
+        hollowFields.style.display = hollowState ? "" : "none";
+        hollowTeaser.textContent = "";
+        lastSavingsStory = null;
+        updateWallHint();
+        setScale(scale);
+        if (hollowState) appliedHollowStatus(
+            model.userData.bigPrintHollow, hollowState.warnings);
+        else {
+            hollowWall.disabled = false;
+            hollowApply.disabled = false;
+            hollowStatus.textContent = "";
+            hollowStatus.classList.remove("warning");
+        }
 
         gsap.to([actionDock], { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
+        panelCollapse.reset(); // Big Print re-entry always starts expanded
         gsap.fromTo(panel, { y: 16 },
             { autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out" });
         refresh();
@@ -229,22 +1227,257 @@
             Math.round(Math.min(Math.max(u * 0.05, 4), 12));
     }
 
-    function exit() {
+    function recordBakedScale(piece, keptScale) {
+        if (Math.abs(keptScale - 1) <= 1e-9) return;
+        piece.userData.bakedScale = (piece.userData.bakedScale || 1) * keptScale;
+    }
+
+    function showModelStats(piece) {
+        piece.geometry.computeBoundingBox();
+        const size = new THREE.Vector3();
+        piece.geometry.boundingBox.getSize(size);
+        const index = piece.geometry.getIndex();
+        const tris = (index ? index.count : piece.geometry.attributes.position.count) / 3;
+        CC.showStats(piece.userData.sourceName || piece.name, tris, size);
+    }
+
+    function exit(modelLoaded = false) {
         if (!active) return;
+        resetExportConfirmation();
+        cancelHollowUpdate();
+        disposePrintManifoldCache();
         active = false;
         CC.bigPrintActive = false;
         disposeProxies();
         removeGrid();
-        model.scale.setScalar(1);
-        model = null;
-        if (savedCam) { // the scale-to-fit flight shouldn't strand the camera
-            gsap.to(CC.camera.position, { x: savedCam.pos.x, y: savedCam.pos.y, z: savedCam.pos.z, duration: 0.5, ease: "power2.out" });
-            gsap.to(CC.controls.target, { x: savedCam.target.x, y: savedCam.target.y, z: savedCam.target.z, duration: 0.5, ease: "power2.out" });
-            savedCam = null;
+        if (!modelLoaded && !exportCompleted) {
+            const restoredScale = Math.abs(scale - 1) > 1e-9;
+            const restoredHollow = hollowStates.has(model) && restorePreHollow();
+            scale = 1;
+            model.scale.setScalar(1);
+            if (restoredHollow) {
+                window.dispatchEvent(new CustomEvent("curvecut:pieces-changed",
+                    { detail: { source: "hollow-revert" } }));
+            }
+            if (restoredScale || restoredHollow) {
+                CC.toast("Big Print cancelled — model restored.");
+            }
+            CC.flyHome();
+            showModelStats(model);
+        } else if (!modelLoaded && exportCompleted) {
+            const keptScale = scale;
+            const hollowState = hollowStates.get(model);
+            if (!hollowState && Math.abs(keptScale - 1) > 1e-9) {
+                model.geometry.scale(keptScale, keptScale, keptScale);
+                model.geometry.computeBoundingBox();
+                baseSize.multiplyScalar(keptScale);
+                scale = 1;
+                model.scale.setScalar(1);
+            }
+            if (!hollowState || !hollowState.bakedScaleRecorded) {
+                recordBakedScale(model, keptScale);
+                if (hollowState) hollowState.bakedScaleRecorded = true;
+            }
+            if (Math.abs(keptScale - 1) > 1e-9) {
+                window.dispatchEvent(new CustomEvent("curvecut:pieces-changed",
+                    { detail: { source: "bigprint-export-scale" } }));
+            }
+            showModelStats(model);
         }
+        model = null;
         gsap.to(panel, { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
         gsap.fromTo([viewDock, actionDock], { y: 10 },
             { autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out", delay: 0.1 });
+    }
+
+    // ------------------------------------------------------- apply hollow
+
+    let hollowRunning = false;
+
+    async function applyHollow() {
+        if (hollowRunning || hollowStates.has(model)) return;
+        const wall = wallMm();
+        if (!Number.isFinite(wall) || wall < 0.8) {
+            hollowStatus.textContent = "Wall thickness must be at least 0.8 mm.";
+            hollowStatus.classList.add("warning");
+            return;
+        }
+        if (!computeWorkerPath() && !CutCore.isReady()) {
+            CC.toast("The hollow engine is still warming up — one moment.");
+            return;
+        }
+        if (CC.ops.busy()) {
+            CC.toast("Another operation is still running — one moment.");
+            return;
+        }
+        const op = CC.ops.begin("hollow");
+        if (!op) {
+            CC.toast("Another operation is still running — one moment.");
+            return;
+        }
+
+        let source = null;
+        let lease = null;
+        let result = null;
+        let hollowStats = null;
+        let geometry = null;
+        const target = { model, geometry: model.geometry, scale };
+        hollowRunning = true;
+        hollowApply.disabled = true;
+        cancelHollowUpdate();
+        CC.progress.show("Preparing hollow…");
+        try {
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            if (!op.alive()) throw new CC.hollowCore.HollowCancelled();
+            let workerResult = null;
+            if (computeWorkerPath()) {
+                workerResult = await runWorkerHollow(target, "hollowApply", { wallMm: wall }, {
+                    onProgress(progress) {
+                        const label = (progress.stage || "compute").replace(/-/g, " ");
+                        CC.progress.update(`Hollowing — ${label}…`, progress.fraction);
+                        if (!op.alive()) cancelHollowComputeJob(true);
+                    },
+                }, "apply");
+            }
+            if (workerResult) {
+                const arrays = workerResult.value;
+                geometry = new THREE.BufferGeometry();
+                geometry.setAttribute("position",
+                    new THREE.BufferAttribute(arrays.vertProperties, 3));
+                geometry.setIndex(new THREE.BufferAttribute(arrays.triVerts, 1));
+                hollowStats = arrays.stats;
+            } else {
+                await CutCore.init();
+                lease = await manifoldForPrint();
+                if (!lease || !op.alive() || !currentPrintManifoldTarget(target)) {
+                    throw new CC.hollowCore.HollowCancelled();
+                }
+                source = lease.manifold;
+                result = CC.hollowCore.hollow(source, wall, {
+                    onProgress(stage, fraction) {
+                        const label = stage.replace(/-/g, " ");
+                        CC.progress.update(`Hollowing — ${label}…`, fraction);
+                    },
+                    shouldCancel: () => !op.alive(),
+                });
+                hollowStats = result.stats;
+                geometry = CutCore.toGeometry(result.hollow);
+            }
+            if (!op.alive()) throw new CC.hollowCore.HollowCancelled();
+            disposePrintManifoldCache();
+
+            const receipt = {
+                wallMm: wall,
+                savedPct: hollowStats.savedPct,
+                engineUsed: hollowStats.engineUsed,
+                fellBack: hollowStats.fellBack,
+            };
+            const previous = model;
+            const preHollowGeometry = previous.geometry.clone();
+            const next = new THREE.Mesh(geometry, previous.material);
+            geometry = null;
+            next.name = previous.name;
+            next.visible = previous.visible;
+            next.userData = Object.assign({}, previous.userData, { bigPrintHollow: receipt });
+            next.scale.setScalar(1);
+
+            CC.history.capture();
+            CC.scene.remove(previous);
+            CC.scene.add(next);
+            CC.pieces[0] = next;
+            model = next;
+            hollowStates.set(next, {
+                preHollowGeometry,
+                baseSize: baseSize.clone(),
+                scale,
+                bakedScaleRecorded: false,
+                warnings: hollowStats.warnings.slice(),
+            });
+            appliedHollowStatus(receipt, hollowStats.warnings);
+            window.dispatchEvent(new CustomEvent("curvecut:pieces-changed",
+                { detail: { source: "hollow" } }));
+            refresh();
+            CC.toast(`Hollowed — saved ${receipt.savedPct.toFixed(1)}% of material (wall ${wall} mm)`);
+        } catch (error) {
+            if (error instanceof CC.hollowCore.HollowCancelled
+                || (CC.compute && error instanceof CC.compute.ComputeCancelled)) {
+                hollowStatus.textContent = "Hollowing cancelled — model unchanged.";
+                hollowStatus.classList.remove("warning");
+                CC.toast("Hollowing cancelled — model unchanged.");
+            } else if (error instanceof CC.hollowCore.HollowGridTooLarge) {
+                hollowStatus.textContent = `Hollowing needs too much memory (${error.voxels.toLocaleString()} grid cells) — model unchanged.`;
+                hollowStatus.classList.add("warning");
+                CC.toast("Hollowing needs too much memory at this wall thickness.");
+            } else {
+                console.error("Hollowing failed:", error);
+                hollowStatus.textContent = "Hollowing failed — model unchanged. See the console for details.";
+                hollowStatus.classList.add("warning");
+                CC.toast("Hollowing failed — the model was not changed.");
+            }
+        } finally {
+            if (geometry) geometry.dispose();
+            if (result) result.hollow.delete();
+            if (lease) releasePrintManifold(lease);
+            source = null;
+            CC.progress.hide();
+            CC.ops.end(op);
+            hollowRunning = false;
+            hollowApply.disabled = hollowStates.has(model);
+        }
+    }
+
+    function resetImportScale() {
+        if (CC.ops.busy()) {
+            CC.toast("An operation is still running — reset the scale when it finishes.");
+            return;
+        }
+        if (active) {
+            CC.toast("Exit Big Print before resetting the scale.");
+            return;
+        }
+        if (CC.pieces.length !== 1 || !CC.pieces[0].userData.bakedScale) return;
+
+        const piece = CC.pieces[0];
+        disposePrintManifoldCache();
+        const state = hollowStates.get(piece);
+        const restoredHollow = !!state;
+        let geometry;
+
+        CC.history.capture();
+        if (state) {
+            const hollowGeometry = piece.geometry;
+            piece.geometry = hollowGeometry.clone();
+            hollowGeometry.dispose();
+            geometry = state.preHollowGeometry;
+            const priorScale = piece.userData.bakedScale / state.scale;
+            if (Math.abs(priorScale - 1) > 1e-9) {
+                geometry.scale(1 / priorScale, 1 / priorScale, 1 / priorScale);
+                geometry.computeBoundingBox();
+            }
+            hollowStates.delete(piece);
+        } else {
+            geometry = piece.geometry.clone();
+            const k = piece.userData.bakedScale;
+            geometry.scale(1 / k, 1 / k, 1 / k);
+            geometry.computeBoundingBox();
+        }
+
+        const next = new THREE.Mesh(geometry, piece.material);
+        next.name = piece.name;
+        next.visible = piece.visible;
+        next.userData = Object.assign({}, piece.userData);
+        delete next.userData.bakedScale;
+        if (restoredHollow) delete next.userData.bigPrintHollow;
+
+        CC.scene.remove(piece);
+        CC.scene.add(next);
+        CC.pieces[0] = next;
+        window.dispatchEvent(new CustomEvent("curvecut:pieces-changed",
+            { detail: { source: "scale-reset" } }));
+        showModelStats(next);
+        CC.toast(restoredHollow
+            ? "Restored the imported model — 1×."
+            : "Restored to imported size — 1×.");
     }
 
     // ------------------------------------------------------- cut & export
@@ -486,14 +1719,32 @@
 
     async function cutAndExport() {
         if (running) return;
+        const p = params();
+        const g = grid;
+        if (!g) return;
+        const totalCells = Core.cellCount(g);
+        if (totalCells > HARD_CELL_COUNT) {
+            resetExportConfirmation();
+            CC.toast(`${totalCells.toLocaleString()} candidate parts is too many — Big Print stops at ${HARD_CELL_COUNT.toLocaleString()}. Use a bigger bed or less scale.`);
+            return;
+        }
+        if (totalCells > WARN_CELL_COUNT
+                && (confirmCount !== totalCells || Date.now() >= confirmUntil)) {
+            armExportConfirmation(totalCells);
+            CC.toast(`${totalCells.toLocaleString()} candidate parts is a lot — click again within 5 seconds to export.`);
+            return;
+        }
         if (!CC.cutFlow.isEngineReady()) {
             CC.toast("The cutting engine is still warming up — one moment.");
             return;
         }
-        const p = params();
-        const g = grid;
-        if (!g) return;
+        resetExportConfirmation();
 
+        const op = CC.ops.begin("bigprint");
+        if (!op) {
+            CC.toast("Another operation is still running — one moment.");
+            return;
+        }
         const baseName = (model.name || "model").replace(/[^\w.-]+/g, "-") + "-bigprint";
         running = true;
         cancelled = false;
@@ -508,6 +1759,8 @@
                 : blobZipWriter(baseName);
         } catch (err) {
             if (err && err.name === "AbortError") { // user dismissed the save dialog
+                CC.toast("Stopped — nothing more was exported.");
+                CC.ops.end(op);
                 running = false;
                 exportBtn.disabled = false;
                 cancelBtn.textContent = "Cancel";
@@ -518,22 +1771,31 @@
             writer = blobZipWriter(baseName);
         }
 
-        disposeProxies(); // fresh proxy set per export
-        CC.progress.show("Preparing the model…");
-        await new Promise((r) => setTimeout(r, 30)); // let the pill paint
-
         let solid = null;
+        let lease = null;
         const rows = [];
         const occupied = new Set();
         let skippedEngravings = 0;
         try {
-            const scaleM = new THREE.Matrix4().makeScale(scale, scale, scale);
-            const base = CutCore.toManifold(model.geometry);
-            solid = base.transform(scaleM.elements);
-            base.delete();
+            disposeProxies(); // fresh proxy set per export
+            CC.progress.show("Preparing the model…");
+            await new Promise((r) => setTimeout(r, 30)); // let the pill paint
+
+            lease = await manifoldForPrint();
+            solid = lease && lease.manifold;
+            if (cancelled || !op.alive()) {
+                cancelled = true;
+                writer.abort();
+                CC.toast("Stopped — nothing more was exported.");
+                return;
+            }
+            if (!solid) {
+                writer.abort();
+                CC.toast("The export failed — the model could not be prepared.");
+                return;
+            }
 
             const min = { x: -p.size.x / 2, y: 0, z: -p.size.z / 2 };
-            const cells = Core.gridCells(g, p.size, min);
             const fmt = document.getElementById("bp-format").value === "3mf" ? "3mf" : "stl";
             const gap = Math.min(Math.max(parseFloat(gapInput.value) || 0, 0), 0.5);
             const conn = connBox.checked ? {
@@ -544,13 +1806,15 @@
                 tolD: Math.max(parseFloat(connTol.value) || 0, 0),
             } : null;
 
-            for (let i = 0; i < cells.length; i++) {
-                if (cancelled) break;
+            let i = 0;
+            for (const candidate of Core.gridCells(g, p.size, min)) {
+                if (cancelled || op.cancelled) { cancelled = true; break; }
                 const cell = engraveBox.checked
-                    ? { ...cells[i], engraveId: cells[i].id } : cells[i];
+                    ? { ...candidate, engraveId: candidate.id } : candidate;
                 CC.progress.update(
-                    `Cutting part ${occupied.size + 1} (cell ${i + 1} of ${cells.length})…`,
-                    i / cells.length);
+                    `Cutting part ${occupied.size + 1} (cell ${i + 1} of ${totalCells})…`,
+                    i / totalCells);
+                i++;
                 await new Promise((r) => setTimeout(r)); // keep the UI alive
                 const geo = CutCore.cutGridCell(solid, cell, gap, conn);
                 if (!geo) continue; // the model never enters this cell
@@ -580,13 +1844,27 @@
             const opt = printerSelect.selectedOptions[0];
             const settings = {
                 name: model.name || "model",
+                version: CC.VERSION,
+                exportDate: new Date().toISOString(),
                 scale: +scale.toFixed(3),
-                size: p.size, bed: p.bed, margin: p.margin, gap,
+                size: p.size, bed: p.bed, margin: p.margin, nudge: p.nudge, gap,
+                format: fmt.toUpperCase(),
+                engraveIds: engraveBox.checked,
+                candidateCount: totalCells,
                 printer: printerSelect.value === "custom" ? "custom bed" : opt.textContent,
                 connectors: conn
                     ? `${conn.shape} ${conn.size} mm, tolerance ${conn.tolR} mm`
                     : "off",
             };
+            if (model.userData.bigPrintHollow) {
+                const hollow = model.userData.bigPrintHollow;
+                settings.hollow = {
+                    wallMm: hollow.wallMm,
+                    savedPct: hollow.savedPct,
+                    engineUsed: hollow.engineUsed,
+                    fellBack: hollow.fellBack,
+                };
+            }
             CC.progress.update("Drawing the assembly map…", 1);
             try {
                 writer.add("assembly-map.png", await renderAssemblyMap(g, occupied, settings));
@@ -600,20 +1878,24 @@
 
             CC.bigPrint._lastExport = { parts: rows.length, files, skippedEngravings, rows,
                 proxies: proxies.length, proxyTruncated };
+            exportCompleted = true;
             if (proxies.length) explodeBtn.style.display = "";
-            CC.toast(`Big Print done — ${rows.length} part${rows.length === 1 ? "" : "s"} in `
+            const story = Core.partStory(rows.length, !!settings.hollow);
+            CC.toast(`Big Print done — ${story.exportLabel} in `
                 + `${files.length} zip${files.length === 1 ? "" : "s"}`
                 + (skippedEngravings ? ` (${skippedEngravings} too small to engrave)` : "")
                 + ".");
         } catch (err) {
             console.error("Big Print export failed:", err);
             CC.toast(err.message === "not-watertight"
-                ? "This model isn't watertight, so it can't be grid-cut cleanly."
+                ? "That piece isn't watertight — repair the model first (the repair button in the stats chip), then reopen Big Print."
                 : "The export failed — see the console for details.");
             writer.abort();
         } finally {
-            if (solid) solid.delete();
+            if (lease) releasePrintManifold(lease);
+            solid = null;
             CC.progress.hide();
+            CC.ops.end(op);
             running = false;
             exportBtn.disabled = false;
             cancelBtn.textContent = "Cancel";
@@ -621,16 +1903,115 @@
     }
 
     document.getElementById("bigprint-btn").addEventListener("click", enter);
+    statsReset.addEventListener("click", resetImportScale);
+    hollowApply.addEventListener("click", applyHollow);
     cancelBtn.addEventListener("click", () => {
+        if (hollowRunning) {
+            CC.ops.cancel();
+            cancelHollowComputeJob(true);
+            CC.toast("Stopping hollowing…");
+            return;
+        }
         if (running) { cancelled = true; return; }
         exit();
     });
     exportBtn.addEventListener("click", cutAndExport);
 
     window.addEventListener("keydown", (e) => {
-        if (active && e.key === "Escape") exit();
+        if (!active || e.key !== "Escape") return;
+        if (hollowRunning) {
+            CC.ops.cancel();
+            cancelHollowComputeJob(true);
+            CC.toast("Stopping hollowing…");
+            return;
+        }
+        if (running) {
+            // never tear down mid-export — ask the job to stop instead
+            cancelled = true;
+            CC.toast("Stopping — finishing the current part…");
+            return;
+        }
+        exit();
     });
-    window.addEventListener("curvecut:model-loaded", () => { if (active) exit(); });
+    window.addEventListener("curvecut:model-loaded", () => { if (active) exit(true); });
+    window.addEventListener("curvecut:repair-cache", (event) => {
+        const detail = event.detail;
+        cancelRepairPrimeTask();
+        cancelPrintManifoldWarm();
+        clearPrintManifoldCache();
+        clearHollowComputeCache();
+        if (detail && detail.primeReady) adoptHollowComputeCache(detail);
+        else scheduleRepairPrime(detail);
+    });
+    window.addEventListener("curvecut:pieces-changed", (event) => {
+        const detail = event.detail || {};
+        const computeCache = detail.computeCache;
+        cancelRepairPrimeTask();
+        cancelPrintManifoldWarm();
+        clearPrintManifoldCache();
+        clearHollowComputeCache();
+        if (computeCache && computeCache.primeReady) adoptHollowComputeCache(computeCache);
+        else if (computeCache) scheduleRepairPrime(computeCache);
+        if (!active || CC.pieces.length !== 1) return;
+        if (CC.pieces[0] === model) {
+            cancelHollowUpdate();
+            schedulePrintManifoldWarm();
+            return;
+        }
+        cancelHollowUpdate();
+        model = CC.pieces[0];
+        const state = hollowStates.get(model);
+        if (state) {
+            baseSize = state.baseSize.clone();
+            scale = state.scale;
+            model.scale.setScalar(1);
+            hollowWall.value = model.userData.bigPrintHollow.wallMm;
+            appliedHollowStatus(model.userData.bigPrintHollow, state.warnings);
+        } else {
+            model.geometry.computeBoundingBox();
+            baseSize = new THREE.Vector3();
+            model.geometry.boundingBox.getSize(baseSize);
+            scale = model.scale.x || 1;
+            hollowOn.disabled = false;
+            hollowFields.style.display = hollowOn.checked ? "" : "none";
+            hollowWall.disabled = false;
+            hollowApply.disabled = false;
+            hollowStatus.textContent = "";
+            hollowStatus.classList.remove("warning");
+        }
+        updateWallHint();
+        scaleInput.value = scale.toFixed(2).replace(/\.?0+$/, "");
+        scaleSlider.value = Math.min(scale, parseFloat(scaleSlider.max));
+        sizeInput.value = Core.targetForScale(longestSide(), scale).toFixed(0);
+        refitCamera();
+        refresh();
+        if (hollowOn.checked) scheduleHollowUpdate();
+        else {
+            lastSavingsStory = null;
+            hollowTeaser.textContent = "";
+        }
+        schedulePrintManifoldWarm();
+    });
 
-    CC.bigPrint = { enter, exit, isActive: () => active };
+    const bigPrintApi = {
+        enter, exit, resetImportScale, isActive: () => active,
+        _memoryReport: () => {
+            const liveMainManifoldCacheCount = printManifoldCache
+                && !printManifoldCache.deleted ? 1 : 0;
+            return {
+                liveManifoldCacheCount: liveMainManifoldCacheCount,
+                liveMainManifoldCacheCount,
+                liveHollowComputeCacheCount: computeWorkerPath() && hollowComputeCache
+                    && !hollowComputeCache.retired
+                    && hollowComputeCache.worker === CC.compute._worker ? 1 : 0,
+            };
+        },
+    };
+    if (location.hash === "#racetest") {
+        // Read-only race seam: distinguishes synchronous warm cancellation from
+        // the later null-cache continuation.
+        bigPrintApi._testWarmPending = () => !!(printManifoldWarm && printManifoldWarm.resolve);
+        bigPrintApi._testWarmCancelSerial = () => printManifoldWarmCancelSerial;
+    }
+    CC.bigPrint = bigPrintApi;
 })();

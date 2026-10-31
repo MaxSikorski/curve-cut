@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<header>
+    <h1>DOM-free engine property tests</h1>
+    <p>Iterations: cuts/watertightness + volume 12; connectors 12; exports 10; hollow 8; repair 12. Target runtime: under 90 seconds headless.</p>
+    <p>Deferred DOM/UI-layer coverage: repair UI, Big Print exit/reset, and history undo/redo remain for a later phase.</p>
+</header>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/three/STLLoader.js"></script>
+<script src="../vendor/three/3MFLoader.js"></script>
+<script src="../vendor/fflate/fflate.min.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../js/cut-core.js"></script>
+<script src="../js/hollow-core.js"></script>
+<script src="../js/bigprint-core.js"></script>
+<script>
+(async () => {
+    "use strict";
+
+    const CUT_ITERATIONS = 12;
+    const CONNECTOR_ITERATIONS = 12;
+    const EXPORT_ITERATIONS = 10;
+    const HOLLOW_ITERATIONS = 8;
+    const REPAIR_ITERATIONS = 12;
+    const DEFAULT_SEED = 0xC0FFEE21;
+    const logNode = document.getElementById("log");
+    const failures = [];
+    const log = (message) => { logNode.textContent += message + "\n"; };
+    const seedMatch = /(?:^|&)seed=([^&]+)/.exec(location.hash.replace(/^#/, ""));
+    const parsedSeed = seedMatch ? Number(seedMatch[1]) : NaN;
+    const seed = Number.isFinite(parsedSeed) ? (parsedSeed >>> 0) : DEFAULT_SEED;
+
+    const check = (name, condition, detail) => {
+        if (condition) {
+            log("ok   " + name + (detail ? " — " + detail : ""));
+            return;
+        }
+        const suffix = (detail ? " — " + detail : "") + " [seed=" + seed + "]";
+        log("FAIL " + name + suffix);
+        failures.push(name);
+    };
+
+    const dispose = (value) => {
+        if (value && typeof value.delete === "function") value.delete();
+        else if (value && typeof value.dispose === "function") value.dispose();
+    };
+    const disposeGeometries = (geometries) => geometries.forEach(dispose);
+    const statusOk = (manifold) => String(manifold.status()) === "NoError";
+    const triCount = (geometry) => {
+        const index = geometry.getIndex();
+        const position = geometry.getAttribute("position");
+        return (index ? index.count : position.count) / 3;
+    };
+    const range = (rng, lo, hi) => lo + rng() * (hi - lo);
+    const integer = (rng, count) => Math.floor(rng() * count);
+    const axisVector = (axis) => axis === "x"
+        ? new THREE.Vector3(1, 0, 0)
+        : axis === "y" ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+    const component = (vector, axis) => vector[axis];
+
+    function mulberry32(value) {
+        let state = value >>> 0;
+        return () => {
+            state = (state + 0x6D2B79F5) | 0;
+            let t = Math.imul(state ^ (state >>> 15), 1 | state);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+
+    function hashText(value) {
+        let hash = 2166136261;
+        for (let i = 0; i < value.length; i++) {
+            hash ^= value.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return hash >>> 0;
+    }
+
+    function propertyRng(name) {
+        return mulberry32((seed ^ hashText(name)) >>> 0);
+    }
+
+    function geometryFromArrays(vertProperties, triVerts) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position",
+            new THREE.BufferAttribute(new Float32Array(vertProperties), 3));
+        geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(triVerts), 1));
+        return geometry;
+    }
+
+    function geometryFromManifold(manifold) {
+        const mesh = manifold.getMesh();
+        return geometryFromArrays(mesh.vertProperties, mesh.triVerts);
+    }
+
+    function boundsFromArrays(vertProperties) {
+        const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+        const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+        for (let i = 0; i < vertProperties.length; i += 3) {
+            min.x = Math.min(min.x, vertProperties[i]);
+            min.y = Math.min(min.y, vertProperties[i + 1]);
+            min.z = Math.min(min.z, vertProperties[i + 2]);
+            max.x = Math.max(max.x, vertProperties[i]);
+            max.y = Math.max(max.y, vertProperties[i + 1]);
+            max.z = Math.max(max.z, vertProperties[i + 2]);
+        }
+        return new THREE.Box3(min, max);
+    }
+
+    function boundsOfManifold(manifold) {
+        const mesh = manifold.getMesh();
+        return boundsFromArrays(mesh.vertProperties);
+    }
+
+    function translated(manifold, offset) {
+        try {
+            return manifold.translate(offset);
+        } finally {
+            manifold.delete();
+        }
+    }
+
+    function unionManifolds(parts) {
+        let result = parts[0];
+        for (let i = 1; i < parts.length; i++) {
+            const next = result.add(parts[i]);
+            result.delete();
+            parts[i].delete();
+            result = next;
+        }
+        return result;
+    }
+
+    function randomFixture(wasm, rng) {
+        const kind = integer(rng, 3);
+        if (kind === 0) {
+            const size = [
+                range(rng, 26, 44),
+                range(rng, 26, 44),
+                range(rng, 26, 44),
+            ];
+            return {
+                solid: wasm.Manifold.cube(size, true),
+                label: "box " + size.map((value) => value.toFixed(2)).join("x"),
+            };
+        }
+        if (kind === 1) {
+            const radius = range(rng, 15, 23);
+            const segments = 20 + integer(rng, 9);
+            return {
+                solid: wasm.Manifold.sphere(radius, segments),
+                label: "sphere r=" + radius.toFixed(2) + " s=" + segments,
+            };
+        }
+
+        const base = [
+            range(rng, 25, 37),
+            range(rng, 25, 37),
+            range(rng, 25, 37),
+        ];
+        const parts = [wasm.Manifold.cube(base, true)];
+        const count = 2 + integer(rng, 2);
+        for (let i = 1; i < count; i++) {
+            const size = [
+                range(rng, 17, 29),
+                range(rng, 17, 29),
+                range(rng, 17, 29),
+            ];
+            const offset = [
+                range(rng, -base[0] * 0.32, base[0] * 0.32),
+                range(rng, -base[1] * 0.32, base[1] * 0.32),
+                range(rng, -base[2] * 0.32, base[2] * 0.32),
+            ];
+            parts.push(translated(wasm.Manifold.cube(size, true), offset));
+        }
+        return {
+            solid: unionManifolds(parts),
+            label: "union of " + count + " boxes",
+        };
+    }
+
+    function pointOnPlane(axis, coordinate, uAxis, uValue, vAxis, vValue) {
+        const point = new THREE.Vector3();
+        point[axis] = coordinate;
+        point[uAxis] = uValue;
+        point[vAxis] = vValue;
+        return point;
+    }
+
+    function remainingAxes(axis) {
+        return ["x", "y", "z"].filter((value) => value !== axis);
+    }
+
+    function projectedBoxArea(size, normal) {
+        return Math.abs(normal.x) * size.y * size.z
+            + Math.abs(normal.y) * size.x * size.z
+            + Math.abs(normal.z) * size.x * size.y;
+    }
+
+    function pathLength(points, extendLen) {
+        let length = 2 * extendLen;
+        for (let i = 1; i < points.length; i++) length += points[i].distanceTo(points[i - 1]);
+        return length;
+    }
+
+    function makeCutSpec(rng, bounds) {
+        const size = new THREE.Vector3();
+        bounds.getSize(size);
+        const center = new THREE.Vector3();
+        bounds.getCenter(center);
+        const mode = integer(rng, 3);
+
+        if (mode === 0) {
+            const axis = ["x", "y", "z"][integer(rng, 3)];
+            const normal = axisVector(axis);
+            const other = remainingAxes(axis);
+            const uAxis = other[0], vAxis = other[1];
+            const plane = component(center, axis)
+                + range(rng, -component(size, axis) * 0.18, component(size, axis) * 0.18);
+            const uCenter = component(center, uAxis);
+            const vCenter = component(center, vAxis);
+            const uSpan = component(size, uAxis);
+            const vSpan = component(size, vAxis);
+            const points = [
+                pointOnPlane(axis, plane, uAxis, uCenter - uSpan * 0.78,
+                    vAxis, vCenter + range(rng, -vSpan * 0.18, vSpan * 0.18)),
+                pointOnPlane(axis, plane, uAxis, uCenter,
+                    vAxis, vCenter + range(rng, -vSpan * 0.3, vSpan * 0.3)),
+                pointOnPlane(axis, plane, uAxis, uCenter + uSpan * 0.78,
+                    vAxis, vCenter + range(rng, -vSpan * 0.18, vSpan * 0.18)),
+            ];
+            const extendLen = size.length() + 20;
+            const halfDepth = size.length() + 20;
+            const spline = {
+                points: points.map((point) => ({ a: point, hIn: null, hOut: null })),
+                normal,
+                planePoint: pointOnPlane(axis, plane, uAxis, uCenter, vAxis, vCenter),
+            };
+            const grow = rng() < 0.55 ? range(rng, 0.04, 0.18) : 0;
+            const cutter = CutCore.buildCutter(spline, extendLen, halfDepth);
+            const cutterOut = grow
+                ? CutCore.buildCutter(spline, extendLen, halfDepth, grow) : cutter;
+            const overlapLength = pathLength(points, 0);
+            const overlapDepth = component(size, axis);
+            /* Differentially comparing this cutter with the same sequence
+             * using cutterOut=cutter removes the ordinary sampling/boolean
+             * loss. The source-facing one-sided offset band is g×L + πg²;
+             * the unextended curve is a conservative overlap length because
+             * the extendLen tails lie outside the source. Full axis span is
+             * the safe maximum overlap depth. There is no factor-2 allowance:
+             * a grow×4 mutation scales the leading band term fourfold while
+             * this bound remains tied to the requested grow. */
+            const gapBound = (grow * overlapLength + Math.PI * grow * grow)
+                * overlapDepth;
+            return {
+                kind: "curve",
+                cutter,
+                cutterOut,
+                clearanceBound: gapBound,
+                params: { axis, grow, extendLen, halfDepth },
+                dispose() {
+                    if (cutterOut !== cutter) cutterOut.delete();
+                    cutter.delete();
+                },
+            };
+        }
+
+        if (mode === 1) {
+            const axis = ["x", "y", "z"][integer(rng, 3)];
+            const normal = axisVector(axis);
+            const plane = component(center, axis)
+                + range(rng, -component(size, axis) * 0.16, component(size, axis) * 0.16);
+            const point = center.clone();
+            point[axis] = plane;
+            const gap = rng() < 0.55 ? range(rng, 0.05, 0.22) : 0;
+            const cutter = CutCore.buildPlanarCutter(point, normal, bounds);
+            const cutterOut = gap
+                ? CutCore.buildPlanarCutter(
+                    point.clone().addScaledVector(normal, gap), normal, bounds) : cutter;
+            return {
+                kind: "planar",
+                cutter,
+                cutterOut,
+                clearanceBound: gap * projectedBoxArea(size, normal),
+                params: { axis, gap },
+                dispose() {
+                    if (cutterOut !== cutter) cutterOut.delete();
+                    cutter.delete();
+                },
+            };
+        }
+
+        const widthLimit = Math.min(size.x, size.z) * 0.34;
+        const height = center.y + range(rng, -size.y * 0.16, size.y * 0.16);
+        const depth = range(rng, 2, Math.min(6, size.y * 0.25));
+        const width = range(rng, Math.min(4, widthLimit * 0.7), widthLimit);
+        const params = {
+            height,
+            depth,
+            width,
+            flapDeg: range(rng, 52, 82),
+            grooveDeg: range(rng, -22, 22),
+            cx: center.x + range(rng, -size.x * 0.15, size.x * 0.15),
+            cz: center.z + range(rng, -size.z * 0.15, size.z * 0.15),
+        };
+        const cutter = CutCore.buildDovetailCutter(params, bounds);
+        return {
+            kind: "dovetail",
+            cutter,
+            cutterOut: cutter,
+            clearanceBound: 0,
+            params,
+            dispose() { cutter.delete(); },
+        };
+    }
+
+    function applyCut(pieces, spec, useKerf) {
+        const next = [];
+        try {
+            for (const geometry of pieces) {
+                let result;
+                try {
+                    result = CutCore.cutWithCutter(
+                        geometry, spec.cutter,
+                        useKerf ? spec.cutterOut : spec.cutter);
+                } finally {
+                    geometry.dispose();
+                }
+                if (result.inside) next.push(result.inside);
+                if (result.outside) next.push(result.outside);
+            }
+            return next;
+        } catch (error) {
+            disposeGeometries(next);
+            throw error;
+        }
+    }
+
+    function volumeStats(pieces) {
+        let volume = 0;
+        let valid = true;
+        const details = [];
+        for (let i = 0; i < pieces.length; i++) {
+            try {
+                const manifold = CutCore.toManifold(pieces[i]);
+                try {
+                    const pieceVolume = manifold.volume();
+                    const accepted = statusOk(manifold)
+                        && manifold.numTri() > 0 && pieceVolume > 1e-8;
+                    valid = valid && accepted;
+                    volume += pieceVolume;
+                    details.push(i + ":" + pieceVolume.toFixed(4)
+                        + "/" + manifold.numTri());
+                } finally {
+                    manifold.delete();
+                }
+            } catch (error) {
+                valid = false;
+                details.push(i + ":rejected");
+            }
+        }
+        return { volume, valid, details: details.join(", ") };
+    }
+
+    function volumeNumericTolerance(sourceVolume) {
+        return Math.max(0.02, sourceVolume * 2e-6);
+    }
+
+    async function runCutProperties(wasm) {
+        log("PROPERTY 1+2 cuts: N=" + CUT_ITERATIONS
+            + " · kerf loss is differential (grown cutter − zero-growth cutter)"
+            + "; bound = one-sided band bounds + per-cut numeric tolerance");
+        const rng = propertyRng("cuts");
+        for (let iteration = 0; iteration < CUT_ITERATIONS; iteration++) {
+            let fixture = null;
+            let pieces = [];
+            let zeroPieces = [];
+            try {
+                fixture = randomFixture(wasm, rng);
+                const sourceVolume = fixture.solid.volume();
+                const bounds = boundsOfManifold(fixture.solid);
+                pieces = [geometryFromManifold(fixture.solid)];
+                zeroPieces = [geometryFromManifold(fixture.solid)];
+                const cutCount = 1 + integer(rng, 4);
+                const specs = [];
+                try {
+                    for (let cut = 0; cut < cutCount; cut++) {
+                        const spec = makeCutSpec(rng, bounds);
+                        specs.push(spec);
+                        pieces = applyCut(pieces, spec, true);
+                        zeroPieces = applyCut(zeroPieces, spec, false);
+                        if (!pieces.length || !zeroPieces.length) {
+                            throw new Error("cut produced no pieces");
+                        }
+                    }
+                    const stats = volumeStats(pieces);
+                    const zeroStats = volumeStats(zeroPieces);
+                    const numericBound = cutCount * volumeNumericTolerance(sourceVolume);
+                    const clearanceBound = specs.reduce(
+                        (sum, spec) => sum + spec.clearanceBound, 0);
+                    const differentialBound = numericBound + clearanceBound;
+                    const actualLoss = sourceVolume - stats.volume;
+                    const zeroLoss = sourceVolume - zeroStats.volume;
+                    const kerfLoss = actualLoss - zeroLoss;
+                    const volumeOk = zeroStats.valid
+                        && zeroLoss >= -numericBound && zeroLoss <= numericBound
+                        && actualLoss >= -numericBound
+                        && kerfLoss <= differentialBound + 1e-8;
+                    check("cut sequence " + iteration + " watertight/non-empty",
+                        stats.valid && zeroStats.valid,
+                        fixture.label + "; cuts=" + cutCount
+                        + "; pieces=" + pieces.length
+                        + "; zero pieces=" + zeroPieces.length
+                        + "; grown=" + stats.details
+                        + "; zero=" + zeroStats.details);
+                    check("cut sequence " + iteration
+                        + " volume loss within requested kerf bound",
+                        volumeOk,
+                        fixture.label + "; grown loss=" + actualLoss.toFixed(5)
+                        + " mm3; zero loss=" + zeroLoss.toFixed(5)
+                        + " mm3; differential=" + kerfLoss.toFixed(5)
+                        + " mm3; bound=" + differentialBound.toFixed(5)
+                        + " mm3; clearance=" + clearanceBound.toFixed(5)
+                        + " mm3; cutters="
+                        + specs.map((spec) => spec.kind + ":" + JSON.stringify(spec.params)).join(" | "));
+                } finally {
+                    specs.forEach((spec) => spec.dispose());
+                }
+            } catch (error) {
+                check("cut sequence " + iteration + " completed",
+                    false, (fixture ? fixture.label + "; " : "")
+                    + (error.stack || error));
+            } finally {
+                disposeGeometries(pieces);
+                disposeGeometries(zeroPieces);
+                if (fixture) fixture.solid.delete();
+            }
+        }
+    }
+
+    function connectorCase(wasm, rng) {
+        const dimensions = [
+            range(rng, 30, 46),
+            range(rng, 30, 46),
+            range(rng, 30, 46),
+        ];
+        const solid = wasm.Manifold.cube(dimensions, true);
+        const bounds = boundsOfManifold(solid);
+        const axis = ["x", "y", "z"][integer(rng, 3)];
+        const normal = axisVector(axis);
+        const center = new THREE.Vector3();
+        bounds.getCenter(center);
+        const plane = component(center, axis)
+            + range(rng, -component(new THREE.Vector3(
+                dimensions[0], dimensions[1], dimensions[2]), axis) * 0.12,
+                component(new THREE.Vector3(
+                    dimensions[0], dimensions[1], dimensions[2]), axis) * 0.12);
+        const other = remainingAxes(axis);
+        const pos = pointOnPlane(axis, plane, other[0],
+            range(rng, bounds.min[other[0]] * 0.45, bounds.max[other[0]] * 0.45),
+            other[1],
+            range(rng, bounds.min[other[1]] * 0.45, bounds.max[other[1]] * 0.45));
+        const tolerance = range(rng, 0.08, 0.32);
+        const connector = {
+            pos,
+            normal,
+            shape: rng() < 0.5 ? "circle" : "hexagon",
+            size: range(rng, 4.5, 8),
+            depth: range(rng, 3.5, 7),
+            rotDeg: range(rng, 0, 60),
+        };
+        const cutter = CutCore.buildPlanarCutter(pos, normal, bounds);
+        return { solid, connector, tolerance, cutter };
+    }
+
+    function carvedSocketFitCheck(item, result, peg, iteration) {
+        const name = "connector " + iteration
+            + " actual carved socket contains nominal peg";
+        let actualOutside = null;
+        let baseOutside = null;
+        let carvedCavity = null;
+        let pegOutside = null;
+        let residualPeg = null;
+        try {
+            actualOutside = CutCore.toManifold(result.outside);
+            baseOutside = item.solid.subtract(item.cutter);
+            /* The boolean difference is the cavity actually carved from the
+             * seam piece, rather than a second constructor-generated solid. */
+            carvedCavity = baseOutside.subtract(actualOutside);
+            pegOutside = peg.intersect(baseOutside);
+            residualPeg = pegOutside.subtract(carvedCavity);
+            check(name,
+                statusOk(carvedCavity) && residualPeg.volume() < 1e-6,
+                "peg outside=" + pegOutside.volume().toFixed(5)
+                + " mm3; carved=" + carvedCavity.volume().toFixed(5)
+                + " mm3; residual=" + residualPeg.volume().toExponential(3));
+        } catch (error) {
+            check(name, false, error.stack || error);
+        } finally {
+            dispose(residualPeg);
+            dispose(pegOutside);
+            dispose(carvedCavity);
+            dispose(baseOutside);
+            dispose(actualOutside);
+        }
+    }
+
+    async function runConnectorProperty(wasm) {
+        log("PROPERTY 3 connectors: N=" + CONNECTOR_ITERATIONS
+            + " · socket radius/depth growth is tolerance/2 and tolerance");
+        const rng = propertyRng("connectors");
+        for (let iteration = 0; iteration < CONNECTOR_ITERATIONS; iteration++) {
+            let item = null;
+            let peg = null;
+            let socket = null;
+            let result = null;
+            try {
+                item = connectorCase(wasm, rng);
+                const c = item.connector;
+                peg = CutCore.buildConnectorSolid(c);
+                socket = CutCore.buildConnectorSolid(c, {
+                    r: item.tolerance / 2, d: item.tolerance,
+                });
+                const geometry = geometryFromManifold(item.solid);
+                try {
+                    result = CutCore.cutWithCutter(geometry, item.cutter, item.cutter,
+                        { pegs: [peg], sockets: [socket], maleSide: "inside" });
+                } finally {
+                    geometry.dispose();
+                }
+                check("connector " + iteration + " seam pieces are present",
+                    !!(result.inside && result.outside),
+                    c.shape + "; normal=" + c.normal.toArray().join(","));
+                if (result.inside && result.outside) {
+                    let inside = null;
+                    let outside = null;
+                    try {
+                        inside = CutCore.toManifold(result.inside);
+                        outside = CutCore.toManifold(result.outside);
+                        check("connector " + iteration + " seam pieces accepted",
+                            statusOk(inside) && statusOk(outside)
+                            && inside.volume() > 0 && outside.volume() > 0,
+                            "inside=" + inside.volume().toFixed(4)
+                            + "; outside=" + outside.volume().toFixed(4));
+                    } finally {
+                        dispose(inside);
+                        dispose(outside);
+                    }
+                    carvedSocketFitCheck(item, result, peg, iteration);
+                } else {
+                    check("connector " + iteration
+                        + " actual carved socket contains nominal peg", false,
+                        "outside seam piece missing");
+                }
+            } catch (error) {
+                check("connector " + iteration + " completed", false,
+                    error.stack || error);
+            } finally {
+                if (result) {
+                    dispose(result.inside);
+                    dispose(result.outside);
+                }
+                if (peg) peg.delete();
+                if (socket) socket.delete();
+                if (item) {
+                    item.cutter.delete();
+                    item.solid.delete();
+                }
+            }
+        }
+    }
+
+    function finiteSTLFloats(bytes) {
+        if (bytes.length < 84) return false;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const count = view.getUint32(80, true);
+        if (bytes.length !== 84 + count * 50) return false;
+        for (let triangle = 0; triangle < count; triangle++) {
+            const offset = 84 + triangle * 50;
+            for (let field = 0; field < 12; field++) {
+                if (!Number.isFinite(view.getFloat32(offset + field * 4, true))) return false;
+            }
+        }
+        return true;
+    }
+
+    function finite3MFNumbers(bytes) {
+        const files = fflate.unzipSync(bytes);
+        const model = files["3D/3dmodel.model"];
+        if (!model) return { ok: false, xml: "" };
+        const xml = new TextDecoder().decode(model);
+        const values = [];
+        const expression = /(?:\b(?:x|y|z))="([^"]+)"/g;
+        let match;
+        while ((match = expression.exec(xml))) values.push(Number(match[1]));
+        return {
+            ok: values.length > 0 && values.every(Number.isFinite)
+                && !/\b(?:NaN|Infinity|-Infinity)\b/.test(xml),
+            xml,
+        };
+    }
+
+    function parsed3MFTriangles(group) {
+        let count = 0;
+        group.traverse((object) => {
+            if (object.isMesh && object.geometry) count += triCount(object.geometry);
+        });
+        return count;
+    }
+
+    function dispose3MF(group) {
+        group.traverse((object) => {
+            if (object.geometry) object.geometry.dispose();
+            if (object.material) {
+                if (Array.isArray(object.material)) object.material.forEach(dispose);
+                else dispose(object.material);
+            }
+        });
+    }
+
+    function makeExportPiece(wasm, rng) {
+        const fixture = randomFixture(wasm, rng);
+        const bounds = boundsOfManifold(fixture.solid);
+        let geometry = geometryFromManifold(fixture.solid);
+        let spec = null;
+        try {
+            if (rng() < 0.8) {
+                spec = makeCutSpec(rng, bounds);
+                let result;
+                try {
+                    result = CutCore.cutWithCutter(
+                        geometry, spec.cutter, spec.cutterOut);
+                } finally {
+                    geometry.dispose();
+                }
+                geometry = result.inside || result.outside;
+                if (result.inside && result.inside !== geometry) result.inside.dispose();
+                if (result.outside && result.outside !== geometry) result.outside.dispose();
+                if (!geometry) throw new Error("piece cut produced no geometry");
+            }
+            return { fixture, geometry };
+        } catch (error) {
+            dispose(geometry);
+            fixture.solid.delete();
+            throw error;
+        } finally {
+            if (spec) spec.dispose();
+        }
+    }
+
+    async function runExportProperty(wasm) {
+        log("PROPERTY 4 exports: N=" + EXPORT_ITERATIONS
+            + " · STL binary float fields + 3MF XML numbers finite; parser tri count must match");
+        const rng = propertyRng("exports");
+        for (let iteration = 0; iteration < EXPORT_ITERATIONS; iteration++) {
+            let piece = null;
+            try {
+                piece = makeExportPiece(wasm, rng);
+                const geometry = piece.geometry;
+                const expected = triCount(geometry);
+                const stl = BigPrintCore.serializeSTL(geometry);
+                const stlView = new DataView(stl.buffer, stl.byteOffset, stl.byteLength);
+                const declared = stlView.getUint32(80, true);
+                let stlBack = null;
+                let mfBack = null;
+                try {
+                    stlBack = new THREE.STLLoader().parse(stl.buffer);
+                    const mf = BigPrintCore.serialize3MF(geometry);
+                    const finiteMF = finite3MFNumbers(mf);
+                    mfBack = new THREE.ThreeMFLoader().parse(mf.buffer);
+                    const stlTriangles = triCount(stlBack);
+                    const mfTriangles = parsed3MFTriangles(mfBack);
+                    check("export " + iteration + " STL has finite floats",
+                        finiteSTLFloats(stl),
+                        piece.fixture.label + "; bytes=" + stl.length);
+                    check("export " + iteration + " 3MF has finite numbers",
+                        finiteMF.ok,
+                        piece.fixture.label + "; model-bytes="
+                        + (finiteMF.xml ? finiteMF.xml.length : 0));
+                    check("export " + iteration + " STL round-trip tri count",
+                        declared === expected && stlTriangles === expected,
+                        "source=" + expected + "; declared=" + declared
+                        + "; parsed=" + stlTriangles);
+                    check("export " + iteration + " 3MF round-trip tri count",
+                        mfTriangles === expected,
+                        "source=" + expected + "; parsed=" + mfTriangles);
+                } finally {
+                    dispose(stlBack);
+                    if (mfBack) dispose3MF(mfBack);
+                }
+            } catch (error) {
+                check("export " + iteration + " completed", false,
+                    (piece ? piece.fixture.label + "; " : "") + (error.stack || error));
+            } finally {
+                if (piece) {
+                    piece.geometry.dispose();
+                    piece.fixture.solid.delete();
+                }
+            }
+        }
+    }
+
+    function median(values) {
+        const sorted = Array.from(values).sort((a, b) => a - b);
+        return sorted[Math.floor((sorted.length - 1) * 0.5)];
+    }
+
+    function randomConvexFixture(wasm, rng) {
+        if (rng() < 0.5) {
+            const size = [
+                range(rng, 28, 48),
+                range(rng, 28, 48),
+                range(rng, 28, 48),
+            ];
+            return {
+                solid: wasm.Manifold.cube(size, true),
+                minimumSpan: Math.min(size[0], size[1], size[2]),
+                label: "convex box",
+            };
+        }
+        const radius = range(rng, 16, 24);
+        return {
+            solid: wasm.Manifold.sphere(radius, 24),
+            minimumSpan: radius * 2,
+            label: "convex sphere",
+        };
+    }
+
+    async function runHollowProperty(wasm) {
+        log("PROPERTY 5 hollow: N=" + HOLLOW_ITERATIONS
+            + " · preview median must be in [wall×0.5, wall×1.5]");
+        const rng = propertyRng("hollow");
+        const H = window.CurveCut.hollowCore;
+        for (let iteration = 0; iteration < HOLLOW_ITERATIONS; iteration++) {
+            let fixture = null;
+            let result = null;
+            try {
+                fixture = randomConvexFixture(wasm, rng);
+                const wall = range(rng,
+                    Math.max(2, fixture.minimumSpan * 0.09),
+                    Math.min(5.5, fixture.minimumSpan * 0.18));
+                const before = fixture.solid.volume();
+                const preview = H.previewShell(fixture.solid, wall, { maxSamples: 512 });
+                result = H.hollow(fixture.solid, wall, { engine: "mesh" });
+                const after = result.hollow.volume();
+                const wallMedian = median(preview.displacementsMm);
+                const finite = Array.from(preview.displacementsMm).every(Number.isFinite);
+                check("hollow " + iteration + " volume decreases",
+                    after < before,
+                    fixture.label + "; before=" + before.toFixed(4)
+                    + "; after=" + after.toFixed(4));
+                check("hollow " + iteration + " result is accepted",
+                    statusOk(result.hollow) && after > 0,
+                    fixture.label + "; status=" + result.hollow.status());
+                check("hollow " + iteration + " preview wall median",
+                    finite && wallMedian >= wall * 0.5
+                    && wallMedian <= wall * 1.5,
+                    fixture.label + "; wall=" + wall.toFixed(4)
+                    + " mm; median=" + wallMedian.toFixed(4)
+                    + " mm; band=" + (wall * 0.5).toFixed(4)
+                    + ".." + (wall * 1.5).toFixed(4));
+                const expectedSavedPct = 100 * (before - after) / before;
+                const savedPctTolerance = Math.max(
+                    1e-6, Math.abs(expectedSavedPct) * 1e-6);
+                check("hollow " + iteration
+                    + " savedPct matches independent volume ratio",
+                    Number.isFinite(result.stats.savedPct)
+                    && expectedSavedPct > 0 && expectedSavedPct < 100
+                    && Math.abs(result.stats.savedPct - expectedSavedPct)
+                        <= savedPctTolerance,
+                    "reported=" + result.stats.savedPct.toFixed(5)
+                    + "; expected=" + expectedSavedPct.toFixed(5));
+            } catch (error) {
+                check("hollow " + iteration + " completed", false,
+                    (fixture ? fixture.label + "; " : "") + (error.stack || error));
+            } finally {
+                if (result) result.hollow.delete();
+                if (fixture) fixture.solid.delete();
+            }
+        }
+    }
+
+    function faceNeighbors(triVerts) {
+        const edges = new Map();
+        const neighbors = Array.from(
+            { length: triVerts.length / 3 }, () => new Set());
+        for (let face = 0; face < triVerts.length / 3; face++) {
+            const a = triVerts[face * 3];
+            const b = triVerts[face * 3 + 1];
+            const c = triVerts[face * 3 + 2];
+            for (const pair of [[a, b], [b, c], [c, a]]) {
+                const key = pair[0] < pair[1]
+                    ? pair[0] + "_" + pair[1] : pair[1] + "_" + pair[0];
+                const prior = edges.get(key);
+                if (prior !== undefined) {
+                    neighbors[face].add(prior);
+                    neighbors[prior].add(face);
+                } else {
+                    edges.set(key, face);
+                }
+            }
+        }
+        return neighbors;
+    }
+
+    function randomOpenMesh(wasm, rng) {
+        const sphere = rng() < 0.45;
+        const solid = sphere
+            ? wasm.Manifold.sphere(range(rng, 15, 22), 20)
+            : wasm.Manifold.cube([
+                range(rng, 24, 42), range(rng, 24, 42), range(rng, 24, 42),
+            ], true);
+        const mesh = solid.getMesh();
+        const positions = mesh.vertProperties.slice();
+        const triangles = mesh.triVerts.slice();
+        const faceCount = triangles.length / 3;
+        const neighbors = faceNeighbors(triangles);
+        const removeCount = 1 + integer(rng, 3);
+        const removed = new Set([integer(rng, faceCount)]);
+        while (removed.size < removeCount) {
+            const frontier = [];
+            removed.forEach((face) => neighbors[face].forEach((next) => {
+                if (!removed.has(next)) frontier.push(next);
+            }));
+            const candidates = frontier.length ? frontier : Array.from(
+                { length: faceCount }, (_, face) => face)
+                .filter((face) => !removed.has(face));
+            if (!candidates.length) break;
+            removed.add(candidates[integer(rng, candidates.length)]);
+        }
+        const kept = [];
+        for (let face = 0; face < faceCount; face++) {
+            if (removed.has(face)) continue;
+            kept.push(triangles[face * 3], triangles[face * 3 + 1],
+                triangles[face * 3 + 2]);
+        }
+        solid.delete();
+        return {
+            geometry: geometryFromArrays(positions, kept),
+            label: sphere ? "sphere open patch" : "box open patch",
+            removed: removed.size,
+        };
+    }
+
+    function validateRepairOutput(output) {
+        if (!output) return { ok: true, detail: "honest null" };
+        const geometry = geometryFromArrays(output.vertProperties, output.triVerts);
+        try {
+            const manifold = CutCore.toManifold(geometry);
+            try {
+                return {
+                    ok: statusOk(manifold) && manifold.numTri() > 0 && manifold.volume() > 0,
+                    detail: output.method || "capBoundaryLoops"
+                        + "; triangles=" + manifold.numTri(),
+                };
+            } finally {
+                manifold.delete();
+            }
+        } catch (error) {
+            return { ok: false, detail: "Manifold rejected non-null output" };
+        } finally {
+            geometry.dispose();
+        }
+    }
+
+    async function runRepairProperty(wasm) {
+        log("PROPERTY 6 repair: N=" + REPAIR_ITERATIONS
+            + " · delete 1-3 connected faces; non-null output must be Manifold-accepted");
+        const rng = propertyRng("repair");
+        for (let iteration = 0; iteration < REPAIR_ITERATIONS; iteration++) {
+            let open = null;
+            try {
+                open = randomOpenMesh(wasm, rng);
+                const boundary = CutCore.findBoundaryLoops(open.geometry);
+                let capped = null;
+                let repaired = null;
+                try {
+                    capped = CutCore.capBoundaryLoops(open.geometry, boundary);
+                    repaired = CutCore.repairGeometry(open.geometry);
+                } catch (error) {
+                    check("repair " + iteration + " did not throw", false,
+                        open.label + "; removed=" + open.removed + "; " + (error.stack || error));
+                    continue;
+                }
+                const capResult = validateRepairOutput(capped);
+                const repairResult = validateRepairOutput(repaired);
+                check("repair " + iteration + " cap output is watertight or null",
+                    capResult.ok,
+                    open.label + "; removed=" + open.removed
+                    + "; loops=" + boundary.loops.length
+                    + "; result=" + capResult.detail);
+                check("repair " + iteration + " repair output is watertight or null",
+                    repairResult.ok,
+                    open.label + "; removed=" + open.removed
+                    + "; loops=" + boundary.loops.length
+                    + "; result=" + repairResult.detail);
+            } catch (error) {
+                check("repair " + iteration + " completed", false,
+                    (open ? open.label + "; " : "") + (error.stack || error));
+            } finally {
+                if (open) open.geometry.dispose();
+            }
+        }
+    }
+
+    try {
+        log("seed=" + seed + " (URL hash: #seed=" + seed + ")");
+        log("DEFERRED DOM/UI: repair UI, Big Print exit/reset, history undo/redo");
+        const wasm = await CutCore.init();
+        check("wasm initialized", !!wasm && CutCore.isReady());
+        await runCutProperties(wasm);
+        await runConnectorProperty(wasm);
+        await runExportProperty(wasm);
+        await runHollowProperty(wasm);
+        await runRepairProperty(wasm);
+        log("SUMMARY failures=" + failures.length + " seed=" + seed);
+        document.title = failures.length ? "FAIL: " + failures.join("; ") : "PASS";
+    } catch (error) {
+        log("EXCEPTION " + (error.stack || error) + " [seed=" + seed + "]");
+        document.title = "FAIL: exception";
+    }
+})();
+</script>
+</body>
+</html>

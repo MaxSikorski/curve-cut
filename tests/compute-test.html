@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../js/cut-core.js"></script>
+<script src="../js/hollow-core.js"></script>
+<script src="../js/compute-worker-src.js"></script>
+<script src="../js/compute.js"></script>
+<script src="../js/ops.js"></script>
+<script>
+(() => {
+    const CC = window.CurveCut;
+    const ids = [
+        ["div", "preview-dock"], ["button", "cut-apply"], ["button", "cut-discard"],
+        ["div", "nonwatertight-overlay"], ["div", "nonwatertight-modal"],
+        ["button", "nonwatertight-repair"], ["button", "nonwatertight-anyway"],
+        ["button", "nonwatertight-cancel"], ["input", "cut-clearance"],
+    ];
+    for (const [tag, id] of ids) {
+        const element = document.createElement(tag);
+        element.id = id;
+        document.body.appendChild(element);
+    }
+    document.getElementById("cut-clearance").value = "0";
+    CC.scene = new THREE.Scene();
+    CC.controls = {};
+    CC.pieces = [];
+    CC.baseMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    CC.a11y = {
+        makeFocusTrap: () => ({ activate() {}, deactivate() {} }),
+        dur: (duration) => duration,
+    };
+    CC.progress = { show() {}, update() {}, hide() {} };
+    CC.history = { capture() {} };
+    CC.toast = () => {};
+})();
+</script>
+<script src="../js/cut.js"></script>
+<script>
+/* Headless tests for CC.compute. Run via tools/check_compute.py. */
+(async () => {
+    "use strict";
+
+    const CC = window.CurveCut;
+    const log = (message) => { document.getElementById("log").textContent += message + "\n"; };
+    const failures = [];
+    const check = (name, condition, detail) => {
+        log(`${condition ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!condition) failures.push(name);
+    };
+
+    const geometryFromArrays = (positions, triangles) => ({
+        vertProperties: new Float32Array(positions),
+        triVerts: new Uint32Array(triangles),
+    });
+    const geometryAdapter = (arrays) => {
+        const position = {
+            count: arrays.vertProperties.length / 3,
+            getX: (index) => arrays.vertProperties[index * 3],
+            getY: (index) => arrays.vertProperties[index * 3 + 1],
+            getZ: (index) => arrays.vertProperties[index * 3 + 2],
+        };
+        const index = {
+            count: arrays.triVerts.length,
+            getX: (offset) => arrays.triVerts[offset],
+        };
+        return {
+            getAttribute: () => position,
+            getIndex: () => index,
+        };
+    };
+    const signedVolume = (geometry) => {
+        const solid = CutCore.toManifold(geometry);
+        try {
+            return solid.volume();
+        } finally {
+            solid.delete();
+        }
+    };
+    const formatVolumes = (volumes) => volumes.map((volume) =>
+        Number.isFinite(volume) ? volume.toFixed(2) : "—").join(", ");
+    const openBox = () => geometryFromArrays([
+        0, 0, 0, 10, 0, 0, 10, 10, 0, 0, 10, 0,
+        0, 0, 10, 10, 0, 10, 10, 10, 10, 0, 10, 10,
+    ], [
+        0, 2, 1, 0, 3, 2,
+        4, 5, 6, 4, 6, 7,
+        0, 4, 7, 0, 7, 3,
+        1, 2, 6, 1, 6, 5,
+        3, 7, 6, 3, 6, 2,
+    ]);
+    const closedBox = () => {
+        const box = openBox();
+        box.triVerts = new Uint32Array(Array.from(box.triVerts).concat([0, 1, 5, 0, 5, 4]));
+        return box;
+    };
+    const subdividedClosedBox = (divisions = 24) => {
+        const size = 10, positions = [], triangles = [];
+        const addFace = (point, flip) => {
+            const base = positions.length / 3, stride = divisions + 1;
+            for (let j = 0; j <= divisions; j++) {
+                for (let i = 0; i <= divisions; i++) {
+                    const values = point(i / divisions, j / divisions);
+                    positions.push(values[0], values[1], values[2]);
+                }
+            }
+            const at = (i, j) => base + j * stride + i;
+            for (let j = 0; j < divisions; j++) {
+                for (let i = 0; i < divisions; i++) {
+                    const a = at(i, j), b = at(i + 1, j), c = at(i + 1, j + 1), d = at(i, j + 1);
+                    if (flip) triangles.push(a, c, b, a, d, c);
+                    else triangles.push(a, b, c, a, c, d);
+                }
+            }
+        };
+        addFace((u, v) => [size * u, size * v, 0], true);
+        addFace((u, v) => [size * u, size * v, size], false);
+        addFace((u, v) => [0, size * u, size * v], true);
+        addFace((u, v) => [size, size * u, size * v], false);
+        addFace((u, v) => [size * u, 0, size * v], false);
+        addFace((u, v) => [size * u, size, size * v], true);
+        return geometryFromArrays(positions, triangles);
+    };
+    const watertight = (arrays) => {
+        try {
+            const solid = CutCore.toManifold(geometryAdapter(arrays));
+            solid.delete();
+            return true;
+        } catch (_) {
+            return false;
+        }
+    };
+    const counts = (arrays) => ({
+        vertices: arrays.vertProperties.length / 3,
+        triangles: arrays.triVerts.length / 3,
+    });
+    const cutBounds = {
+        min: { x: 0, y: 0, z: 0 }, max: { x: 10, y: 10, z: 10 },
+    };
+    const planarCutSpec = {
+        type: "planar",
+        point: { x: 0, y: 5, z: 0 },
+        normal: { x: 0, y: 1, z: 0 },
+        bounds: cutBounds,
+        gap: 0,
+    };
+    const mainPlanarCutter = () => CutCore.buildPlanarCutter(
+        new THREE.Vector3(0, 5, 0), new THREE.Vector3(0, 1, 0),
+        new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(10, 10, 10)));
+    const routeCutterPlan = () => ({ worker: planarCutSpec, main: mainPlanarCutter });
+    const scenePiece = (arrays, name) => {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(
+            arrays.vertProperties, 3));
+        geometry.setIndex(new THREE.BufferAttribute(arrays.triVerts, 1));
+        const mesh = new THREE.Mesh(geometry, CC.baseMaterial.clone());
+        mesh.name = name;
+        CC.scene.add(mesh);
+        CC.pieces.push(mesh);
+        return mesh;
+    };
+    const clearScenePieces = (source) => {
+        const live = CC.pieces.slice();
+        for (const piece of live) {
+            CC.scene.remove(piece);
+            piece.geometry.dispose();
+            piece.material.dispose();
+        }
+        CC.pieces.length = 0;
+        if (!live.includes(source)) {
+            source.geometry.dispose();
+            source.material.dispose();
+        }
+    };
+
+    try {
+        const booted = await CC.compute.ready();
+        check("worker boots from file URL", booted && !CC.compute.degraded);
+        await CutCore.init();
+
+        let progressCount = 0;
+        const echoInput = new Uint8Array([7, 11, 13, 17]);
+        const echoed = await CC.compute.run("ping", echoInput, {
+            onProgress: () => { progressCount++; },
+            transfer: [echoInput.buffer],
+        });
+        check("ping echoes a transferred typed array",
+            echoed instanceof Uint8Array && echoed.join(",") === "7,11,13,17"
+            && echoInput.byteLength === 0,
+            `${echoed && echoed.constructor.name}; source bytes ${echoInput.byteLength}`);
+        check("worker emits progress messages", progressCount >= 2, String(progressCount));
+
+        const cutInput = closedBox();
+        const cutInput2 = closedBox();
+        const cutProgress = [];
+        const workerCut = await CC.compute.run("cutWithCutter", {
+            parts: [cutInput, cutInput2], cutter: planarCutSpec,
+        }, {
+            onProgress: (progress) => {
+                if (progress.stage === "cut") cutProgress.push(progress.fraction);
+            },
+            transfer: [cutInput.vertProperties.buffer, cutInput.triVerts.buffer,
+                cutInput2.vertProperties.buffer, cutInput2.triVerts.buffer],
+        });
+        const workerCutPair = workerCut && workerCut.results && workerCut.results[0];
+        const mainCutter = CutCore.buildPlanarCutter(
+            new THREE.Vector3(0, 5, 0), new THREE.Vector3(0, 1, 0),
+            new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(10, 10, 10)));
+        const mainCut = CutCore.cutWithCutter(
+            geometryAdapter(closedBox()), mainCutter, mainCutter);
+        const workerCutVolume = workerCutPair
+            ? CutCore.geometryVolume(geometryAdapter(workerCutPair.inside))
+                + CutCore.geometryVolume(geometryAdapter(workerCutPair.outside)) : 0;
+        const mainCutVolume = CutCore.geometryVolume(mainCut.inside)
+            + CutCore.geometryVolume(mainCut.outside);
+        const workerCutSignedVolumes = workerCutPair ? [
+            signedVolume(geometryAdapter(workerCutPair.inside)),
+            signedVolume(geometryAdapter(workerCutPair.outside)),
+        ] : [];
+        const mainCutSignedVolumes = [
+            signedVolume(mainCut.inside), signedVolume(mainCut.outside),
+        ];
+        check("cutWithCutter returns worker piece arrays", !!workerCutPair
+            && workerCutPair.inside.vertProperties instanceof Float32Array
+            && workerCutPair.inside.triVerts instanceof Uint32Array
+            && workerCutPair.outside.vertProperties instanceof Float32Array
+            && workerCutPair.outside.triVerts instanceof Uint32Array,
+            workerCutPair && `${workerCutPair.inside.vertProperties.length}/${workerCutPair.outside.triVerts.length}`);
+        check("cutWithCutter emits determinate per-part progress",
+            cutProgress.length >= 2 && cutProgress[0] === 0
+            && cutProgress[cutProgress.length - 1] === 1
+            && cutProgress.every((fraction, i) => i === 0 || fraction >= cutProgress[i - 1]),
+            JSON.stringify(cutProgress));
+        check("cutWithCutter detaches transferred geometry",
+            cutInput.vertProperties.byteLength === 0 && cutInput.triVerts.byteLength === 0
+            && cutInput2.vertProperties.byteLength === 0 && cutInput2.triVerts.byteLength === 0,
+            `${cutInput.vertProperties.byteLength}/${cutInput.triVerts.byteLength}/`
+            + `${cutInput2.vertProperties.byteLength}/${cutInput2.triVerts.byteLength}`);
+        check("worker cut matches main planar parity",
+            Math.abs(workerCutVolume - mainCutVolume) < 0.1
+            && Math.abs(workerCutVolume - 1000) < 0.1,
+            `${workerCutVolume.toFixed(2)} vs ${mainCutVolume.toFixed(2)}`);
+        check("worker cut matches main signed piece parity", workerCutPair
+            && workerCutSignedVolumes.every((volume, i) =>
+                Math.abs(volume - mainCutSignedVolumes[i]) < 0.1),
+            `${formatVolumes(workerCutSignedVolumes)} vs ${formatVolumes(mainCutSignedVolumes)}`);
+        mainCutter.delete();
+        mainCut.inside.dispose();
+        mainCut.outside.dispose();
+
+        const splineInput = closedBox();
+        const splineCut = await CC.compute.run("cutWithCutter", {
+            parts: [splineInput],
+            cutter: {
+                type: "spline",
+                spline: {
+                    points: [
+                        { a: { x: 0, y: 5, z: 0 }, hIn: null, hOut: null },
+                        { a: { x: 10, y: 5, z: 0 }, hIn: null, hOut: null },
+                    ],
+                    normal: { x: 0, y: 0, z: 1 },
+                    planePoint: { x: 0, y: 5, z: 0 },
+                },
+                extendLen: 30, halfDepth: 30, growOutside: 0,
+            },
+        }, {
+            transfer: [splineInput.vertProperties.buffer, splineInput.triVerts.buffer],
+        });
+        check("cutWithCutter builds spline cutters worker-side", !!splineCut.results[0]
+            && splineCut.results[0].inside && splineCut.results[0].outside,
+            splineCut.results[0] && String(splineCut.results[0].inside.triVerts.length));
+
+        const dovetailInput = closedBox();
+        const dovetailSpec = {
+            type: "dovetail",
+            params: { height: 5, depth: 2, width: 4, flapDeg: 65, grooveDeg: 0, cx: 5, cz: 5 },
+            bounds: cutBounds,
+            shrinkOutside: { w: 0.1, d: 0.1 },
+        };
+        const workerDovetail = await CC.compute.run("cutWithCutter", {
+            parts: [dovetailInput], cutter: dovetailSpec,
+        }, {
+            transfer: [dovetailInput.vertProperties.buffer, dovetailInput.triVerts.buffer],
+        });
+        const dtPair = workerDovetail.results[0];
+        check("cutWithCutter builds dovetail cutters worker-side", !!dtPair
+            && watertight(dtPair.inside)
+            && watertight(dtPair.outside),
+            dtPair && `${dtPair.inside.triVerts.length}/${dtPair.outside.triVerts.length}`);
+
+        const connectorInput = closedBox();
+        const connectorCut = await CC.compute.run("cutWithCutter", {
+            parts: [connectorInput], cutter: planarCutSpec,
+            connectors: {
+                maleSide: "inside",
+                pegs: [{ pos: { x: 5, y: 5, z: 5 }, normal: { x: 0, y: 1, z: 0 },
+                    shape: "circle", size: 2, depth: 2, rotDeg: 0 }],
+                sockets: [{ pos: { x: 5, y: 5, z: 5 }, normal: { x: 0, y: 1, z: 0 },
+                    shape: "circle", size: 2, depth: 2, rotDeg: 0,
+                    grow: { r: 0.1, d: 0.1 } }],
+            },
+        }, {
+            transfer: [connectorInput.vertProperties.buffer, connectorInput.triVerts.buffer],
+        });
+        const connectorPair = connectorCut.results[0];
+        check("cutWithCutter builds connector solids worker-side", !!connectorPair
+            && watertight(connectorPair.inside) && watertight(connectorPair.outside),
+            connectorPair && `${connectorPair.inside.triVerts.length}/${connectorPair.outside.triVerts.length}`);
+
+        const mainRepair = CutCore.repairGeometry(geometryAdapter(openBox()));
+        const workerRepairInput = openBox();
+        workerRepairInput.checkWatertight = true;
+        const repairCacheToken = "compute-test-repair-cache";
+        workerRepairInput.primeToken = repairCacheToken;
+        let repairRunCount = 0;
+        const originalComputeRun = CC.compute.run;
+        CC.compute.run = function(op, payload, options) {
+            if (op === "repairGeometry") repairRunCount++;
+            return originalComputeRun.call(this, op, payload, options);
+        };
+        let workerRepair;
+        try {
+            workerRepair = await CC.compute.run("repairGeometry", workerRepairInput, {
+                transfer: [workerRepairInput.vertProperties.buffer, workerRepairInput.triVerts.buffer],
+            });
+        } finally {
+            CC.compute.run = originalComputeRun;
+        }
+        check("repairGeometry uses one fused worker round-trip", repairRunCount === 1,
+            String(repairRunCount));
+        check("repairGeometry transfers its input once",
+            workerRepairInput.vertProperties.byteLength === 0
+            && workerRepairInput.triVerts.byteLength === 0,
+            `${workerRepairInput.vertProperties.byteLength}/${workerRepairInput.triVerts.byteLength}`);
+        const mainCounts = mainRepair && counts(mainRepair);
+        const workerCounts = workerRepair && counts(workerRepair);
+        check("repairGeometry returns a capped worker result", !!workerRepair
+            && workerRepair.method === "cap", workerRepair && workerRepair.method);
+        check("main repair fixture is watertight", !!mainRepair && watertight(mainRepair));
+        check("worker repair matches main vertex and triangle counts", !!mainCounts && !!workerCounts
+            && mainCounts.vertices === workerCounts.vertices
+            && mainCounts.triangles === workerCounts.triangles,
+            `${mainCounts && mainCounts.vertices}/${mainCounts && mainCounts.triangles} vs `
+            + `${workerCounts && workerCounts.vertices}/${workerCounts && workerCounts.triangles}`);
+        check("worker repair is watertight", !!workerRepair && watertight(workerRepair));
+        let repairedCacheEstimate = null;
+        try {
+            repairedCacheEstimate = await CC.compute.run("hollowEstimate", {
+                token: repairCacheToken, wallMm: 2,
+            });
+        } catch (_) {}
+        check("repairGeometry primes cache from its transferred result",
+            !!workerRepair && workerRepair.primeReady === true
+            && Number.isFinite(repairedCacheEstimate),
+            workerRepair && `${workerRepair.primeReady}/${repairedCacheEstimate}`);
+        await CC.compute.run("release", { token: repairCacheToken });
+
+        const watertightInput = closedBox();
+        const watertightCacheToken = "compute-test-watertight-cache";
+        const checkedRepair = await CC.compute.run("repairGeometry", Object.assign(
+            watertightInput, { checkWatertight: true, primeToken: watertightCacheToken }), {
+            transfer: [watertightInput.vertProperties.buffer, watertightInput.triVerts.buffer],
+        });
+        check("repairGeometry can report an already-watertight input",
+            checkedRepair && checkedRepair.watertight === true,
+            checkedRepair && JSON.stringify(checkedRepair));
+        let watertightCacheEstimate = null;
+        try {
+            watertightCacheEstimate = await CC.compute.run("hollowEstimate", {
+                token: watertightCacheToken, wallMm: 2,
+            });
+        } catch (_) {}
+        check("watertight repair primes the scale-one cache",
+            !!checkedRepair && checkedRepair.primeReady === true
+            && Number.isFinite(watertightCacheEstimate),
+            checkedRepair && `${checkedRepair.primeReady}/${watertightCacheEstimate}`);
+        await CC.compute.run("release", { token: watertightCacheToken });
+
+        const capInput = openBox();
+        const cap = await CC.compute.run("capBoundaryLoops", { geometry: capInput }, {
+            transfer: [capInput.vertProperties.buffer, capInput.triVerts.buffer],
+        });
+        check("capBoundaryLoops crosses typed arrays", !!cap
+            && cap.vertProperties instanceof Float32Array
+            && cap.triVerts instanceof Uint32Array
+            && watertight(cap), cap && `${cap.vertProperties.length}/${cap.triVerts.length}`);
+
+        const cacheInput = closedBox();
+        const cacheToken = "compute-test-cache";
+        const primed = await CC.compute.run("prime", {
+            token: cacheToken, geometry: cacheInput, scale: 1,
+        }, {
+            transfer: [cacheInput.vertProperties.buffer, cacheInput.triVerts.buffer],
+        });
+        check("prime caches geometry once and detaches its input",
+            primed && primed.token === cacheToken
+            && cacheInput.vertProperties.byteLength === 0
+            && cacheInput.triVerts.byteLength === 0,
+            primed && JSON.stringify(primed));
+
+        const cacheCalls = [];
+        const cacheComputeRun = CC.compute.run;
+        CC.compute.run = function(op, payload, options) {
+            if (op === "hollowEstimate" || op === "previewShell" || op === "hollowApply") {
+                cacheCalls.push({ op, payload });
+            }
+            return cacheComputeRun.call(this, op, payload, options);
+        };
+        let estimate;
+        let preview;
+        let applied;
+        try {
+            estimate = await CC.compute.run("hollowEstimate", {
+                token: cacheToken, wallMm: 2,
+            });
+            preview = await CC.compute.run("previewShell", {
+                token: cacheToken, wallMm: 2, opts: { maxSamples: 3 },
+            });
+            applied = await CC.compute.run("hollowApply", {
+                token: cacheToken, wallMm: 2, opts: { engine: "mesh" },
+            });
+        } finally {
+            CC.compute.run = cacheComputeRun;
+        }
+        const tokenOnly = (entry) => entry.payload && entry.payload.token === cacheToken
+            && !Object.prototype.hasOwnProperty.call(entry.payload, "geometry")
+            && !Object.prototype.hasOwnProperty.call(entry.payload, "vertProperties")
+            && !Object.prototype.hasOwnProperty.call(entry.payload, "triVerts");
+        check("cache consumers send token-only payloads", cacheCalls.length === 3
+            && cacheCalls.every(tokenOnly), JSON.stringify(cacheCalls.map((entry) => entry.op)));
+        check("hollowEstimate returns the core estimate", Number.isFinite(estimate), String(estimate));
+
+        check("previewShell honors maxSamples", !!preview && preview.sampleCount === 3
+            && preview.displacementsMm instanceof Float32Array
+            && preview.displacementsMm.length === 3,
+            preview && String(preview.sampleCount));
+
+        check("hollowApply returns copied result arrays and stats", !!applied
+            && applied.vertProperties instanceof Float32Array
+            && applied.triVerts instanceof Uint32Array
+            && applied.stats && Number.isFinite(applied.stats.savedPct),
+            applied && `${applied.vertProperties.length}/${applied.triVerts.length}`);
+        check("hollowApply result is watertight", !!applied && watertight(applied));
+
+        const released = await CC.compute.run("release", { token: cacheToken });
+        check("release drops the worker cache entry", released
+            && released.token === cacheToken && released.released === true,
+            released && JSON.stringify(released));
+
+        const cancelInput = subdividedClosedBox();
+        const cancelWorker = CC.compute._worker;
+        let cancelRequested = false;
+        let cancelledPromise = null;
+        cancelledPromise = CC.compute.run("hollowEstimate", {
+            geometry: cancelInput, wallMm: 2, opts: { engine: "grid" },
+        }, {
+            onProgress: (progress) => {
+                if (!cancelRequested && progress.stage === "hollow-estimate" && progress.fraction === 0) {
+                    cancelRequested = CC.compute.cancel(cancelledPromise.id);
+                }
+            },
+            transfer: [cancelInput.vertProperties.buffer, cancelInput.triVerts.buffer],
+        });
+        let cancelError = null;
+        try {
+            await cancelledPromise;
+        } catch (error) {
+            cancelError = error;
+        }
+        check("cancel settles with the typed cancellation error", cancelRequested && cancelError
+            && cancelError.name === "ComputeCancelled"
+            && cancelError instanceof CC.compute.ComputeCancelled,
+            cancelError && cancelError.name);
+        check("cooperative cancel keeps the worker alive", cancelWorker
+            && CC.compute._worker === cancelWorker && CC.compute._workerCount === 1);
+
+        const cutCancelInput = closedBox();
+        const cutCancelWorker = CC.compute._worker;
+        let cutCancelRequested = false;
+        let cutCancelledPromise = null;
+        cutCancelledPromise = CC.compute.run("cutWithCutter", {
+            parts: [cutCancelInput], cutter: planarCutSpec,
+        }, {
+            onProgress: (progress) => {
+                if (!cutCancelRequested && progress.stage === "cut" && progress.fraction === 0) {
+                    cutCancelRequested = CC.compute.cancel(cutCancelledPromise.id);
+                }
+            },
+            transfer: [cutCancelInput.vertProperties.buffer, cutCancelInput.triVerts.buffer],
+        });
+        let cutCancelError = null;
+        try {
+            await cutCancelledPromise;
+        } catch (error) {
+            cutCancelError = error;
+        }
+        check("cutWithCutter cancellation rejects cooperatively",
+            cutCancelRequested && cutCancelError
+            && cutCancelError.name === "ComputeCancelled"
+            && cutCancelError instanceof CC.compute.ComputeCancelled,
+            cutCancelError && cutCancelError.name);
+        check("cut cancellation keeps the worker alive", cutCancelWorker
+            && CC.compute._worker === cutCancelWorker && CC.compute._workerCount === 1);
+
+        const oldWorker = CC.compute._worker;
+        const recycledReady = await CC.compute.recycle();
+        const recycledWorker = CC.compute._worker;
+        check("recycle re-initializes the worker", recycledReady && !CC.compute.degraded);
+        check("recycle terminates the old worker", CC.compute._lastTerminatedWorker === oldWorker);
+        check("recycle leaves exactly one live worker", recycledWorker !== oldWorker
+            && CC.compute._workerCount === 1);
+        const recycledPing = await CC.compute.run("ping", { recycled: true });
+        check("operation works after recycle", recycledPing && recycledPing.recycled === true);
+
+        let runtimeError = null;
+        try {
+            await CC.compute.run("__test_runtime_error__", {});
+        } catch (error) {
+            runtimeError = error;
+        }
+        check("runtime worker error rejects the active operation", !!runtimeError,
+            runtimeError && runtimeError.message);
+        const recoveredPing = await CC.compute.run("ping", { recovered: true });
+        check("next operation recovers on the worker", !CC.compute.degraded
+            && recoveredPing && recoveredPing.recovered === true
+            && CC.compute._workerCount === 1);
+
+        let demotionErrors = 0;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                await CC.compute.run("__test_runtime_error__", {});
+            } catch (_) {
+                demotionErrors++;
+            }
+        }
+        check("second runtime worker error enters degraded mode",
+            demotionErrors === 2 && CC.compute.degraded,
+            `${demotionErrors}/${CC.compute.degraded}`);
+
+        const degradedRouteInput = closedBox();
+        const degradedRouteSource = scenePiece(degradedRouteInput, "degraded route");
+        const degradedReadyOriginal = CC.compute.ready;
+        const degradedRunOriginal = CC.compute.run;
+        const degradedCancelOriginal = CC.compute.cancel;
+        const degradedPayloadOriginal = CC.compute.geometryPayloadAsync;
+        let degradedReadyCalls = 0;
+        let degradedRunCalls = 0;
+        let degradedTransferCalls = 0;
+        let degradedCancelCalls = 0;
+        let degradedPayloadCalls = 0;
+        CC.compute.ready = function() {
+            degradedReadyCalls++;
+            return Promise.resolve(true);
+        };
+        CC.compute.run = function(op, payload, options) {
+            degradedRunCalls++;
+            if (options && options.transfer) degradedTransferCalls++;
+            return degradedRunOriginal.call(this, op, payload, options);
+        };
+        CC.compute.cancel = function(id) {
+            degradedCancelCalls++;
+            return degradedCancelOriginal.call(this, id);
+        };
+        CC.compute.geometryPayloadAsync = function(geometry) {
+            degradedPayloadCalls++;
+            return degradedPayloadOriginal.call(this, geometry);
+        };
+        let degradedApply = false;
+        let degradedApplyError = null;
+        try {
+            degradedApply = await CC.cutFlow.applyCutterFlow(routeCutterPlan);
+        } catch (error) {
+            degradedApplyError = error;
+        } finally {
+            CC.compute.ready = degradedReadyOriginal;
+            CC.compute.run = degradedRunOriginal;
+            CC.compute.cancel = degradedCancelOriginal;
+            CC.compute.geometryPayloadAsync = degradedPayloadOriginal;
+        }
+        let degradedRouteVolumes = [];
+        try {
+            degradedRouteVolumes = CC.pieces.map((piece) => signedVolume(piece.geometry));
+        } catch (error) {
+            degradedApplyError = degradedApplyError || error;
+        }
+        check("cut.js degraded apply matches main piece results", degradedApply
+            && degradedRouteVolumes.length === 2
+            && degradedRouteVolumes.every((volume, i) =>
+                Math.abs(volume - mainCutSignedVolumes[i]) < 0.1),
+            `${formatVolumes(degradedRouteVolumes)} vs ${formatVolumes(mainCutSignedVolumes)}`
+            + (degradedApplyError ? `; ${degradedApplyError.message}` : ""));
+        check("cut.js degraded apply skips worker readiness, transfer, and cancel",
+            degradedReadyCalls === 0 && degradedRunCalls === 0
+            && degradedTransferCalls === 0 && degradedPayloadCalls === 0
+            && degradedCancelCalls === 0,
+            JSON.stringify({ ready: degradedReadyCalls, run: degradedRunCalls,
+                transfer: degradedTransferCalls, payload: degradedPayloadCalls,
+                cancel: degradedCancelCalls }));
+        check("cut.js degraded apply keeps source arrays attached",
+            degradedRouteInput.vertProperties.byteLength > 0
+            && degradedRouteInput.triVerts.byteLength > 0,
+            `${degradedRouteInput.vertProperties.byteLength}/${degradedRouteInput.triVerts.byteLength}`);
+        clearScenePieces(degradedRouteSource);
+        check("worker recovers after cut.js degraded apply",
+            await CC.compute.recycle() && !CC.compute.degraded);
+
+        const raceRouteInput = closedBox();
+        const raceRouteSource = scenePiece(raceRouteInput, "readiness demotion route");
+        const raceReadyOriginal = CC.compute.ready;
+        const raceRunOriginal = CC.compute.run;
+        const raceCancelOriginal = CC.compute.cancel;
+        const racePayloadOriginal = CC.compute.geometryPayloadAsync;
+        let raceDemotionErrors = 0;
+        let raceDemoted = false;
+        let raceRunCalls = 0;
+        let raceTransferCalls = 0;
+        let raceCancelCalls = 0;
+        let racePayloadCalls = 0;
+        CC.compute.ready = async function() {
+            const ready = await raceReadyOriginal.call(this);
+            if (ready && !raceDemoted) {
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        await raceRunOriginal.call(this, "__test_runtime_error__", {});
+                    } catch (_) {
+                        raceDemotionErrors++;
+                    }
+                }
+                raceDemoted = true;
+                return true;
+            }
+            return ready;
+        };
+        CC.compute.run = function(op, payload, options) {
+            if (raceDemoted) {
+                raceRunCalls++;
+                if (options && options.transfer) raceTransferCalls++;
+            }
+            return raceRunOriginal.call(this, op, payload, options);
+        };
+        CC.compute.cancel = function(id) {
+            if (raceDemoted) raceCancelCalls++;
+            return raceCancelOriginal.call(this, id);
+        };
+        CC.compute.geometryPayloadAsync = function(geometry) {
+            if (raceDemoted) racePayloadCalls++;
+            return racePayloadOriginal.call(this, geometry);
+        };
+        let raceApply = false;
+        let raceApplyError = null;
+        try {
+            raceApply = await CC.cutFlow.applyCutterFlow(routeCutterPlan);
+        } catch (error) {
+            raceApplyError = error;
+        } finally {
+            CC.compute.ready = raceReadyOriginal;
+            CC.compute.run = raceRunOriginal;
+            CC.compute.cancel = raceCancelOriginal;
+            CC.compute.geometryPayloadAsync = racePayloadOriginal;
+        }
+        let raceRouteVolumes = [];
+        try {
+            raceRouteVolumes = CC.pieces.map((piece) => signedVolume(piece.geometry));
+        } catch (error) {
+            raceApplyError = raceApplyError || error;
+        }
+        check("cut.js keeps a readiness-time demotion on the main path",
+            raceApply && raceDemotionErrors === 2 && raceRouteVolumes.length === 2
+            && raceRouteVolumes.every((volume, i) =>
+                Math.abs(volume - mainCutSignedVolumes[i]) < 0.1),
+            `${formatVolumes(raceRouteVolumes)} vs ${formatVolumes(mainCutSignedVolumes)}`
+            + (raceApplyError ? `; ${raceApplyError.message}` : ""));
+        check("readiness-time demotion does not use worker transfer or cancel",
+            raceRunCalls === 0 && raceTransferCalls === 0
+            && racePayloadCalls === 0 && raceCancelCalls === 0,
+            JSON.stringify({ run: raceRunCalls, transfer: raceTransferCalls,
+                payload: racePayloadCalls, cancel: raceCancelCalls }));
+        clearScenePieces(raceRouteSource);
+        check("worker recovers after readiness-time demotion",
+            await CC.compute.recycle() && !CC.compute.degraded);
+
+        const savedWorker = window.Worker;
+        window.Worker = function ForcedComputeConstructionFailure() {
+            throw new Error("forced compute construction failure");
+        };
+        const degradedReady = await CC.compute.recycle();
+        check("forced worker construction enters degraded mode",
+            degradedReady === false && CC.compute.degraded);
+        const degradedCutInput = closedBox();
+        const degradedCutter = CutCore.buildPlanarCutter(
+            new THREE.Vector3(0, 5, 0), new THREE.Vector3(0, 1, 0),
+            new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(10, 10, 10)));
+        const degradedCut = CC.compute.degraded
+            ? CutCore.cutWithCutter(geometryAdapter(degradedCutInput),
+                degradedCutter, degradedCutter) : null;
+        check("degraded cut fallback matches worker parity", !!degradedCut
+            && Math.abs(CutCore.geometryVolume(degradedCut.inside)
+                + CutCore.geometryVolume(degradedCut.outside) - workerCutVolume) < 0.1,
+            degradedCut && String(CutCore.geometryVolume(degradedCut.inside)
+                + CutCore.geometryVolume(degradedCut.outside)));
+        check("degraded cut leaves source arrays attached",
+            degradedCutInput.vertProperties.byteLength > 0
+            && degradedCutInput.triVerts.byteLength > 0,
+            `${degradedCutInput.vertProperties.byteLength}/${degradedCutInput.triVerts.byteLength}`);
+        if (degradedCut) {
+            degradedCut.inside.dispose();
+            degradedCut.outside.dispose();
+        }
+        degradedCutter.delete();
+        const fallbackInput = openBox();
+        const fallback = await CC.compute.run("repairGeometry", fallbackInput);
+        check("degraded mode returns the main-thread repair result", !!fallback
+            && fallback.method === "cap" && watertight(fallback), fallback && fallback.method);
+        window.Worker = savedWorker;
+        check("worker can recover after degraded mode", await CC.compute.recycle());
+    } catch (error) {
+        failures.push(`uncaught: ${error.name}: ${error.message}`);
+        log(`FAIL uncaught — ${error.stack || error}`);
+    }
+
+    document.title = failures.length ? `FAIL: ${failures.join("; ")}` : "PASS";
+})();
+</script>
+</body>
+</html>

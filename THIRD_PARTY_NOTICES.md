@@ -1,6 +1,6 @@
 # Third-party notices
 
-Curve Cut itself is licensed under the GNU AGPL-3.0 (see `LICENSE`). It bundles
+Curve Cut itself is licensed under the GNU AGPL-3.0-only (see `LICENSE`). It bundles
 the following third-party components under `vendor/`, each under its own license.
 The root license does not apply to them; each component's own terms do. Full
 license texts sit beside each component.

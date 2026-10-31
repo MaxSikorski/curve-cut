@@ -56,7 +56,7 @@ Hershey fonts, and the rest is plain HTML, CSS, and JavaScript with no build ste
 
 ## License
 
-[AGPL-3.0](LICENSE). Free to use, study, share, and modify — and if you build
+[AGPL-3.0-only](LICENSE). Free to use, study, share, and modify — and if you build
 something on top of it (including a hosted service), your version stays open too.
 Bring it to your print club. Bundled libraries keep their own licenses — see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

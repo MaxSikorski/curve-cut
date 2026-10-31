@@ -1,0 +1,45 @@
+# The merge gate: browser-free checks plus the fast browser checks on Playwright's headless Chromium.
+# Heavy checks (race, perf, memory, property) and the private-model ones (Benchy, statue) run on Max's Mac before /ship.
+# Runs on every pull request and on pushes to main. Public repository: Actions minutes are free.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CURVECUT_REQUIRE_BROWSER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Playwright's Chromium
+        run: uv run --no-project --with "playwright==1.62.*" python -m playwright install --with-deps chromium
+      - name: Syntax and offline checks
+        run: |
+          uv run --no-project python tools/check_js_syntax.py
+          uv run --no-project python tools/check_offline.py
+      - name: Worker source is up to date
+        run: uv run --no-project python tools/embed_worker.py --check
+      - name: Smoke
+        run: uv run --no-project python tools/check_smoke.py
+      - name: Engine checks
+        run: |
+          for c in pen units cut_engine formats repair hollow bigprint compute; do
+            echo "::group::check_$c"
+            uv run --no-project python tools/check_$c.py || { echo "::endgroup::"; echo "FAILED: check_$c"; exit 1; }
+            echo "::endgroup::"
+          done

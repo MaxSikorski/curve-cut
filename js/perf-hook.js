@@ -17,6 +17,18 @@
     const once = (evt) => new Promise((resolve) =>
         window.addEventListener(evt, resolve, { once: true }));
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitFor = (test, label, timeout = 60000) => new Promise((resolve, reject) => {
+        const started = performance.now();
+        const poll = () => {
+            if (test()) { resolve(); return; }
+            if (performance.now() - started >= timeout) {
+                reject(new Error(`timed out waiting for ${label}`));
+                return;
+            }
+            setTimeout(poll, 25);
+        };
+        poll();
+    });
 
     let stage = "start";
 
@@ -35,6 +47,9 @@
             const simplified = once("curvecut:pieces-changed");
             document.getElementById("simplify-go").click();
             await simplified;
+            await sleep(800); // let the scheduled post-simplify check settle too
+            stage = "ops-idle";
+            await waitFor(() => !CC.ops.busy(), "simplification operations to end");
 
             // straight cut through the middle, via the real preview + apply path
             stage = "cut";

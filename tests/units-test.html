@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+    <script src="../js/units-core.js"></script>
+    <script>
+        window.unitsCoreLoadedStandalone = typeof THREE === "undefined"
+            && !!window.CurveCut.UnitsCore;
+    </script>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script>
+/* Headless tests for Units & Orientation. Run via tools/check_units.py. */
+(() => {
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+    const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
+
+    try {
+        const U = window.CurveCut.UnitsCore;
+        check("core loads standalone before THREE", window.unitsCoreLoadedStandalone && !!U);
+        check("unit factors exact",
+            U.unitFactor("in") === 25.4 && U.unitFactor("cm") === 10 && U.unitFactor("mm") === 1);
+        const roundTrip = U.conversionScale("mm", "in") * U.conversionScale("in", "mm");
+        check("mm → in → mm identity", near(roundTrip, 1), String(roundTrip));
+
+        const calibration = U.calibrationScale(73, 300);
+        check("calibration 73 → 300", near(calibration, 300 / 73), String(calibration));
+        check("invalid calibration refused",
+            U.calibrationScale(0, 300) === null && U.calibrationScale(73, -1) === null);
+
+        check("2 mm is suspicious-inches", U.suspicion([2]).kind === "suspicious-inches");
+        check("20 mm boundary is ordinary", U.suspicion([20]) === null);
+        check("40–3000 mm are ordinary", U.suspicion([40, 3000]) === null);
+        check("5000 mm is suspicious-large", U.suspicion([5000]).kind === "suspicious-large");
+
+        const zUp = U.describeUpAxis("z");
+        const mapped = zUp.mapVector([0, 0, 1]);
+        check("Z-up maps source +Z to scene +Y",
+            near(mapped[0], 0) && near(mapped[1], 1) && near(mapped[2], 0), JSON.stringify(mapped));
+        check("Y-up is identity", U.describeUpAxis("y").rotationX === 0);
+        check("removing Z-up correction is +90°",
+            near(U.upAxisDelta("z", "y"), Math.PI / 2));
+
+        const calibratedBox = new THREE.BoxGeometry(73, 20, 10);
+        calibratedBox.scale(calibration, calibration, calibration);
+        calibratedBox.computeBoundingBox();
+        const calibratedSize = new THREE.Vector3();
+        calibratedBox.boundingBox.getSize(calibratedSize);
+        check("THREE bbox calibration really rescales 73 mm to 300 mm",
+            near(calibratedSize.x, 300, 1e-6), calibratedSize.x.toFixed(6));
+
+        const inchBox = new THREE.BoxGeometry(1, 2, 3);
+        const inchScale = U.conversionScale("mm", "in");
+        inchBox.scale(inchScale, inchScale, inchScale);
+        inchBox.computeBoundingBox();
+        const inchSize = new THREE.Vector3();
+        inchBox.boundingBox.getSize(inchSize);
+        check("THREE bbox inch reinterpretation is 25.4×",
+            near(inchSize.x, 25.4, 1e-5) && near(inchSize.z, 76.2, 1e-5),
+            `${inchSize.x.toFixed(1)} × ${inchSize.y.toFixed(1)} × ${inchSize.z.toFixed(1)}`);
+    } catch (err) {
+        fails.push("uncaught exception");
+        log(`FAIL uncaught exception — ${err.stack || err}`);
+    }
+
+    document.title = fails.length ? `FAIL: ${fails.join(", ")}` : "PASS";
+})();
+</script>
+</body>
+</html>

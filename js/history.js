@@ -25,10 +25,19 @@
         return undoStack.concat(redoStack).some((state) => state.includes(mesh));
     }
 
+    function isMaterialReferenced(material) {
+        if (CC.pieces.some((mesh) => mesh.material === material)) return true;
+        return undoStack.concat(redoStack).some(
+            (state) => state.some((mesh) => mesh.material === material));
+    }
+
     // dispose only meshes no other snapshot (or the live scene) still uses
     function disposeState(state) {
         for (const mesh of state) {
-            if (!isReferenced(mesh)) mesh.geometry.dispose();
+            if (!isReferenced(mesh)) {
+                mesh.geometry.dispose();
+                if (!isMaterialReferenced(mesh.material)) mesh.material.dispose();
+            }
         }
     }
 
@@ -42,29 +51,61 @@
         return (g.getIndex() ? g.getIndex().count : g.getAttribute("position").count) / 3;
     }
 
-    // triangles retained by the undo stack beyond what's live in the scene
-    function retainedTris() {
+    function retainedStats() {
+        const liveGeometries = new Set(CC.pieces.map((mesh) => mesh.geometry));
         const counted = new Set();
-        let total = 0;
-        for (const state of undoStack) {
-            for (const mesh of state) {
-                if (counted.has(mesh) || CC.pieces.includes(mesh)) continue;
-                counted.add(mesh);
-                total += meshTris(mesh);
+        const buffers = new Set();
+        const liveBuffers = new Set();
+        let retainedTris = 0;
+        let retainedBytes = 0;
+        const collectBuffers = (geometry) => {
+            for (const attribute of Object.values(geometry.attributes)) {
+                if (attribute.array && attribute.array.buffer) {
+                    liveBuffers.add(attribute.array.buffer);
+                }
             }
+            const index = geometry.getIndex();
+            if (index && index.array && index.array.buffer) liveBuffers.add(index.array.buffer);
+        };
+        for (const geometry of liveGeometries) collectBuffers(geometry);
+        const addBytes = (array) => {
+            const buffer = array && array.buffer;
+            if (!buffer || liveBuffers.has(buffer) || buffers.has(buffer)) return;
+            buffers.add(buffer);
+            retainedBytes += buffer.byteLength;
+        };
+        const visit = (state) => {
+            for (const mesh of state) {
+                const geometry = mesh.geometry;
+                if (liveGeometries.has(geometry) || counted.has(geometry)) continue;
+                counted.add(geometry);
+                retainedTris += meshTris(mesh);
+                for (const attribute of Object.values(geometry.attributes)) {
+                    addBytes(attribute.array);
+                }
+                const index = geometry.getIndex();
+                if (index) addBytes(index.array);
+            }
+        };
+        for (const state of undoStack) visit(state);
+        for (const state of redoStack) visit(state);
+        return { retainedTris, retainedBytes };
+    }
+
+    function trimHistory() {
+        while (undoStack.length > DEPTH) disposeState(undoStack.shift());
+        while (retainedStats().retainedTris > MAX_RETAINED_TRIS) {
+            if (undoStack.length) disposeState(undoStack.shift());
+            else if (redoStack.length) disposeState(redoStack.shift());
+            else break;
         }
-        return total;
     }
 
     /* Called by cut.js / simplify.js BEFORE they mutate CC.pieces. */
     function capture() {
         undoStack.push(snapshot());
         while (redoStack.length) disposeState(redoStack.pop());
-        // depth cap AND memory cap — old laptops matter more than deep history
-        while (undoStack.length > DEPTH ||
-               (undoStack.length > 1 && retainedTris() > MAX_RETAINED_TRIS)) {
-            disposeState(undoStack.shift());
-        }
+        trimHistory();
         updateButtons();
     }
 
@@ -80,29 +121,35 @@
 
     function undo() {
         if (!undoStack.length) return;
+        if (CC.ops.busy()) {
+            CC.toast("Hang on — an operation is still running.");
+            return;
+        }
         redoStack.push(snapshot());
         applyState(undoStack.pop());
+        trimHistory();
         updateButtons();
         CC.toast(`Undone — back to ${CC.pieces.length} piece${CC.pieces.length === 1 ? "" : "s"}.`);
     }
 
     function redo() {
         if (!redoStack.length) return;
+        if (CC.ops.busy()) {
+            CC.toast("Hang on — an operation is still running.");
+            return;
+        }
         undoStack.push(snapshot());
         applyState(redoStack.pop());
+        trimHistory();
         updateButtons();
         CC.toast(`Redone — ${CC.pieces.length} piece${CC.pieces.length === 1 ? "" : "s"}.`);
     }
 
     // fresh model or Start New: history dies with the old scene
     function clear() {
-        // live pieces were already disposed by app.js; dispose() is idempotent,
-        // so sweeping every stacked mesh is safe even when refs were shared
-        for (const state of undoStack.concat(redoStack)) {
-            for (const mesh of state) mesh.geometry.dispose();
-        }
-        undoStack.length = 0;
-        redoStack.length = 0;
+        // pop first so shared geometry/material stays alive until its final ref
+        while (undoStack.length) disposeState(undoStack.pop());
+        while (redoStack.length) disposeState(redoStack.pop());
         updateButtons();
     }
 
@@ -118,5 +165,18 @@
     });
 
     updateButtons();
-    CC.history = { capture, undo, redo, clear };
+    CC.history = {
+        capture, undo, redo, clear, isMaterialReferenced,
+        memoryReport: () => {
+            const stats = retainedStats();
+            return {
+                retainedBytes: stats.retainedBytes,
+                retainedTris: stats.retainedTris,
+                capTris: MAX_RETAINED_TRIS,
+                withinCap: stats.retainedTris <= MAX_RETAINED_TRIS,
+                undoEntries: undoStack.length,
+                redoEntries: redoStack.length,
+            };
+        },
+    };
 })();

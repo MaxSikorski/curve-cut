@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../js/hollow-core.js"></script>
+<script>
+/* Headless test for the hybrid hollowing engine. Run via tools/check_hollow.py.
+   Result lands in document.title: "PASS" or "FAIL: <reason>". */
+(async () => {
+    "use strict";
+
+    const log = (message) => { document.getElementById("log").textContent += message + "\n"; };
+    const failures = [];
+    const check = (name, condition, detail) => {
+        log(`${condition ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!condition) failures.push(name);
+    };
+    const dispose = (value) => { if (value) value.delete(); };
+    const statusOk = (manifold) => String(manifold.status()) === "NoError";
+    const warningCodes = (result) => result.stats.warnings.map((warning) => warning.code);
+
+    function manifoldFromArrays(wasm, vertProperties, triVerts) {
+        const mesh = new wasm.Mesh({ numProp: 3, vertProperties, triVerts });
+        mesh.merge();
+        return new wasm.Manifold(mesh);
+    }
+
+    function refinedIcosphere(wasm, radius, subdivisions, zScale = 1) {
+        const golden = (1 + Math.sqrt(5)) / 2;
+        const vertices = [
+            [-1, golden, 0], [1, golden, 0], [-1, -golden, 0], [1, -golden, 0],
+            [0, -1, golden], [0, 1, golden], [0, -1, -golden], [0, 1, -golden],
+            [golden, 0, -1], [golden, 0, 1], [-golden, 0, -1], [-golden, 0, 1],
+        ].map((point) => {
+            const length = Math.hypot(point[0], point[1], point[2]);
+            return [point[0] / length, point[1] / length, point[2] / length];
+        });
+        let faces = [
+            [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+            [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+            [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+            [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+        ];
+        for (let level = 0; level < subdivisions; level++) {
+            const midpointCache = new Map(), next = [];
+            const midpoint = (a, b) => {
+                const key = a < b ? `${a},${b}` : `${b},${a}`;
+                let index = midpointCache.get(key);
+                if (index !== undefined) return index;
+                const point = [(vertices[a][0] + vertices[b][0]) / 2,
+                    (vertices[a][1] + vertices[b][1]) / 2,
+                    (vertices[a][2] + vertices[b][2]) / 2];
+                const length = Math.hypot(point[0], point[1], point[2]);
+                index = vertices.length;
+                vertices.push([point[0] / length, point[1] / length, point[2] / length]);
+                midpointCache.set(key, index);
+                return index;
+            };
+            for (const face of faces) {
+                const ab = midpoint(face[0], face[1]);
+                const bc = midpoint(face[1], face[2]);
+                const ca = midpoint(face[2], face[0]);
+                next.push([face[0], ab, ca], [face[1], bc, ab],
+                    [face[2], ca, bc], [ab, bc, ca]);
+            }
+            faces = next;
+        }
+        const positions = new Float32Array(vertices.length * 3);
+        for (let i = 0; i < vertices.length; i++) {
+            positions[i * 3] = vertices[i][0] * radius;
+            positions[i * 3 + 1] = vertices[i][1] * radius;
+            positions[i * 3 + 2] = vertices[i][2] * radius * zScale;
+        }
+        return manifoldFromArrays(wasm, positions, new Uint32Array(faces.flat()));
+    }
+
+    function subtractAll(base, cutters) {
+        let current = base;
+        try {
+            for (const cutter of cutters) {
+                const next = current.subtract(cutter);
+                if (current !== base) current.delete();
+                current = next;
+            }
+            base.delete();
+            return current;
+        } catch (error) {
+            if (current !== base) current.delete();
+            base.delete();
+            throw error;
+        } finally {
+            for (const cutter of cutters) cutter.delete();
+        }
+    }
+
+    function translated(manifold, offset) {
+        try {
+            return manifold.translate(offset);
+        } finally {
+            manifold.delete();
+        }
+    }
+
+    function cavityIsOpen(wasm, hollow, center) {
+        let probe = null, overlap = null;
+        try {
+            probe = translated(wasm.Manifold.cube([2, 2, 2], true), center);
+            overlap = hollow.intersect(probe);
+            return overlap.volume() < 1e-6;
+        } finally {
+            dispose(overlap); dispose(probe);
+        }
+    }
+
+    let wasm, cube, refined, thinRefined;
+    const ownedResults = [];
+    try {
+        const raw = atob(window.MANIFOLD_WASM_B64);
+        const bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        window.MANIFOLD_WASM_B64 = null;
+        wasm = await window.ManifoldModule({ wasmBinary: bytes });
+        wasm.setup();
+        const H = window.CurveCut.hollowCore;
+        check("core API", !!(H && H.hollow && H.estimate && H.previewShell && H.wallWarnings));
+
+        cube = wasm.Manifold.cube([60, 60, 60], true);
+        check("cube fixture has 12 triangles", cube.numTri() === 12, `${cube.numTri()} triangles`);
+        const cubeMesh = cube.getMesh();
+        const preview = H.previewShell(cube, 6);
+        const span = (values, axis) => {
+            let lo = Infinity, hi = -Infinity;
+            for (let i = axis; i < values.length; i += 3) {
+                lo = Math.min(lo, values[i]); hi = Math.max(hi, values[i]);
+            }
+            return hi - lo;
+        };
+        const previewWallStats = (displacementsMm) => {
+            const values = Array.from(displacementsMm).sort((a, b) => a - b);
+            const pick = (fraction) => values[Math.floor(fraction * (values.length - 1))];
+            return { minMm: values[0], p05Mm: pick(0.05), medianMm: pick(0.5) };
+        };
+        check("preview shell keeps one vertex per source vertex",
+            preview.vertProperties.length === cubeMesh.vertProperties.length,
+            `${preview.vertProperties.length / 3} vertices`);
+        check("preview shell keeps source topology",
+            preview.triVerts.length === cubeMesh.triVerts.length
+            && preview.triVerts.every((value, i) => value === cubeMesh.triVerts[i]));
+        check("preview shell is displaced inward",
+            span(preview.vertProperties, 0) < span(cubeMesh.vertProperties, 0)
+            && span(preview.vertProperties, 1) < span(cubeMesh.vertProperties, 1)
+            && span(preview.vertProperties, 2) < span(cubeMesh.vertProperties, 2));
+        check("preview is QEF arrays only — no Manifold boolean result",
+            preview.vertProperties instanceof Float32Array
+            && preview.triVerts instanceof Uint32Array
+            && typeof preview.subtract === "undefined" && typeof preview.getMesh === "undefined");
+        check("preview reports one sane displacement per source vertex",
+            preview.displacementsMm instanceof Float32Array
+            && preview.displacementsMm.length === cubeMesh.vertProperties.length / 3
+            && preview.displacementsMm.every((value) => Math.abs(value - 6) < 1e-4),
+            Array.from(preview.displacementsMm).map((value) => value.toFixed(4)).join(","));
+        const boundedPreview = H.previewShell(cube, 6, { maxSamples: 3 });
+        check("bounded preview respects maxSamples",
+            boundedPreview.sampleCount === 3 && boundedPreview.displacementsMm.length === 3,
+            `${boundedPreview.sampleCount} samples`);
+
+        let previewThinPlate = null;
+        try {
+            previewThinPlate = wasm.Manifold.cube([30, 30, 5], true);
+            const thinPreview = H.previewShell(previewThinPlate, 6, { maxSamples: 4 });
+            const previewCodes = H.wallWarnings(
+                previewWallStats(thinPreview.displacementsMm), 6).map((warning) => warning.code);
+            check("thin preview yields wall warning codes before Apply",
+                thinPreview.sampleCount === 4
+                && previewCodes.includes("thin-wall") && previewCodes.includes("thin-wall-hard"),
+                `${thinPreview.sampleCount} samples; ${previewCodes.join(",")}`);
+        } finally {
+            dispose(previewThinPlate);
+        }
+        const meshCube = H.hollow(cube, 6);
+        ownedResults.push(meshCube.hollow);
+        check("mesh cube exact volume", Math.abs(meshCube.stats.volumeAfterMm3 - 105408) < 1e-6,
+            meshCube.stats.volumeAfterMm3.toFixed(9));
+        check("selector sends 12-triangle cube to mesh",
+            meshCube.stats.engineUsed === "mesh" && !meshCube.stats.fellBack);
+        check("mesh cube NoError + watertight", statusOk(meshCube.hollow));
+        check("savedPct arithmetic", Math.abs(meshCube.stats.savedPct
+            - 100 * (1 - meshCube.stats.volumeAfterMm3 / meshCube.stats.volumeBeforeMm3)) < 1e-12,
+            meshCube.stats.savedPct.toFixed(6));
+        check("fat cube has no wall warnings", warningCodes(meshCube).length === 0,
+            warningCodes(meshCube).join(","));
+
+        const hardWall = H.hollow(cube, 1.2, { engine: "mesh" });
+        ownedResults.push(hardWall.hollow);
+        const hardWallCodes = warningCodes(hardWall);
+        check("sub-1.6 mm wall gets hard warning only",
+            hardWallCodes.includes("thin-wall-hard") && !hardWallCodes.includes("thin-wall"),
+            `${hardWall.stats.wallStats.minMm.toFixed(4)} mm; ${hardWallCodes.join(",")}`);
+
+        const gridCube = H.hollow(cube, 6, { engine: "grid" });
+        ownedResults.push(gridCube.hollow);
+        const gridErrorPct = 100 * Math.abs(gridCube.stats.volumeAfterMm3 - 105408) / 105408;
+        check("grid cube within 0.6%", gridErrorPct <= 0.6, `${gridErrorPct.toFixed(4)}%`);
+        check("grid cube engine", gridCube.stats.engineUsed === "grid" && !gridCube.stats.fellBack);
+        check("grid cube NoError + watertight", statusOk(gridCube.hollow));
+
+        const estimate = H.estimate(cube, 6);
+        check("estimate within 15% of real savedPct",
+            Math.abs(estimate - meshCube.stats.savedPct) <= Math.abs(meshCube.stats.savedPct) * 0.15,
+            `${estimate.toFixed(3)} vs ${meshCube.stats.savedPct.toFixed(3)}`);
+
+        refined = refinedIcosphere(wasm, 20, 6);
+        check("refined icosphere fixture over 50k", refined.numTri() > 50000,
+            `${refined.numTri()} triangles`);
+        const selectedGrid = H.hollow(refined, 6);
+        ownedResults.push(selectedGrid.hollow);
+        check("selector sends refined icosphere to grid",
+            selectedGrid.stats.engineUsed === "grid" && !selectedGrid.stats.fellBack);
+        check("selected grid result NoError + watertight", statusOk(selectedGrid.hollow));
+
+        thinRefined = refinedIcosphere(wasm, 20, 6, 0.2);
+        const tripped = H.hollow(thinRefined, 6, { engine: "mesh" });
+        ownedResults.push(tripped.hollow);
+        check("D2 tripwire fires and falls back", tripped.stats.engineUsed === "grid" && tripped.stats.fellBack,
+            `${tripped.stats.engineUsed}, fellBack=${tripped.stats.fellBack}`);
+        check("D2 fallback records RMS tripwire", tripped.stats.tripwireReasons.includes("rms"),
+            tripped.stats.tripwireReasons.join(","));
+        check("fallback result NoError + watertight", statusOk(tripped.hollow));
+
+        let thinPlate = null;
+        try {
+            thinPlate = wasm.Manifold.cube([30, 30, 5], true);
+            const thinResult = H.hollow(thinPlate, 6);
+            ownedResults.push(thinResult.hollow);
+            const codes = warningCodes(thinResult);
+            check("thin fin warns", codes.includes("thin-wall") || codes.includes("thin-wall-hard"),
+                codes.join(","));
+            check("thin fin result NoError + watertight", statusOk(thinResult.hollow));
+        } finally {
+            dispose(thinPlate);
+        }
+
+        let cavitySource = null;
+        try {
+            const first = translated(wasm.Manifold.sphere(6, 24), [-12, 0, 0]);
+            const second = translated(wasm.Manifold.sphere(6, 24), [12, 0, 0]);
+            cavitySource = subtractAll(wasm.Manifold.cube([60, 40, 40], true), [first, second]);
+            const cavities = H.hollow(cavitySource, 2);
+            ownedResults.push(cavities.hollow);
+            check("multi-cavity result NoError + watertight", statusOk(cavities.hollow));
+            check("first interior cavity preserved", cavityIsOpen(wasm, cavities.hollow, [-12, 0, 0]));
+            check("second interior cavity preserved", cavityIsOpen(wasm, cavities.hollow, [12, 0, 0]));
+        } finally {
+            dispose(cavitySource);
+        }
+
+        let completedStages = 0, cancelled = false;
+        try {
+            H.hollow(cube, 6, {
+                onProgress: (_stage, fraction) => { if (fraction === 1) completedStages++; },
+                shouldCancel: () => completedStages >= 1,
+            });
+        } catch (error) {
+            cancelled = error instanceof H.HollowCancelled && error.name === "HollowCancelled";
+        }
+        check("cancellation throws typed HollowCancelled", cancelled);
+        const afterCancel = H.hollow(cube, 6, { engine: "mesh" });
+        ownedResults.push(afterCancel.hollow);
+        check("same source succeeds after cancellation", statusOk(afterCancel.hollow)
+            && Math.abs(afterCancel.stats.volumeAfterMm3 - 105408) < 1e-6);
+
+        document.title = failures.length ? `FAIL: ${failures.join("; ")}` : "PASS";
+    } catch (error) {
+        log("EXCEPTION: " + (error.stack || error));
+        document.title = "FAIL: exception — " + error.message;
+    } finally {
+        for (const result of ownedResults) dispose(result);
+        dispose(thinRefined); dispose(refined); dispose(cube);
+    }
+})();
+</script>
+</body>
+</html>

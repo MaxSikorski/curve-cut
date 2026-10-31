@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../vendor/hershey/hershey-font.js"></script>
+<script src="../vendor/fflate/fflate.min.js"></script>
+<script src="../js/cut-core.js"></script>
+<script src="../js/hollow-core.js"></script>
+<script src="../js/bigprint-core.js"></script>
+<script>
+/* Headless tests for Big Print (v2.0): grid math (step 2) + the streaming
+   cell cutter (step 3). Run via tools/check_bigprint.py.
+   Title: "PASS" or "FAIL: <names>". */
+(async () => {
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+    const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
+
+    try {
+        const B = window.BigPrintCore;
+
+        // ================================================== step 2: grid math
+
+        let cuts = B.axisCuts(500, 246);
+        check("500mm on 246mm bed needs 2 cuts", cuts.length === 2, JSON.stringify(cuts));
+        check("balanced: edge parts equal", near(cuts[0], 127) && near(cuts[1], 373),
+            JSON.stringify(cuts));
+
+        check("model that fits needs no cuts", B.axisCuts(200, 246).length === 0);
+        cuts = B.axisCuts(492, 246);
+        check("exact 2× bed splits once at the middle",
+            cuts.length === 1 && near(cuts[0], 246), JSON.stringify(cuts));
+
+        cuts = B.axisCuts(500, 246, 10);
+        check("nudge +10 slides both cuts", near(cuts[0], 137) && near(cuts[1], 383),
+            JSON.stringify(cuts));
+        const wrapped = B.axisCuts(500, 246, 246);
+        check("nudge of one full cell is a no-op",
+            wrapped.length === 2 && near(wrapped[0], 127), JSON.stringify(wrapped));
+
+        let legal = true;
+        for (let size = 50; size <= 2000; size += 37) {
+            for (const nudge of [0, -100, 13, 245]) {
+                const cs = B.axisCuts(size, 246, nudge);
+                let prev = 0;
+                for (const t of [...cs, size]) {
+                    if (t - prev > 246 + 1e-6 || t - prev <= 0) legal = false;
+                    prev = t;
+                }
+            }
+        }
+        check("every segment is 0 < seg ≤ bed for sizes 50–2000, all nudges", legal);
+
+        const grid500 = B.computeGrid({
+            size: { x: 500, y: 500, z: 500 },
+            bed: { w: 256, d: 256, h: 256 },
+            margin: 5,
+        });
+        check("500³ model on a 256³ bed = 3×3×3", grid500.counts.x === 3
+            && grid500.counts.y === 3 && grid500.counts.z === 3, JSON.stringify(grid500.counts));
+        check("total part estimate 27", grid500.total === 27);
+        const generated500 = [...B.gridCells(grid500,
+            { x: 500, y: 500, z: 500 }, { x: -250, y: 0, z: -250 })];
+        check("cellCount arithmetic matches generator yield count",
+            B.cellCount(grid500) === generated500.length, String(B.cellCount(grid500)));
+
+        const lazyCells = B.gridCells(grid500,
+            { x: 500, y: 500, z: 500 }, { x: -250, y: 0, z: -250 });
+        const firstThree = [];
+        for (const cell of lazyCells) {
+            firstThree.push(cell.id);
+            if (firstThree.length === 3) break;
+        }
+        check("gridCells is lazy and can stop after 3 yields",
+            !Array.isArray(lazyCells) && firstThree.length === 3,
+            firstThree.join(","));
+
+        const absurdStarted = performance.now();
+        const absurdGrid = B.computeGrid({
+            size: { x: 3000, y: 3000, z: 3000 },
+            bed: { w: 10, d: 10, h: 10 }, margin: 0,
+        });
+        const absurdCount = B.cellCount(absurdGrid);
+        const absurdMs = performance.now() - absurdStarted;
+        check("27M repro counts arithmetically without allocation",
+            absurdCount === 27000000 && absurdCount > 4096 && absurdMs < 1000,
+            `${absurdCount} in ${absurdMs.toFixed(2)}ms`);
+        check("usable cell is bed minus margin both sides", grid500.usable.x === 246);
+        check("margin bigger than the bed returns null",
+            B.computeGrid({ size: { x: 10, y: 10, z: 10 }, bed: { w: 20, d: 20, h: 20 }, margin: 10 }) === null);
+
+        check("column letters", B.colLetter(0) === "A" && B.colLetter(25) === "Z"
+            && B.colLetter(26) === "AA" && B.colLetter(51) === "AZ" && B.colLetter(52) === "BA");
+        check("B2-style ID", B.partId(1, 1, 0, 1) === "B2");
+        check("layer suffix above layer 1", B.partId(0, 0, 2, 3) === "A1-L3");
+        check("no layer suffix on layer 1 of many", B.partId(0, 0, 0, 3) === "A1");
+
+        check("target 250 on a 100mm model is 2.5×", near(B.scaleForTarget(100, 250), 2.5));
+        check("scale 2.5 on a 100mm model is 250mm", near(B.targetForScale(100, 2.5), 250));
+        check("integer baked scale label", B.bakedScaleLabel(5) === "5× of imported");
+        check("decimal baked scale label", B.bakedScaleLabel(2.5) === "2.5× of imported");
+        check("sub-1 baked scale label", B.bakedScaleLabel(0.5) === "0.5× of imported");
+        check("1× baked scale label is omitted", B.bakedScaleLabel(1) === null);
+
+        const multiStory = B.partStory(8, true);
+        check("multi-cell wording keeps the ordinary parts story",
+            multiStory.statusSuffix === "" && multiStory.exportLabel === "8 parts",
+            JSON.stringify(multiStory));
+        const solidStory = B.partStory(1, false);
+        check("one-cell solid says it fits without cuts",
+            solidStory.statusSuffix === " — fits the bed in one piece, no cuts needed"
+            && solidStory.exportLabel === "1 part", JSON.stringify(solidStory));
+        const hollowStory = B.partStory(1, true);
+        check("one-cell hollow says the cavity stays sealed",
+            hollowStory.statusSuffix === " — fits the bed in one piece, no cuts needed"
+                + " (the cavity stays sealed — pick a smaller bed or bigger scale for open shells)"
+            && hollowStory.exportLabel === "1 sealed hollow part", JSON.stringify(hollowStory));
+
+        const savings34 = B.hollowSavingsStory(34, 6);
+        check("34% savings gets teaser and numeric status",
+            savings34.teaser.includes("34") && savings34.status.includes("34"),
+            JSON.stringify(savings34));
+        const savings12 = B.hollowSavingsStory(12, 6);
+        check("12% savings gets no teaser and numeric status",
+            savings12.teaser === null && savings12.status.includes("12"),
+            JSON.stringify(savings12));
+        for (const savedPct of [5, 0, -314]) {
+            const story = B.hollowSavingsStory(savedPct, 6);
+            const rendered = `${story.teaser || ""} ${story.status}`;
+            check(`${savedPct}% savings gets not-worth wording without a negative number`,
+                story.teaser === null && story.status.toLowerCase().includes("not worth")
+                    && !/-\d/.test(rendered), JSON.stringify(story));
+        }
+
+        // ====================================== step 3: streaming cell cutter
+
+        await CutCore.init();
+        check("wasm init", CutCore.isReady());
+
+        const watertight = (g) => {
+            try { const m = CutCore.toManifold(g); m.delete(); return true; }
+            catch (e) { return false; }
+        };
+
+        // A hollow shell goes through the ordinary grid cutter: no lip-only
+        // path or per-cell repair is involved.
+        const cube60 = new THREE.BoxGeometry(60, 60, 60).toNonIndexed();
+        cube60.translate(0, 30, 0);
+        const hollowSource = CutCore.toManifold(cube60);
+        const hollowed = window.CurveCut.hollowCore.hollow(hollowSource, 6, { engine: "mesh" });
+        hollowSource.delete();
+        const hollowVolume = hollowed.hollow.volume();
+        const hollowGrid = B.computeGrid({
+            size: { x: 60, y: 60, z: 60 },
+            bed: { w: 40, d: 100, h: 100 }, margin: 5,
+        });
+        check("hollow cube grid forces at least two cells", hollowGrid.total >= 2,
+            JSON.stringify(hollowGrid.counts));
+        const hollowParts = [];
+        for (const cell of B.gridCells(hollowGrid,
+            { x: 60, y: 60, z: 60 }, { x: -30, y: 0, z: -30 })) {
+            const part = CutCore.cutGridCell(hollowed.hollow, cell, 0);
+            if (part) hollowParts.push(part);
+        }
+        check("grid-cut hollow cube occupies every forced cell",
+            hollowParts.length === hollowGrid.total, `${hollowParts.length} parts`);
+        check("every grid-cut hollow part is watertight", hollowParts.every(watertight));
+        const hollowPartVolume = hollowParts.reduce(
+            (sum, part) => sum + CutCore.geometryVolume(part), 0);
+        check("grid-cut hollow part volumes sum to the hollow volume",
+            Math.abs(hollowPartVolume - hollowVolume) < 1,
+            `${hollowPartVolume.toFixed(3)} vs ${hollowVolume.toFixed(3)}`);
+        hollowParts.forEach((part) => part.dispose());
+        hollowed.hollow.delete();
+        cube60.dispose();
+
+        // 100mm cube centered on X/Z, floor at Y=0 (the app's convention)
+        const cube100 = new THREE.BoxGeometry(100, 100, 100).toNonIndexed();
+        cube100.translate(0, 50, 0);
+        const size100 = { x: 100, y: 100, z: 100 };
+        const min100 = { x: -50, y: 0, z: -50 };
+
+        // bed 70³ margin 5 → usable 60 → 2×2×2 grid, cuts balanced at 50
+        const grid8 = B.computeGrid({ size: size100, bed: { w: 70, d: 70, h: 70 }, margin: 5 });
+        check("100³ on usable-60 bed = 2×2×2", grid8.total === 8, JSON.stringify(grid8.counts));
+        const cells8 = [...B.gridCells(grid8, size100, min100)];
+        check("gridCells enumerates all 8", cells8.length === 8);
+        check("cell ids run A1, B1, A2, B2, A1-L2…", cells8[0].id === "A1"
+            && cells8[1].id === "B1" && cells8[2].id === "A2" && cells8[3].id === "B2"
+            && cells8[4].id === "A1-L2" && cells8[7].id === "B2-L2",
+            cells8.map((c) => c.id).join(","));
+        check("interior flags: first cell only +faces interior",
+            cells8[0].in.x0 === false && cells8[0].in.x1 === true
+            && cells8[0].in.y0 === false && cells8[0].in.y1 === true
+            && cells8[0].in.z0 === false && cells8[0].in.z1 === true);
+
+        let solid = CutCore.toManifold(cube100);
+
+        // --- gap 0: 8 exact 50³ parts, volume conserved, all watertight
+        let parts = [];
+        for (const cell of cells8) {
+            const g = CutCore.cutGridCell(solid, cell, 0);
+            if (g) parts.push(g);
+        }
+        check("gap 0: all 8 cells occupied", parts.length === 8);
+        let allExact = true, sum = 0, allTight = true;
+        for (const p of parts) {
+            const v = CutCore.geometryVolume(p);
+            sum += v;
+            if (Math.abs(v - 125000) > 1) allExact = false;
+            if (!watertight(p)) allTight = false;
+        }
+        check("gap 0: every part is exactly 50³ = 125,000 mm³", allExact);
+        check("gap 0: volumes sum to the original 1,000,000 mm³", Math.abs(sum - 1e6) < 1,
+            sum.toFixed(1));
+        check("gap 0: every part is watertight", allTight);
+        parts.forEach((p) => p.dispose());
+
+        // --- gap 0.3: kerf slabs removed exactly (inclusion–exclusion)
+        parts = [];
+        for (const cell of cells8) {
+            const g = CutCore.cutGridCell(solid, cell, 0.3);
+            if (g) parts.push(g);
+        }
+        sum = parts.reduce((n, p) => n + CutCore.geometryVolume(p), 0);
+        const gap = 0.3, kerf = 3 * gap * 100 * 100 - 3 * gap * gap * 100 + gap ** 3;
+        check("gap 0.3: volumes sum to original minus the three kerf slabs",
+            Math.abs(sum - (1e6 - kerf)) < 1, `${sum.toFixed(1)} vs ${(1e6 - kerf).toFixed(1)}`);
+        check("gap 0.3: parts still watertight", parts.every(watertight));
+        parts.forEach((p) => p.dispose());
+        solid.delete();
+
+        // --- empty cells are skipped (two separated cubes, hole in the middle)
+        const twin = (() => {
+            const a = new THREE.BoxGeometry(20, 20, 20).toNonIndexed();
+            a.translate(-40, 10, 0);
+            const b = new THREE.BoxGeometry(20, 20, 20).toNonIndexed();
+            b.translate(40, 10, 0);
+            const pa = a.getAttribute("position").array;
+            const pb = b.getAttribute("position").array;
+            const merged = new Float32Array(pa.length + pb.length);
+            merged.set(pa); merged.set(pb, pa.length);
+            const g = new THREE.BufferGeometry();
+            g.setAttribute("position", new THREE.BufferAttribute(merged, 3));
+            return g;
+        })();
+        const twinSolid = CutCore.toManifold(twin);
+        const gridTwin = B.computeGrid({
+            size: { x: 100, y: 20, z: 20 }, bed: { w: 50, d: 50, h: 50 }, margin: 5,
+        });
+        check("twin cubes grid is 3×1×1", gridTwin.total === 3, JSON.stringify(gridTwin.counts));
+        const twinCells = [...B.gridCells(gridTwin,
+            { x: 100, y: 20, z: 20 }, { x: -50, y: 0, z: -10 })];
+        const twinParts = twinCells.map((c) => CutCore.cutGridCell(twinSolid, c, 0));
+        check("empty middle cell returns null, outer two are real",
+            twinParts[0] !== null && twinParts[1] === null && twinParts[2] !== null);
+        const twinSum = twinParts.filter(Boolean)
+            .reduce((n, p) => n + CutCore.geometryVolume(p), 0);
+        check("twin cubes: nothing lost to the empty cell", Math.abs(twinSum - 16000) < 1,
+            twinSum.toFixed(1));
+        twinParts.filter(Boolean).forEach((p) => p.dispose());
+        twinSolid.delete();
+
+        // ==================================== step 4: auto seam connectors
+
+        // 100³ cube split 2×1×1 — one seam, the balanced cut lands at x=0
+        const grid2 = B.computeGrid({
+            size: size100, bed: { w: 70, d: 120, h: 120 }, margin: 5,
+        });
+        check("2×1×1 grid for the connector test", grid2.total === 2
+            && grid2.counts.x === 2, JSON.stringify(grid2.counts));
+        const cells2 = [...B.gridCells(grid2, size100, min100)];
+        check("seam sits at x=0", near(cells2[0].x1, 0), String(cells2[0].x1));
+
+        // both neighbors derive the SAME seam descriptor + placements
+        const seamA = B.seamOf(cells2[0], "x", +1);
+        const seamB = B.seamOf(cells2[1], "x", -1);
+        check("neighbors compute identical seam descriptors",
+            JSON.stringify(seamA) === JSON.stringify(seamB));
+
+        const CONN = { size: 8, depth: 6, shape: "circle", tolR: 0.2, tolD: 0.1, spacing: 30 };
+        solid = CutCore.toManifold(cube100);
+        const placeA = CutCore.placeSeamConnectors(solid, seamA, CONN);
+        const placeB = CutCore.placeSeamConnectors(solid, seamB, CONN);
+        check("9 connector spots on the 100×100 seam (spacing 30)",
+            placeA.length === 9, String(placeA.length));
+        check("both sides place identically", placeA.length === placeB.length
+            && placeA.every((p, i) => p.distanceTo(placeB[i]) < 1e-9));
+
+        // cut both cells with connectors, gap 0 — exact volume accounting
+        const male = CutCore.cutGridCell(solid, cells2[0], 0, CONN);   // pegs on +x
+        const female = CutCore.cutGridCell(solid, cells2[1], 0, CONN); // sockets on -x
+        check("both connector parts exist", !!male && !!female);
+        const polyArea = (r) => 0.5 * 32 * r * r * Math.sin(2 * Math.PI / 32);
+        const vMale = CutCore.geometryVolume(male);
+        const vFemale = CutCore.geometryVolume(female);
+        const expMale = 500000 + 9 * polyArea(CONN.size / 2) * CONN.depth;
+        const expFemale = 500000 - 9 * polyArea(CONN.size / 2 + CONN.tolR / 2)
+            * (CONN.depth + CONN.tolD);
+        check("male grows by exactly 9 peg volumes", Math.abs(vMale - expMale) < 1,
+            `${vMale.toFixed(1)} vs ${expMale.toFixed(1)}`);
+        check("female loses exactly 9 tolerance-grown sockets",
+            Math.abs(vFemale - expFemale) < 1, `${vFemale.toFixed(1)} vs ${expFemale.toFixed(1)}`);
+        check("connector parts watertight", watertight(male) && watertight(female));
+
+        // assembled footprint unchanged: pegs stay inside the other part's cell
+        male.computeBoundingBox(); female.computeBoundingBox();
+        const asm = male.boundingBox.clone().union(female.boundingBox);
+        check("assembled bbox still the original 100³",
+            near(asm.min.x, -50, 1e-3) && near(asm.max.x, 50, 1e-3)
+            && near(asm.min.y, 0, 1e-3) && near(asm.max.y, 100, 1e-3));
+        check("peg pokes past the seam by its depth",
+            near(male.boundingBox.max.x, CONN.depth, 1e-3), String(male.boundingBox.max.x));
+        male.dispose(); female.dispose();
+
+        // a seam too small for the inset gets no connectors (graceful skip)
+        const tinySeam = { axis: "x", plane: 0,
+            u: { axis: "y", lo: 0, hi: 8 }, v: { axis: "z", lo: -4, hi: 4 } };
+        check("tiny seam gets zero candidates",
+            B.seamGridPositions(tinySeam, 30, CONN.size / 2 + 1.5).length === 0);
+        solid.delete();
+
+        // ======================================== step 5: engraved part IDs
+
+        solid = CutCore.toManifold(cube100);
+
+        // ink area is layout-independent — measure it once for the math below
+        const probeText = CutCore.buildTextSolid(window.HERSHEY_FONT, "A1", {
+            height: 10, depth: 0.6,
+            pos: new THREE.Vector3(), e1: new THREE.Vector3(1, 0, 0),
+            e2: new THREE.Vector3(0, 1, 0), outward: new THREE.Vector3(0, 0, 1),
+        });
+        check("text solid builds with positive ink area",
+            !!probeText && probeText.area > 5, probeText && probeText.area.toFixed(2));
+        probeText.solid.delete();
+
+        const plain = CutCore.cutGridCell(solid, cells2[0], 0);
+        const engravedCell = { ...cells2[0], engraveId: "A1" };
+        const engraved = CutCore.cutGridCell(solid, engravedCell, 0);
+        check("engraved flag set on the part", engraved.userData.engraved === true);
+        const drop = CutCore.geometryVolume(plain) - CutCore.geometryVolume(engraved);
+        check("volume drops by exactly ink area × 0.6mm depth",
+            Math.abs(drop - probeText.area * 0.6) < 0.5,
+            `${drop.toFixed(2)} vs ${(probeText.area * 0.6).toFixed(2)}`);
+        check("engraved part stays watertight", watertight(engraved));
+        plain.dispose(); engraved.dispose();
+
+        // too-small seam: part comes back untouched, flag false
+        const tinyCell = {
+            x0: -50, x1: -42, y0: 0, y1: 8, z0: -4, z1: 4,
+            in: { x0: false, x1: true, y0: false, y1: false, z0: false, z1: false },
+            engraveId: "A1",
+        };
+        // --- Max's V8-block bug (2026-07-13): a part that only fills a corner
+        // of its cell must get its label ON THE MATERIAL, not on empty air at
+        // the cell-face center — and `engraved` must never lie.
+        const cornerBox = new THREE.BoxGeometry(100, 30, 30).toNonIndexed();
+        cornerBox.translate(0, 15, -35); // y 0..30, z -50..-20 — corner of the cell
+        const cornerSolid = CutCore.toManifold(cornerBox);
+        const cornerCell = {
+            x0: -50, x1: 50, y0: 0, y1: 100, z0: -50, z1: 50,
+            in: { x0: false, x1: true, y0: false, y1: false, z0: false, z1: false },
+        };
+        const vCornerBefore = CutCore.geometryVolume(CutCore.toGeometry(cornerSolid));
+        const rCorner = CutCore.engraveCellId(cornerSolid, cornerCell, "A1", { gap: 0 });
+        const vCornerAfter = CutCore.geometryVolume(CutCore.toGeometry(rCorner.part));
+        const cornerDrop = vCornerBefore - vCornerAfter;
+        check("corner-material part reports engraved", rCorner.engraved === true);
+        check("corner label carved real material (face center is AIR)",
+            Math.abs(cornerDrop - rCorner.area * 0.6) < 0.5 && cornerDrop > 3,
+            `drop ${cornerDrop.toFixed(2)} vs ${(rCorner.area * 0.6).toFixed(2)}`);
+        rCorner.part.delete();
+
+        // --- tube: the face CENTER is a hole; the label must land on the ring
+        const outerP = CutCore.buildConnectorSolid(
+            { pos: new THREE.Vector3(0, 0, -50), normal: new THREE.Vector3(0, 0, 1),
+              shape: "circle", size: 80, depth: 100, rotDeg: 0 });
+        const innerP = CutCore.buildConnectorSolid(
+            { pos: new THREE.Vector3(0, 0, -52), normal: new THREE.Vector3(0, 0, 1),
+              shape: "circle", size: 40, depth: 104, rotDeg: 0 });
+        const ring = outerP.subtract(innerP);
+        outerP.delete(); innerP.delete();
+        const ringCell = {
+            x0: -50, x1: 50, y0: -50, y1: 50, z0: -50, z1: 50,
+            in: { x0: false, x1: false, y0: false, y1: false, z0: false, z1: true },
+        };
+        const vRingBefore = CutCore.geometryVolume(CutCore.toGeometry(ring));
+        const rRing = CutCore.engraveCellId(ring, ringCell, "A1", { gap: 0 });
+        const vRingAfter = CutCore.geometryVolume(CutCore.toGeometry(rRing.part));
+        const ringDrop = vRingBefore - vRingAfter;
+        check("tube face (hole in the middle) still gets its label",
+            rRing.engraved === true, rRing.height && `at ${rRing.height}mm`);
+        check("tube label carved real material off-center",
+            Math.abs(ringDrop - rRing.area * 0.6) < 0.5 && ringDrop > 3,
+            `drop ${ringDrop.toFixed(2)} vs ${(rRing.area * 0.6).toFixed(2)}`);
+        rRing.part.delete();
+
+        const tinyPart = CutCore.cutGridCell(solid, tinyCell, 0);
+        const { engraveId, ...tinyNoId } = tinyCell;
+        const tinyPlain = CutCore.cutGridCell(solid, tinyNoId, 0);
+        check("tiny part skips engraving gracefully",
+            tinyPart !== null && tinyPart.userData.engraved === false);
+        check("tiny part volume untouched",
+            Math.abs(CutCore.geometryVolume(tinyPart) - CutCore.geometryVolume(tinyPlain)) < 1e-6,
+            CutCore.geometryVolume(tinyPart).toFixed(1));
+        tinyPart.dispose(); tinyPlain.dispose();
+        solid.delete();
+
+        // ================================ step 6: STL serializer + zip + manifest
+
+        // STL round-trip: serialize a known box, re-measure volume + Z-up frame
+        const box = new THREE.BoxGeometry(10, 20, 30).toNonIndexed(); // y=20 tall
+        box.translate(0, 10, 0);
+        const welded = (() => {
+            const { vertProperties, triVerts } = CutCore.weldGeometry(box);
+            const g = new THREE.BufferGeometry();
+            g.setAttribute("position", new THREE.BufferAttribute(vertProperties, 3));
+            g.setIndex(new THREE.BufferAttribute(triVerts, 1));
+            return g;
+        })();
+        const stl = B.serializeSTL(welded);
+        check("binary STL has 84 + 50/tri bytes", stl.length === 84 + 12 * 50, String(stl.length));
+        const triCount = new DataView(stl.buffer).getUint32(80, true);
+        check("STL declares 12 triangles", triCount === 12);
+        // parse the verts back: volume must survive, scene-Y becomes printer-Z
+        let vol = 0, maxZ = -Infinity, minZ = Infinity;
+        const dvS = new DataView(stl.buffer);
+        for (let t = 0; t < triCount; t++) {
+            const o = 84 + t * 50 + 12;
+            const P = [];
+            for (let k = 0; k < 3; k++) {
+                P.push([dvS.getFloat32(o + k * 12, true),
+                    dvS.getFloat32(o + k * 12 + 4, true),
+                    dvS.getFloat32(o + k * 12 + 8, true)]);
+            }
+            const [a, b, c] = P;
+            vol += (a[0] * (b[1] * c[2] - b[2] * c[1]) + b[0] * (c[1] * a[2] - c[2] * a[1])
+                + c[0] * (a[1] * b[2] - a[2] * b[1])) / 6;
+            for (const q of P) { maxZ = Math.max(maxZ, q[2]); minZ = Math.min(minZ, q[2]); }
+        }
+        check("STL volume survives the round-trip", Math.abs(Math.abs(vol) - 6000) < 1,
+            Math.abs(vol).toFixed(1));
+        check("scene height (Y) became printer height (Z), floor at 0",
+            near(minZ, 0, 1e-4) && near(maxZ, 20, 1e-4), `${minZ}..${maxZ}`);
+        welded.dispose(); box.dispose();
+
+        // zip round-trip through fflate's streaming Zip (the export path)
+        const zipChunks = [];
+        const zip = new fflate.Zip((err, chunk) => { if (!err && chunk) zipChunks.push(chunk); });
+        const fA = new fflate.ZipPassThrough("Part_A1.stl"); zip.add(fA); fA.push(stl, true);
+        const fB = new fflate.ZipPassThrough("manifest.txt"); zip.add(fB);
+        fB.push(new TextEncoder().encode("hello"), true);
+        zip.end();
+        const zipped = new Uint8Array(zipChunks.reduce((n, c) => n + c.length, 0));
+        let zo = 0; for (const c of zipChunks) { zipped.set(c, zo); zo += c.length; }
+        const unzipped = fflate.unzipSync(zipped);
+        check("zip round-trip preserves the STL byte-for-byte",
+            unzipped["Part_A1.stl"].length === stl.length
+            && unzipped["Part_A1.stl"].every((b, i) => b === stl[i]));
+        check("zip round-trip preserves the manifest",
+            new TextDecoder().decode(unzipped["manifest.txt"]) === "hello");
+
+        // manifest text names every part + the ID scheme
+        const manifest = B.buildManifest(
+            [{ id: "A1", file: "Part_A1.stl", tris: 12, engraved: true },
+             { id: "B2-L2", file: "Part_B2-L2.stl", tris: 40, engraved: false }],
+            { name: "benchy", scale: 6, size: { x: 360, y: 288, z: 186 },
+              bed: { w: 256, d: 256, h: 256 }, printer: "A1 / P1 / X1", margin: 5,
+              nudge: { x: 1, y: 2, z: 3 }, gap: 0.15,
+              format: "STL", engraveIds: true, candidateCount: 8,
+              version: "2.0.2b", exportDate: "2026-07-17T12:34:56.000Z",
+              hollow: { wallMm: 6, savedPct: 68.5, engineUsed: "mesh", fellBack: false },
+              connectors: "circle 8 mm, tolerance 0.2 mm" });
+        check("manifest lists parts and flags skipped engravings",
+            manifest.includes("Part_A1.stl") && manifest.includes("B2-L2")
+            && manifest.includes("no (face too small)") && manifest.includes("×6"));
+        check("manifest contains export provenance keys",
+            manifest.includes("Application: Curve Cut")
+            && manifest.includes("Version: 2.0.2b")
+            && manifest.includes("Export date: 2026-07-17T12:34:56.000Z")
+            && manifest.includes("Original model filename: benchy")
+            && manifest.includes("Settings:") && manifest.includes("Part count: 2"));
+        check("manifest carries the hollow receipt",
+            manifest.includes("Hollow:") && manifest.includes("Wall: 6 mm")
+            && manifest.includes("Material saved: 68.5%")
+            && manifest.includes("Engine: mesh") && manifest.includes("Fallback: no"));
+        const solidManifest = B.buildManifest([], {
+            name: "solid", scale: 1, size: { x: 60, y: 60, z: 60 },
+            bed: { w: 256, d: 256, h: 256 }, printer: "A1", margin: 5,
+            nudge: { x: 0, y: 0, z: 0 }, gap: 0.15, connectors: "off",
+        });
+        check("un-hollowed manifest has no hollow block", !solidManifest.includes("Hollow:"));
+
+        // ================================= step 7: exploded-view placement
+
+        const off = B.explodedPosition({ x: 100, y: 50, z: -100 }, { x: 0, y: 50, z: 0 }, 0.5);
+        check("exploded offset drifts from the model center",
+            near(off.x, 60) && near(off.y, 0) && near(off.z, -60), JSON.stringify(off));
+        const zero = B.explodedPosition({ x: 100, y: 50, z: -100 }, { x: 0, y: 50, z: 0 }, 0);
+        check("explode 0 = assembled", zero.x === 0 && zero.y === 0 && zero.z === 0);
+
+        document.title = fails.length ? `FAIL: ${fails.join("; ")}` : "PASS";
+    } catch (err) {
+        log("EXCEPTION " + (err.stack || err));
+        document.title = "FAIL: exception — " + err.message;
+    }
+})();
+</script>
+</body>
+</html>

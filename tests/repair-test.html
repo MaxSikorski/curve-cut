@@ -9,6 +9,7 @@
 <script src="../vendor/three/three.min.js"></script>
 <script src="../vendor/three/STLLoader.js"></script>
 <script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script>window.LEGACY_MANIFOLD_B64 = window.MANIFOLD_WASM_B64;</script>
 <script src="../vendor/manifold/manifold.js"></script>
 <script src="../js/cut-core.js"></script>
 <script>
@@ -135,8 +136,438 @@
         return geometryFromArrays(positions, triangles);
     }
 
+    function seamBox() {
+        const seam = new THREE.BoxGeometry(10, 10, 10).toNonIndexed();
+        const seamPosition = seam.getAttribute("position");
+        for (let i = 0; i < seamPosition.count; i += 3) {
+            if (seamPosition.getY(i) === -5 && seamPosition.getY(i + 1) === -5
+                && seamPosition.getY(i + 2) === -5) {
+                for (let j = 0; j < 3; j++) seamPosition.setY(i + j, -4.98);
+            }
+        }
+        return seam;
+    }
+
+    /* Old-vs-new equivalence: the repair speed-up must change nothing but time.
+       Everything below is compared against frozen copies of the 1ae654b code. */
+    async function equivalence() {
+        // Frozen copy of 1ae654b (js/cut-core.js); never edit.
+        let legacyWasm = null;
+        function legacyWeld(geometry, tol = 1e-4) {
+            const pos = geometry.getAttribute("position");
+            const index = geometry.getIndex();
+            const count = index ? index.count : pos.count;
+            const getIdx = index ? (i) => index.getX(i) : (i) => i;
+
+            const map = new Map();
+            const verts = [];
+            const tris = [];
+            const key = (x, y, z) =>
+                `${Math.round(x / tol)},${Math.round(y / tol)},${Math.round(z / tol)}`;
+
+            const lookup = (i) => {
+                const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+                const k = key(x, y, z);
+                let v = map.get(k);
+                if (v === undefined) {
+                    v = verts.length / 3;
+                    verts.push(x, y, z);
+                    map.set(k, v);
+                }
+                return v;
+            };
+
+            for (let i = 0; i < count; i += 3) {
+                const a = lookup(getIdx(i)), b = lookup(getIdx(i + 1)), c = lookup(getIdx(i + 2));
+                if (a !== b && b !== c && c !== a) tris.push(a, b, c);
+            }
+            return {
+                vertProperties: new Float32Array(verts),
+                triVerts: new Uint32Array(tris),
+            };
+        }
+
+        function legacyMeshArrays(geometry) {
+            if (geometry.vertProperties && geometry.triVerts) {
+                return { vertProperties: geometry.vertProperties, triVerts: geometry.triVerts };
+            }
+            const pos = geometry.getAttribute("position");
+            const index = geometry.getIndex();
+            if (!index) return legacyWeld(geometry);
+
+            const vertProperties = new Float32Array(pos.count * 3);
+            for (let i = 0; i < pos.count; i++) {
+                vertProperties[i * 3] = pos.getX(i);
+                vertProperties[i * 3 + 1] = pos.getY(i);
+                vertProperties[i * 3 + 2] = pos.getZ(i);
+            }
+            const triVerts = new Uint32Array(index.count);
+            for (let i = 0; i < index.count; i++) triVerts[i] = index.getX(i);
+            return { vertProperties, triVerts };
+        }
+
+        function legacyFindBoundaryLoops(geometry) {
+            const { triVerts } = legacyMeshArrays(geometry);
+            const edges = new Map();
+            const addEdge = (a, b) => {
+                const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+                let edge = edges.get(key);
+                if (!edge) {
+                    edge = { from: a, to: b, count: 0 };
+                    edges.set(key, edge);
+                }
+                edge.count++;
+            };
+
+            for (let i = 0; i + 2 < triVerts.length; i += 3) {
+                const a = triVerts[i], b = triVerts[i + 1], c = triVerts[i + 2];
+                addEdge(a, b); addEdge(b, c); addEdge(c, a);
+            }
+
+            const boundaryEdges = [];
+            for (const edge of edges.values()) {
+                if (edge.count === 1) boundaryEdges.push(edge);
+            }
+
+            const outgoing = new Map();
+            const ambiguous = new Set();
+            for (const edge of boundaryEdges) {
+                if (outgoing.has(edge.from)) {
+                    outgoing.delete(edge.from);
+                    ambiguous.add(edge.from);
+                } else if (!ambiguous.has(edge.from)) {
+                    outgoing.set(edge.from, edge);
+                }
+            }
+
+            const unused = new Set(boundaryEdges.map((edge, i) => {
+                edge.index = i;
+                return i;
+            }));
+            const loops = [];
+            let openChains = 0;
+
+            while (unused.size) {
+                const seedIndex = unused.values().next().value;
+                const seed = boundaryEdges[seedIndex];
+                const start = seed.from;
+                const path = [start];
+                const visited = new Set([start]);
+                let current = start;
+                let first = true;
+                let closed = false;
+
+                while (true) {
+                    const edge = first ? seed : outgoing.get(current);
+                    first = false;
+                    if (!edge || !unused.has(edge.index)) break;
+                    unused.delete(edge.index);
+                    current = edge.to;
+                    if (current === start) {
+                        closed = path.length >= 3;
+                        break;
+                    }
+                    if (visited.has(current)) break;
+                    visited.add(current);
+                    path.push(current);
+                }
+
+                if (closed) loops.push(path);
+                else openChains++;
+            }
+
+            return { loops, openChains, boundaryEdges: boundaryEdges.length };
+        }
+
+        function legacyAccepts(vertProperties, triVerts) {
+            try {
+                const mesh = new legacyWasm.Mesh({ numProp: 3, vertProperties, triVerts });
+                mesh.merge();
+                const solid = new legacyWasm.Manifold(mesh);
+                solid.delete();
+                return true;
+            } catch (err) {
+                return false;
+            }
+        }
+
+        function legacyRepair(geometry) {
+            let finest = null;
+            for (const tol of [0.01, 0.05, 0.1]) {
+                const { vertProperties, triVerts } = legacyWeld(geometry, tol);
+                if (!finest) finest = { vertProperties, triVerts };
+                if (legacyAccepts(vertProperties, triVerts)) {
+                    return { vertProperties, triVerts, tol, method: "weld", loops: 0 };
+                }
+            }
+
+            const boundary = legacyFindBoundaryLoops(finest);
+            if (!boundary.loops.length) return null;
+            const capped = CutCore.capBoundaryLoops(finest, boundary);
+            if (!capped || !legacyAccepts(capped.vertProperties, capped.triVerts)) {
+                return null;
+            }
+            return {
+                vertProperties: capped.vertProperties,
+                triVerts: capped.triVerts,
+                tol: 0.01,
+                method: "cap",
+                loops: capped.loops.length,
+            };
+        }
+        const rawWasm = atob(window.LEGACY_MANIFOLD_B64);
+        const wasmBytes = new Uint8Array(rawWasm.length);
+        for (let i = 0; i < rawWasm.length; i++) wasmBytes[i] = rawWasm.charCodeAt(i);
+        legacyWasm = await window.ManifoldModule({ wasmBinary: wasmBytes })
+            .then((m) => { m.setup(); return m; });
+
+        const bits = (typed) => new Uint32Array(typed.buffer, typed.byteOffset, typed.length);
+        const sameBits = (a, b) => {
+            if (a.length !== b.length) return false;
+            for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+            return true;
+        };
+        const sameWeld = (a, b) => sameBits(bits(a.vertProperties), bits(b.vertProperties))
+            && sameBits(a.triVerts, b.triVerts);
+        const sameLoops = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+        const sameRepair = (a, b) => (!a || !b) ? a === b
+            : a.method === b.method && a.tol === b.tol && a.loops === b.loops && sameWeld(a, b);
+        const describe = (result) => result ? `${result.method}/${result.loops}` : "null";
+
+        const TOLS = [1e-4, 0.01, 0.05, 0.1];
+        const compareWelds = (name, geometry, tols) => {
+            for (const tol of tols) {
+                check(`equivalence: ${name} weld ${tol}`,
+                    sameWeld(legacyWeld(geometry, tol), CutCore.weldGeometry(geometry, tol)));
+            }
+        };
+        const compareLoops = (name, mesh) => {
+            check(`equivalence: ${name} loops`,
+                sameLoops(legacyFindBoundaryLoops(mesh), CutCore.findBoundaryLoops(mesh)));
+        };
+        const compareRepair = (name, geometry) => {
+            const before = legacyRepair(geometry), after = CutCore.repairGeometry(geometry);
+            check(`equivalence: ${name} repair`, sameRepair(before, after),
+                `${describe(before)} vs ${describe(after)}`);
+            return before;
+        };
+        const compareAll = (name, geometry) => {
+            compareWelds(name, geometry, [...TOLS, 1]);
+            compareLoops(name, geometry);
+            compareLoops(`${name} 0.01 weld`, legacyWeld(geometry, 0.01));
+            return compareRepair(name, geometry);
+        };
+
+        // Unindexed triangle soup from [x, y, z] points (a trailing partial triangle is dropped).
+        const soup = (points) => {
+            const used = points.length - points.length % 3;
+            const flat = new Float32Array(used * 3);
+            for (let i = 0; i < used; i++) flat.set(points[i], i * 3);
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute("position", new THREE.BufferAttribute(flat, 3));
+            return geometry;
+        };
+        const ulpStep = (value, step) => {
+            const f = new Float32Array([value]);
+            new Uint32Array(f.buffer)[0] += step;
+            return f[0];
+        };
+
+        compareAll("box closed", boxGeometry(10, true));
+        compareAll("box open", boxGeometry(10, false));
+        compareAll("open cylinder", openCylinder(5, 12, 48));
+        compareAll("hollow box", hollowBox(20, 4, 20));
+        compareAll("open L prism", openLPrism(6));
+        compareAll("subdivided bottom box", subdividedBottomBox(10));
+        compareAll("junk triangle", geometryFromArrays([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]));
+        compareAll("seam box", seamBox());
+        const threeBox = new THREE.BoxGeometry(10, 10, 10);
+        compareAll("three box indexed", threeBox);
+        compareAll("three box soup", threeBox.toNonIndexed());
+        const threeSphere = new THREE.SphereGeometry(7, 40, 24);
+        compareAll("three sphere indexed", threeSphere);
+        compareAll("three sphere soup", threeSphere.toNonIndexed());
+
+        // Points on the half-way line between weld cells, and one float32 step either side.
+        const edge = [];
+        for (const tol of [...TOLS, 1]) {
+            for (let k = 0; k < 4; k++) {
+                for (const sign of [1, -1]) {
+                    const base = Math.fround(sign * (k + 0.5) * tol);
+                    edge.push(ulpStep(base, -1), base, ulpStep(base, 1));
+                }
+            }
+        }
+        const edgePoints = [];
+        for (let i = 0; i < edge.length; i++) {
+            const a = edge[i], b = edge[(i + 1) % edge.length], c = edge[(i + 2) % edge.length];
+            edgePoints.push([a, a, a], [a, b, a], [b, a, c]);
+        }
+        compareAll("cell-edge soup", soup(edgePoints));
+
+        // Negative zero must join zero.
+        const zeroSoup = soup([
+            [-0, 0, 0], [1, 0, 0], [0, 1, 0],
+            [0, -0, 0], [0, 1, 0], [1, 1, 0],
+            [0, 0, -0], [1, 0, 0], [1, 1, 0],
+            [-0.3e-4, 0, 0], [0, 2, 0], [2, 0, 0],
+            [0, -0.3e-4, 0], [0, 2, 0], [2, 2, 0],
+        ]);
+        compareAll("negative zero", zeroSoup);
+        const zeroWeld = CutCore.weldGeometry(zeroSoup, 1e-4);
+        let nearOrigin = 0;
+        for (let i = 0; i < zeroWeld.vertProperties.length; i += 3) {
+            if (Math.abs(zeroWeld.vertProperties[i]) < 0.5 && Math.abs(zeroWeld.vertProperties[i + 1]) < 0.5
+                && Math.abs(zeroWeld.vertProperties[i + 2]) < 0.5) nearOrigin++;
+        }
+        check("equivalence: negative zero welds into one vertex", nearOrigin === 1, String(nearOrigin));
+
+        // Cells whose low 32 bits match (same hash) but whose values differ, and cells past 2^53.
+        const huge = [0, 2 ** 32, 2 ** 31, -(2 ** 31), 1e9, 3e38, -3e38];
+        const hugePoints = [];
+        for (let i = 0; i < huge.length; i++) {
+            for (let j = 0; j < huge.length; j++) hugePoints.push([huge[i], huge[j], huge[(i + j) % huge.length]]);
+        }
+        compareAll("huge coordinates", soup(hugePoints));
+
+        const odd = [NaN, Infinity, -Infinity, 0, 1, -1];
+        const oddPoints = [];
+        for (const x of odd) for (const y of odd) for (const z of odd) oddPoints.push([x, y, z]);
+        oddPoints.push(...oddPoints.slice().reverse()); // every point twice, so NaN cells have to meet
+        compareAll("non-finite soup", soup(oddPoints));
+        compareAll("index past the end",
+            geometryFromArrays([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2, 0, 1, 5]));
+
+        // Indices the numeric edge key cannot hold fall back to the string key.
+        compareLoops("string-key edges", {
+            vertProperties: new Float32Array(9),
+            triVerts: [0, 1, 2, 2, 1, -1, 0, 2, 100000000],
+        });
+
+        compareLoops("small distant edges", {
+            vertProperties: new Float32Array(24),
+            triVerts: [0, 6, 7, 1, 2, 3],
+        });
+
+        // A 50 mm cube whose corner is split in two by 2h, on a weld-cell edge for every rung.
+        const crackedCorner = (h) => {
+            const source = boxGeometry(50, true);
+            const positions = Array.from(source.getAttribute("position").array);
+            for (let i = 0; i < 8; i++) { positions[i * 3] += 0.025; positions[i * 3 + 1] += 0.05; }
+            const [cx, cy, cz] = positions;
+            positions.push(cx - h, cy - h, cz);
+            positions[0] = cx + h; positions[1] = cy + h;
+            const triangles = Array.from(source.getIndex().array);
+            for (let i = 0; i < 6; i++) if (triangles[i] === 0) triangles[i] = 8;
+            return geometryFromArrays(positions, triangles);
+        };
+        for (const h of [1e-6, 1e-4, 3.2e-4]) {
+            const before = compareAll(`cracked corner h=${h}`, crackedCorner(h));
+            if (h === 1e-6) {
+                check("cracked corner h=1e-6 exercises merge", !!before && before.method === "weld",
+                    describe(before));
+            }
+            // A 2e-4 gap is 4e-6 x the 50 mm scale: if Manifold's merge ever closed it,
+            // the gate's reach (1e-5 x scale) would no longer be safe.
+            if (h === 1e-4) {
+                check("cracked corner h=1e-4 stays open in Manifold", !!before && before.method === "cap",
+                    describe(before));
+            }
+        }
+
+        // Two closed 10 mm cubes. Cube A has a corner split at x = 0.024 / 0.026 (split at 0.01 and
+        // 0.05, joined at 0.1); one corner of A (y = 0.049) faces one of B (y = 0.051) (joined at 0.01
+        // and 0.05, split at 0.1). Every rung has 16 vertices and 24 triangles, 0.05 repeats 0.01
+        // byte for byte, and only 0.1 is closed: the rung skip must compare bytes, not lengths.
+        const cubeTriangles = Array.from(boxGeometry(1, true).getIndex().array);
+        const twoCubePositions = [], twoCubeTriangles = [];
+        for (const [x0, y0, z0, offset] of [[0, -9.951, 0, 0], [10, 0.051, 10, 8]]) {
+            for (let c = 0; c < 8; c++) {
+                const sx = [0, 1, 1, 0, 0, 1, 1, 0][c], sy = [0, 0, 1, 1, 0, 0, 1, 1][c];
+                const sz = c < 4 ? 0 : 1;
+                twoCubePositions.push(x0 + sx * 10, y0 + sy * 10, z0 + sz * 10);
+            }
+            for (const index of cubeTriangles) twoCubeTriangles.push(index + offset);
+        }
+        twoCubePositions[0] = 0.024;
+        twoCubePositions.push(0.026, -9.951, 0);
+        for (let i = 0; i < 6; i++) if (twoCubeTriangles[i] === 0) twoCubeTriangles[i] = 16;
+        const twoCubes = geometryFromArrays(twoCubePositions, twoCubeTriangles);
+        const rungs = [0.01, 0.05, 0.1].map((tol) => legacyWeld(twoCubes, tol));
+        check("equivalence: two cubes have 16 vertices and 24 triangles on every rung",
+            rungs.every((rung) => rung.vertProperties.length === 48 && rung.triVerts.length === 72));
+        check("equivalence: two cubes 0.05 repeats 0.01, 0.1 differs",
+            sameWeld(rungs[0], rungs[1]) && !sameWeld(rungs[0], rungs[2]));
+        const twoCubeRepair = compareAll("two cubes", twoCubes);
+        check("equivalence: two cubes close only at 0.1",
+            !!twoCubeRepair && twoCubeRepair.method === "weld" && twoCubeRepair.tol === 0.1,
+            twoCubeRepair && `${describe(twoCubeRepair)}@${twoCubeRepair.tol}`);
+
+        // Same sphere with its vertices shuffled (fixed seed): edge keys far apart in index space.
+        const spherePosition = threeSphere.getAttribute("position");
+        const shuffle = Array.from({ length: spherePosition.count }, (_, i) => i);
+        let seed = 12345;
+        for (let i = shuffle.length - 1; i > 0; i--) {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            const j = seed % (i + 1);
+            [shuffle[i], shuffle[j]] = [shuffle[j], shuffle[i]];
+        }
+        const shuffledPositions = new Array(spherePosition.count * 3);
+        for (let i = 0; i < shuffle.length; i++) {
+            shuffledPositions[shuffle[i] * 3] = spherePosition.getX(i);
+            shuffledPositions[shuffle[i] * 3 + 1] = spherePosition.getY(i);
+            shuffledPositions[shuffle[i] * 3 + 2] = spherePosition.getZ(i);
+        }
+        compareAll("three sphere shuffled", geometryFromArrays(shuffledPositions,
+            Array.from(threeSphere.getIndex().array, (i) => shuffle[i])));
+
+        // Every boundary vertex shares x = 0, so the merge gate runs out of budget.
+        const gridPositions = [], gridTriangles = [];
+        for (let i = 0; i <= 40; i++) for (let j = 0; j <= 40; j++) gridPositions.push(0, i, j);
+        for (let i = 0; i < 40; i++) {
+            for (let j = 0; j < 40; j++) {
+                const a = i * 41 + j, b = a + 1, c = a + 41, d = c + 1;
+                gridTriangles.push(a, b, d, a, d, c);
+            }
+        }
+        compareAll("flat grid sheet", geometryFromArrays(gridPositions, gridTriangles));
+
+        for (const name of ["3DBenchy.stl", "Jesus-modified-hollow.stl",
+            "Jesus-solid-platform_fixed.stl", "V8-Block.stl"]) {
+            let buffer;
+            try {
+                const response = await fetch(`../test-assets/${name}`);
+                if (!response.ok) throw new Error(String(response.status));
+                buffer = await response.arrayBuffer();
+            } catch (error) {
+                log(`SKIP: ${name} not present — private-model equivalence skipped.`);
+                continue;
+            }
+            const model = new THREE.STLLoader().parse(buffer);
+            buffer = null;
+            compareWelds(name, model, TOLS);
+            // The 1e-4 weld is what the app and the worker hand to repair.
+            const welded = CutCore.weldGeometry(model, 1e-4);
+            model.dispose();
+            compareLoops(name, welded);
+            const input = geometryFromArrays(welded.vertProperties, welded.triVerts);
+            let t0 = performance.now();
+            const before = legacyRepair(input);
+            const legacyMs = performance.now() - t0;
+            t0 = performance.now();
+            const after = CutCore.repairGeometry(input);
+            const newMs = performance.now() - t0;
+            check(`equivalence: ${name} repair`, sameRepair(before, after),
+                `${describe(before)} vs ${describe(after)}`);
+            log(`${name} repair: legacy ${legacyMs.toFixed(0)} ms, new ${newMs.toFixed(0)} ms`);
+        }
+        legacyWasm = null;
+    }
+
     try {
         await CutCore.init();
+        await equivalence();
+
 
         const openCube = boxGeometry(10, false);
         const cubeBoundary = CutCore.findBoundaryLoops(openCube);
@@ -199,14 +630,7 @@
         const junk = geometryFromArrays([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]);
         check("unfixable junk returns null", CutCore.repairGeometry(junk) === null);
 
-        const seam = new THREE.BoxGeometry(10, 10, 10).toNonIndexed();
-        const seamPosition = seam.getAttribute("position");
-        for (let i = 0; i < seamPosition.count; i += 3) {
-            if (seamPosition.getY(i) === -5 && seamPosition.getY(i + 1) === -5
-                && seamPosition.getY(i + 2) === -5) {
-                for (let j = 0; j < 3; j++) seamPosition.setY(i + j, -4.98);
-            }
-        }
+        const seam = seamBox();
         const seamRepair = CutCore.repairGeometry(seam);
         check("seam repair takes the weld rung", !!seamRepair && seamRepair.method === "weld",
             seamRepair && `${seamRepair.method}/${seamRepair.tol}`);

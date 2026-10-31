@@ -2,7 +2,8 @@
 """check_repair.py — run tests/repair-test.html headlessly.
 
 Covers boundary-loop detection, convex and non-convex caps, cavity
-preservation, weld-vs-cap precedence, and the optional Jesus hollow fixture.
+preservation, weld-vs-cap precedence, old-vs-new weld/loop/repair equivalence,
+and the optional Jesus hollow fixture.
 
 Runs in real time through tools/browser.py (Playwright's headless Chromium).
 SKIPS loudly (exit 0) if that browser is not installed. The local Jesus
@@ -28,7 +29,7 @@ def main() -> int:
         print(result.log)
 
     if result.title == "PASS":
-        suffix = "; Jesus fixture skipped" if "SKIP:" in result.log else ""
+        suffix = "; private models skipped" if "SKIP:" in result.log else ""
         print(f"repair check ok — all headless repair tests passed{suffix}")
         return 0
     result.print_errors()

@@ -7,7 +7,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `pen-test.html` | `check_pen.py` | Pen math: smooth handles, corners, point insertion, rigid moves, hit distances |
 | `cut-test.html` | `check_cut_engine.py` | Cut engine: spline cuts give watertight pieces with conserved volume |
 | `formats-test.html` | `check_formats.py` | OBJ import, 3MF export round trip, basic repair ladder |
-| `repair-test.html` | `check_repair.py` | Boundary-loop repair of open meshes |
+| `repair-test.html` | `check_repair.py` | Boundary-loop repair of open meshes, plus old-vs-new weld/loop/repair equivalence |
 | `hollow-test.html` | `check_hollow.py` | Hybrid hollowing: wall thickness, watertight shells, honest savings |
 | `units-test.html` | `check_units.py` | Units and orientation math |
 | `bigprint-test.html` | `check_bigprint.py` | Big Print grid math and the streaming cell cutter |

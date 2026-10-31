@@ -43,21 +43,36 @@
         const count = index ? index.count : pos.count;
         const getIdx = index ? (i) => index.getX(i) : (i) => i;
 
-        const map = new Map();
+        // Same cells as the old `${round(x/tol)},…` string key: Map's SameValueZero
+        // and the exact compare below both join -0 with 0 and NaN with NaN, as
+        // String() did. The hash only picks a bucket.
+        const heads = new Map();   // cell hash -> newest vertex in that bucket
+        const next = [];           // vertex -> next vertex in the same bucket, -1 = end
+        const cells = [];          // vertex -> its rounded x, y, z
+        const seen = new Int32Array(pos.count).fill(-1); // source index -> welded vertex
         const verts = [];
         const tris = [];
-        const key = (x, y, z) =>
-            `${Math.round(x / tol)},${Math.round(y / tol)},${Math.round(z / tol)}`;
+        const same = (a, b) => a === b || (a !== a && b !== b);
 
         const lookup = (i) => {
+            const known = seen[i];
+            if (known >= 0) return known;
             const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-            const k = key(x, y, z);
-            let v = map.get(k);
-            if (v === undefined) {
+            const cx = Math.round(x / tol), cy = Math.round(y / tol), cz = Math.round(z / tol);
+            const h = (Math.imul(cx | 0, 73856093) ^ Math.imul(cy | 0, 19349663)
+                ^ Math.imul(cz | 0, 83492791)) & 0x3fffffff;
+            const head = heads.get(h);
+            let v = head === undefined ? -1 : head;
+            while (v >= 0 && !(same(cells[v * 3], cx) && same(cells[v * 3 + 1], cy)
+                && same(cells[v * 3 + 2], cz))) v = next[v];
+            if (v < 0) {
                 v = verts.length / 3;
                 verts.push(x, y, z);
-                map.set(k, v);
+                cells.push(cx, cy, cz);
+                next.push(head === undefined ? -1 : head);
+                heads.set(h, v);
             }
+            seen[i] = v;
             return v;
         };
 
@@ -90,15 +105,26 @@
         return { vertProperties, triVerts };
     }
 
-    function findBoundaryLoops(geometry) {
-        const { triVerts } = meshArrays(geometry);
+    /* Edges used by exactly one triangle, in first-seen order. lo * K + hi is
+       exact and one-to-one while K² < 2^53 (K <= 94906265); non-integer or
+       negative indices, or a bigger K, fall back to the old string key. */
+    function boundaryEdgesOf(triVerts) {
+        let top = -1, packable = true;
+        for (let i = 0; i < triVerts.length; i++) {
+            const v = triVerts[i];
+            if (!(Number.isInteger(v) && v >= 0)) { packable = false; break; }
+            if (v > top) top = v;
+        }
+        const K = top + 1;
+        const key = packable && K <= 94906265
+            ? (lo, hi) => lo * K + hi : (lo, hi) => `${lo}_${hi}`;
         const edges = new Map();
         const addEdge = (a, b) => {
-            const key = a < b ? `${a}_${b}` : `${b}_${a}`;
-            let edge = edges.get(key);
+            const k = a < b ? key(a, b) : key(b, a);
+            let edge = edges.get(k);
             if (!edge) {
                 edge = { from: a, to: b, count: 0 };
-                edges.set(key, edge);
+                edges.set(k, edge);
             }
             edge.count++;
         };
@@ -112,7 +138,10 @@
         for (const edge of edges.values()) {
             if (edge.count === 1) boundaryEdges.push(edge);
         }
+        return boundaryEdges;
+    }
 
+    function traceBoundaryLoops(boundaryEdges) {
         const outgoing = new Map();
         const ambiguous = new Set();
         for (const edge of boundaryEdges) {
@@ -161,6 +190,10 @@
         }
 
         return { loops, openChains, boundaryEdges: boundaryEdges.length };
+    }
+
+    function findBoundaryLoops(geometry) {
+        return traceBoundaryLoops(boundaryEdgesOf(meshArrays(geometry).triVerts));
     }
 
     function loopProjection(loop, vertProperties) {
@@ -339,6 +372,47 @@
         };
     }
 
+    /* Byte-identical meshes get the same Manifold verdict. */
+    function sameMesh(a, b) {
+        const av = new Uint32Array(a.vertProperties.buffer, a.vertProperties.byteOffset, a.vertProperties.length);
+        const bv = new Uint32Array(b.vertProperties.buffer, b.vertProperties.byteOffset, b.vertProperties.length);
+        if (av.length !== bv.length || a.triVerts.length !== b.triVerts.length) return false;
+        for (let i = 0; i < av.length; i++) if (av[i] !== bv[i]) return false;
+        for (let i = 0; i < a.triVerts.length; i++) if (a.triVerts[i] !== b.triVerts[i]) return false;
+        return true;
+    }
+
+    /* manifoldAccepts runs mesh.merge(), which joins open-edge vertices within
+       FLT_EPSILON x the largest |coordinate| per axis (manifold-3d 3.5.1). If
+       no vertex sits within 1e-5 x that of a boundary vertex, the open edges
+       survive merge and Manifold must reject the mesh. True = can't rule it out. */
+    function openEdgesMayMerge(boundaryEdges, vertProperties) {
+        let scale = 0;
+        for (let i = 0; i < vertProperties.length; i++) scale = Math.max(scale, Math.abs(vertProperties[i]));
+        if (!Number.isFinite(scale)) return true;
+        const reach = scale * 1e-5;
+        const ends = [...new Set(boundaryEdges.flatMap((edge) => [edge.from, edge.to]))]
+            .sort((a, b) => vertProperties[a * 3] - vertProperties[b * 3]);
+        const xs = ends.map((v) => vertProperties[v * 3]);
+        const n = vertProperties.length / 3;
+        let budget = 8 * n + ends.length; // pathological slabs: give up, let Manifold decide
+        for (let v = 0; v < n; v++) {
+            const x = vertProperties[v * 3], y = vertProperties[v * 3 + 1], z = vertProperties[v * 3 + 2];
+            let lo = 0, hi = xs.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (xs[mid] < x - reach) lo = mid + 1; else hi = mid;
+            }
+            for (let j = lo; j < xs.length && xs[j] <= x + reach; j++) {
+                if (--budget < 0) return true;
+                const b = ends[j];
+                if (b !== v && Math.abs(vertProperties[b * 3 + 1] - y) <= reach
+                    && Math.abs(vertProperties[b * 3 + 2] - z) <= reach) return true;
+            }
+        }
+        return false;
+    }
+
     function manifoldAccepts(vertProperties, triVerts) {
         try {
             const mesh = new wasm.Mesh({ numProp: 3, vertProperties, triVerts });
@@ -373,16 +447,21 @@
 
     /* Repair ladder: weld small seams, then cap genuine boundary loops. */
     function repairGeometry(geometry) {
-        let finest = null;
+        let finest = null, finestEdges = null, previous = null;
         for (const tol of [0.01, 0.05, 0.1]) {
-            const { vertProperties, triVerts } = weldGeometry(geometry, tol);
-            if (!finest) finest = { vertProperties, triVerts };
+            const welded = weldGeometry(geometry, tol);
+            if (previous && sameMesh(previous, welded)) continue; // same mesh, already rejected
+            previous = welded;
+            const { vertProperties, triVerts } = welded;
+            const edges = boundaryEdgesOf(triVerts);
+            if (!finest) { finest = { vertProperties, triVerts }; finestEdges = edges; }
+            if (edges.length && !openEdgesMayMerge(edges, vertProperties)) continue;
             if (manifoldAccepts(vertProperties, triVerts)) {
                 return { vertProperties, triVerts, tol, method: "weld", loops: 0 };
             }
         }
 
-        const boundary = findBoundaryLoops(finest);
+        const boundary = traceBoundaryLoops(finestEdges);
         if (!boundary.loops.length) return null;
         const capped = capBoundaryLoops(finest, boundary);
         if (!capped || !manifoldAccepts(capped.vertProperties, capped.triVerts)) {

@@ -355,35 +355,49 @@
             CC.loadGeometry(heavy, "race-supersede-warm.stl");
             await sleep(500);
             await waitFor(() => !CC.ops.busy(), "load repair to end");
-            CC.bigPrint.enter();
-            assert(CC.bigPrint.isActive(), "Big Print mode did not open for warm supersede test");
+            // Headless Chromium has no idle periods, so the warm's idle callback
+            // only fires at its 1 s timeout, after the 180 ms hollow teaser has
+            // taken the op and primed the shared cache for it. Run idle callbacks
+            // promptly, as an idle visible tab does, so the warm owns its op.
+            const realIdle = window.requestIdleCallback;
+            const realCancelIdle = window.cancelIdleCallback;
+            window.requestIdleCallback = (callback) => setTimeout(() =>
+                callback({ didTimeout: false, timeRemaining: () => 50 }), 0);
+            window.cancelIdleCallback = (handle) => clearTimeout(handle);
+            try {
+                CC.bigPrint.enter();
+                assert(CC.bigPrint.isActive(), "Big Print mode did not open for warm supersede test");
 
-            const scaleInput = document.getElementById("bp-scale");
-            scaleInput.value = 1.1;
-            scaleInput.dispatchEvent(new Event("input", { bubbles: true }));
-            setSmallBigPrintGrid();
-            await waitFor(() => CC.ops.busyName() === "bigprint-warm", "Big Print warm token");
+                const scaleInput = document.getElementById("bp-scale");
+                scaleInput.value = 1.1;
+                scaleInput.dispatchEvent(new Event("input", { bubbles: true }));
+                setSmallBigPrintGrid();
+                await waitFor(() => CC.ops.busyName() === "bigprint-warm", "Big Print warm token", 5000);
 
-            const warmEnded = once("curvecut:op-ended",
-                (event) => event.detail.name === "bigprint-warm");
-            assert(CC.bigPrint._testWarmPending(),
-                "superseded warm did not have a pending consumer before the event");
-            const cancelSerial = CC.bigPrint._testWarmCancelSerial();
-            window.dispatchEvent(new CustomEvent("curvecut:pieces-changed"));
-            assert(CC.bigPrint._testWarmCancelSerial() === cancelSerial + 1,
-                "pieces-changed did not settle the warm synchronously");
-            await warmEnded;
-            await waitFor(() => !CC.ops.busy(), "superseded warm cleanup");
+                const warmEnded = once("curvecut:op-ended",
+                    (event) => event.detail.name === "bigprint-warm");
+                assert(CC.bigPrint._testWarmPending(),
+                    "superseded warm did not have a pending consumer before the event");
+                const cancelSerial = CC.bigPrint._testWarmCancelSerial();
+                window.dispatchEvent(new CustomEvent("curvecut:pieces-changed"));
+                assert(CC.bigPrint._testWarmCancelSerial() === cancelSerial + 1,
+                    "pieces-changed did not settle the warm synchronously");
+                await warmEnded;
+                await waitFor(() => !CC.ops.busy(), "superseded warm cleanup");
 
-            const toastBefore = document.getElementById("toast-live").textContent;
-            CC.bigPrint._lastExport = null;
-            exportBtn.click();
-            await waitFor(() => CC.ops.busyName() === "bigprint", "superseded-warm export token");
-            await once("curvecut:op-ended", (event) => event.detail.name === "bigprint");
-            const toastAfter = document.getElementById("toast-live").textContent;
-            assert(CC.bigPrint._lastExport || toastAfter !== toastBefore,
-                "superseded-warm export ended without a completion or failure toast");
-            assert(!CC.ops.busy(), "superseded-warm export token remained live");
+                const toastBefore = document.getElementById("toast-live").textContent;
+                CC.bigPrint._lastExport = null;
+                exportBtn.click();
+                await waitFor(() => CC.ops.busyName() === "bigprint", "superseded-warm export token");
+                await once("curvecut:op-ended", (event) => event.detail.name === "bigprint");
+                const toastAfter = document.getElementById("toast-live").textContent;
+                assert(CC.bigPrint._lastExport || toastAfter !== toastBefore,
+                    "superseded-warm export ended without a completion or failure toast");
+                assert(!CC.ops.busy(), "superseded-warm export token remained live");
+            } finally {
+                window.requestIdleCallback = realIdle;
+                window.cancelIdleCallback = realCancelIdle;
+            }
         }],
 
         ["warm-null-and-export-aborts", async () => {

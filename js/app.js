@@ -208,9 +208,19 @@
         return geometry;
     }
 
-    function loadModelFile(file) {
+    // The whole load is one "load" operation: the pill paints before the heavy
+    // parse + weld + scene build, and nothing else can start underneath it.
+    async function loadModelFile(file) {
         const ext = (file.name.match(/\.(stl|obj|3mf)$/i) || [, "stl"])[1].toLowerCase();
-        file.arrayBuffer().then((buffer) => {
+        const ops = window.CurveCut.ops;
+        const op = ops.begin("load");
+        if (!op) {
+            toast("An operation is still running — load the new model when it finishes.");
+            return;
+        }
+        try {
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+            const buffer = await file.arrayBuffer();
             let geometry;
             try {
                 if (ext === "obj") {
@@ -234,24 +244,38 @@
                 toast(`No printable mesh found in that ${ext.toUpperCase()}.`);
                 return;
             }
-            loadGeometry(geometry, file.name, { upAxis: ext === "obj" ? "y" : "z" });
-        }).catch((err) => {
+            loadGeometry(geometry, file.name, { upAxis: ext === "obj" ? "y" : "z", op });
+        } catch (err) {
             // arrayBuffer() itself can reject (file moved/locked mid-read)
             console.error("file read failed:", err);
             toast("That file could not be read — try opening it again.");
-        });
+        } finally {
+            ops.end(op);
+        }
     }
 
     /* Shared entry for STL loads and test harnesses: takes a Y-up geometry,
        centers it on the floor, and makes it the scene's single piece. */
     function loadGeometry(geometry, name, options = {}) {
+        // options.op: the "load" token loadModelFile already holds (and ends).
+        // Direct callers get their own, so every load is announced.
+        const ops = window.CurveCut.ops;
         // a cut/simplify/export in flight owns the piece set — replacing the
         // model under it would commit results onto a corpse
-        if (window.CurveCut.ops && window.CurveCut.ops.busy()) {
+        const op = options.op || ops.begin("load");
+        if (!op) {
             geometry.dispose();
             toast("An operation is still running — load the new model when it finishes.");
             return;
         }
+        try {
+            installGeometry(geometry, name, options);
+        } finally {
+            if (!options.op) ops.end(op);
+        }
+    }
+
+    function installGeometry(geometry, name, options) {
         // reject junk BEFORE nuking the current scene: NaN/Inf coordinates
         // poison every boolean downstream, and an empty bbox means no mesh
         geometry.computeBoundingBox();
@@ -686,6 +710,7 @@
 
     // Deliberately padded so real work tends to finish before the estimate.
     const PADDED_ETA_SECONDS = Object.freeze({
+        load: 15,
         repair: 30,
         "repair-prime": 45,
         "hollow-prep": 45,
@@ -840,12 +865,14 @@
         showStats,
         repair: { message: repairMessage, swapIn: swapRepair },
         loadGeometry,
+        loadModelFile,
         scheduleWatertightCheck,
         recenterAndRefresh,
         progress,
     };
 
     const PILL_OPERATION_LABELS = Object.freeze({
+        load: "Loading model…",
         repair: "Working on the mesh…",
         "repair-prime": "Preparing hollow…",
         hollow: "Hollowing the model…",

@@ -84,6 +84,16 @@
     }
 
     function showPreview() {
+        // announce the synchronous render; if another op owns the slot, render anyway
+        const op = CC.ops.begin("cut-preview");
+        try {
+            renderPreview();
+        } finally {
+            if (op) CC.ops.end(op);
+        }
+    }
+
+    function renderPreview() {
         removePreviewMeshes();
         const reach = cutReach();
         const line = CutCore.sampleSpline(CC.spline, reach);

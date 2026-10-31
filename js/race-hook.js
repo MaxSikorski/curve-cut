@@ -486,6 +486,52 @@
                 "revision-abort did not show the stopped toast");
             assert(!CC.ops.busy(), "revision-abort export token remained live");
         }],
+
+        ["model-load-op", async () => {
+            await resetState();
+            // a binary STL the real exporter wrote, so the file path parses it for real
+            const cube = new THREE.Mesh(new THREE.BoxGeometry(20, 20, 20));
+            const stlBytes = new THREE.STLExporter().parse(cube, { binary: true });
+
+            const loaded = once("curvecut:pieces-changed", (event) => event.detail.source === "load");
+            const loadEnded = once("curvecut:op-ended", (event) => event.detail.name === "load");
+            const loading = CC.loadModelFile(new File([stlBytes], "race-load-cube.stl"));
+            assert(CC.ops.busyName() === "load",
+                `loadModelFile ran under op "${CC.ops.busyName()}", not "load"`);
+            await Promise.all([loaded, loadEnded, loading]);
+            assert(CC.pieces.length === 1, `load left ${CC.pieces.length} pieces instead of 1`);
+            assert(!CC.ops.busy(), "load token remained live after the model loaded");
+
+            // refused while another op runs, and refused BEFORE parsing
+            const realParse = THREE.STLLoader.prototype.parse;
+            let parses = 0;
+            THREE.STLLoader.prototype.parse = function () {
+                parses++;
+                return realParse.apply(this, arguments);
+            };
+            const toastLive = document.getElementById("toast-live");
+            toastLive.textContent = "";
+            const held = CC.ops.begin("race-hold");
+            try {
+                assert(held, "could not hold an op for the refusal test");
+                await CC.loadModelFile(new File([stlBytes], "must-not-parse.stl"));
+                assert(parses === 0, `loadModelFile parsed ${parses} time(s) while an op was running`);
+                assert(CC.ops.busyName() === "race-hold",
+                    "refused load disturbed the op that was already running");
+                assert(toastLive.textContent.includes("operation is still running"),
+                    "load refusal toast was not shown");
+            } finally {
+                THREE.STLLoader.prototype.parse = realParse;
+                if (held) CC.ops.end(held);
+            }
+
+            // a file that cannot be parsed must still free the op
+            toastLive.textContent = "";
+            await CC.loadModelFile(new File([new Uint8Array(10)], "junk.stl"));
+            assert(!CC.ops.busy(), `junk file left op "${CC.ops.busyName()}" running — the load token leaked`);
+            assert(toastLive.textContent.includes("could not be read"),
+                "junk file did not show the could-not-be-read toast");
+        }],
     ];
 
     (async () => {

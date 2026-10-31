@@ -247,7 +247,7 @@ window.BigPrintCore = (() => {
     }
 
     /* Human-readable manifest for the export zip. rows = [{ id, file, tris,
-       engraved }]; settings includes provenance plus the complete export UI
+       engraved, pegs?, sockets?, thinSeams?, onPad?, noPadRoom? }]; settings includes provenance plus the complete export UI
        state (scale, size, bed, printer, margin, nudge, gap, format, IDs and
        connectors). */
     function buildManifest(rows, s) {

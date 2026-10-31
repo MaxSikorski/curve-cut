@@ -8,7 +8,7 @@ Classic scripts (no modules, no build step) loaded in order by `index.html`; eve
 | `ops.js` | Operation coordinator: one structural async job at a time (`CC.ops.begin/end/busy`) |
 | `history.js` | Undo/redo snapshots of the piece set |
 | `pen-core.js` / `pen.js` | Pen tool math (smooth handles, point insertion) / the pen tool UI |
-| `cut-core.js` / `cut.js` | Cut engine (spline ribbon, Manifold booleans, connectors) / cut preview and apply |
+| `cut-core.js` / `cut.js` | Cut engine (spline ribbon, Manifold booleans, connectors, hollow-seam blocks and label pads) / cut preview and apply |
 | `cutmodes.js` | Cut mode picker: Curve, Planar, Dovetail |
 | `hollow-core.js` | Hybrid hollowing engine (mesh-native and grid marching cubes) |
 | `bigprint-core.js` / `bigprint.js` | Big Print math (presets, grid, part IDs) / Big Print mode UI, hollow and streaming export |

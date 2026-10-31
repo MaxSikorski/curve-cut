@@ -610,6 +610,30 @@
         }
     }
 
+    /* Hollow models: the solid outer shape the connector blocks and label pads
+       are placed from. It is built, cut into one thin slab per seam plane, and
+       dropped again right away. Returns null (and warns) when it can't be built,
+       so the export carries on without blocks. */
+    function buildOuterContext(state, g, min, conn, gap) {
+        let base = null;
+        let outer = null;
+        try {
+            base = CutCore.toManifold(state.preHollowGeometry);
+            outer = base;
+            if (Math.abs(state.scale - 1) > 1e-9) {
+                outer = base.transform(new THREE.Matrix4()
+                    .makeScale(state.scale, state.scale, state.scale).elements);
+            }
+            return CutCore.createOuterContext(outer, Core.seamPlanes(g, min), { conn, gap });
+        } catch (err) {
+            console.warn("connector blocks skipped:", err);
+            return null;
+        } finally {
+            if (outer && outer !== base) outer.delete();
+            if (base) base.delete();
+        }
+    }
+
     function retryPrintManifoldWarm(warm) {
         if (warm.retryTimer !== null) return;
         warm.retryTimer = setTimeout(() => {
@@ -1087,9 +1111,22 @@
         };
     }
 
+    function updateConnNote() {
+        const note = document.getElementById("bp-conn-note");
+        if (!note) return;
+        note.textContent = active && model && hollowStates.has(model)
+            && (connBox.checked || engraveBox.checked)
+            ? "Hollow model: each connector and ID label gets a small solid block inside the shell "
+                + "so it has plastic to grip (a little extra material). The finish message says "
+                + "how many seams and parts got one."
+            : "";
+        note.hidden = !note.textContent;
+    }
+
     function refresh() {
         if (!active || explodeGroup) return; // frozen while exploded
         resetExportConfirmation();
+        updateConnNote();
         model.scale.setScalar(hollowStates.has(model) ? 1 : scale);
         const p = params();
         grid = Core.computeGrid(p);
@@ -1489,6 +1526,8 @@
     const connTol = document.getElementById("bp-conn-tol");
     const engraveBox = document.getElementById("bp-engrave");
     const cancelBtn = document.getElementById("bp-cancel");
+    connBox.addEventListener("change", updateConnNote);
+    engraveBox.addEventListener("change", updateConnNote);
 
     let running = false;
     let cancelled = false;
@@ -1782,9 +1821,12 @@
 
         let solid = null;
         let lease = null;
+        let outerCtx = null;
+        let blocksFailed = false;
         const rows = [];
         const occupied = new Set();
         let skippedEngravings = 0;
+        let seams = 0, seamsWithPegs = 0, labelled = 0;
         try {
             disposeProxies(); // fresh proxy set per export
             CC.progress.show("Preparing the model…");
@@ -1815,6 +1857,24 @@
                 tolD: Math.max(parseFloat(connTol.value) || 0, 0),
             } : null;
 
+            if (model.userData.bigPrintHollow && (conn || engraveBox.checked)) {
+                const hollowState = hollowStates.get(model);
+                if (hollowState) {
+                    CC.progress.show("Preparing connector blocks…");
+                    await new Promise((r) => setTimeout(r, 30)); // let the pill paint
+                    outerCtx = buildOuterContext(hollowState, g, min, conn, gap);
+                    if (!outerCtx) blocksFailed = true;
+                    if (cancelled || !op.alive()) {
+                        cancelled = true;
+                        writer.abort();
+                        CC.toast("Stopped — nothing more was exported.");
+                        return;
+                    }
+                } else {
+                    blocksFailed = true; // no pre-hollow shape to build from (e.g. after undo)
+                }
+            }
+
             let i = 0;
             for (const candidate of Core.gridCells(g, p.size, min)) {
                 if (cancelled || op.cancelled) { cancelled = true; break; }
@@ -1825,19 +1885,29 @@
                     i / totalCells);
                 i++;
                 await new Promise((r) => setTimeout(r)); // keep the UI alive
-                const geo = CutCore.cutGridCell(solid, cell, gap, conn);
+                const geo = CutCore.cutGridCell(solid, cell, gap, conn, outerCtx);
                 if (!geo) continue; // the model never enters this cell
                 const bytes = fmt === "3mf" ? Core.serialize3MF(geo) : Core.serializeSTL(geo);
                 const file = `Part_${cell.id}.${fmt}`;
                 writer.add(file, bytes);
+                const info = geo.userData || {};
+                const report = info.connectors;
                 rows.push({
                     id: cell.id, file,
                     tris: geo.getIndex().count / 3,
-                    engraved: !!(geo.userData && geo.userData.engraved),
+                    engraved: !!info.engraved,
+                    onPad: !!info.onPad,
+                    noPadRoom: !!info.noPadRoom,
+                    pegs: report ? report.pegs.length : undefined,
+                    sockets: report ? report.sockets.length : undefined,
+                    thinSeams: report ? report.thinSeams : undefined,
                 });
-                if (engraveBox.checked && !(geo.userData && geo.userData.engraved)) {
-                    skippedEngravings++;
+                if (report) {
+                    seams += report.seams;
+                    seamsWithPegs += report.seams - report.thinSeams;
                 }
+                if (info.engraved) labelled++;
+                else if (engraveBox.checked) skippedEngravings++;
                 occupied.add(cell.id);
                 // budgeted stand-in; i was bumped before the cut, so this cell
                 // and everything after it is totalCells - (i - 1)
@@ -1870,6 +1940,10 @@
                     ? `${conn.shape} ${conn.size} mm, tolerance ${conn.tolR} mm`
                     : "off",
             };
+            if (conn) {
+                settings.seams = seams;
+                settings.seamsWithPegs = seamsWithPegs;
+            }
             if (model.userData.bigPrintHollow) {
                 const hollow = model.userData.bigPrintHollow;
                 settings.hollow = {
@@ -1891,14 +1965,24 @@
             const files = await writer.end();
 
             CC.bigPrint._lastExport = { parts: rows.length, files, skippedEngravings, rows,
+                seams, seamsWithPegs, labelled,
                 proxies: proxies.length, proxyTruncated, proxySimplified, proxyFirstTarget };
             exportCompleted = true;
             if (proxies.length) explodeBtn.style.display = "";
             const story = Core.partStory(rows.length, !!settings.hollow);
             CC.toast(`Big Print done — ${story.exportLabel} in `
-                + `${files.length} zip${files.length === 1 ? "" : "s"}`
-                + (skippedEngravings ? ` (${skippedEngravings} too small to engrave)` : "")
-                + ".");
+                + `${files.length} zip${files.length === 1 ? "" : "s"}.`
+                + (conn ? ` Connectors on ${seamsWithPegs} of ${seams} seams`
+                    + (seams > seamsWithPegs
+                        ? ` (${seams - seamsWithPegs} too thin — see manifest.txt)` : "") + "."
+                    : "")
+                + (engraveBox.checked ? ` IDs on ${labelled} of ${rows.length} parts`
+                    + (skippedEngravings
+                        ? ` (${skippedEngravings} had no room — see manifest.txt)` : "") + "."
+                    : "")
+                + (blocksFailed
+                    ? " Connector blocks couldn't be prepared, so hollow seams may have no connectors."
+                    : ""));
         } catch (err) {
             console.error("Big Print export failed:", err);
             CC.toast(err.message === "not-watertight"
@@ -1906,6 +1990,7 @@
                 : "The export failed — see the console for details.");
             writer.abort();
         } finally {
+            if (outerCtx) CutCore.disposeOuterContext(outerCtx);
             if (lease) releasePrintManifold(lease);
             solid = null;
             CC.progress.hide();

@@ -10,7 +10,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `repair-test.html` | `check_repair.py` | Boundary-loop repair of open meshes, plus old-vs-new weld/loop/repair equivalence |
 | `hollow-test.html` | `check_hollow.py` | Hybrid hollowing: wall thickness, watertight shells, honest savings |
 | `units-test.html` | `check_units.py` | Units and orientation math |
-| `bigprint-test.html` | `check_bigprint.py` | Big Print grid math, the streaming cell cutter, and the exploded-view proxy target + note wording |
+| `bigprint-test.html` | `check_bigprint.py` | Big Print grid math, the streaming cell cutter, solid blocks and label pads on hollow seams (plus the solid-output golden digest), manifest wording, and the exploded-view proxy target + note wording |
 | `compute-test.html` | `check_compute.py` | The compute worker: fused repair, cache tokens, worker cuts match main-thread cuts, cancel, fallback |
 | `memory-test.html` | `check_memory.py` | Worker memory stats and the deferred recycle |
 | `property-test.html` | `check_property.py` | Random-seed invariants for cuts and hollows (volume, watertightness, kerf) |

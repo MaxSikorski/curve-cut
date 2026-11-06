@@ -9,6 +9,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `formats-test.html` | `check_formats.py` | OBJ import, 3MF export round trip, basic repair ladder |
 | `repair-test.html` | `check_repair.py` | Boundary-loop repair of open meshes, plus old-vs-new weld/loop/repair equivalence |
 | `hollow-test.html` | `check_hollow.py` | Hybrid hollowing: wall thickness, watertight shells, honest savings, open faces and drilled holes (T1-T17, including the unchanged-output digest guard), and glow swatch geometry |
+| `hollow-panel-test.html` | `check_hollow_panel.py` | The Hollow panel in the real app (P0-P14): Lamp preset, worker preview, Out of date, Confirm and undo, gates, grid-too-large message, Escape cancel, saved settings |
 | `units-test.html` | `check_units.py` | Units and orientation math |
 | `bigprint-test.html` | `check_bigprint.py` | Big Print grid math, wall lists (auto/hand, reset rules) and the nudge clamp, the streaming cell cutter, solid blocks and label pads on hollow seams (plus the solid-output golden digest), manifest wording, and the exploded-view proxy target + note wording |
 | `compute-test.html` | `check_compute.py` | The compute worker: fused repair, cache tokens, worker cuts match main-thread cuts, cancel, fallback, and hollowApply carrying open faces and holes on worker and fallback (C1-C3) |

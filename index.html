@@ -181,8 +181,7 @@
             <span class="bp-x">×</span>
             <input type="number" id="bp-bed-d" step="1" min="10" title="Bed depth">
             <span class="bp-x">×</span>
-            <input type="number" id="bp-bed-h" step="1" min="10" title="Bed height">
-            <span class="sc-unit">mm</span>
+            <span class="bp-pair"><input type="number" id="bp-bed-h" step="1" min="10" title="Bed height"><span class="sc-unit">mm</span></span>
         </div>
         <div class="sc-row">
             <label for="bp-scale">Scale</label>
@@ -197,12 +196,11 @@
         </div>
         <div class="sc-row">
             <label title="Slide the cut grid to dodge fragile features">Nudge</label>
-            <span class="bp-sub">W</span><input type="number" id="bp-nudge-x" step="1" value="0" title="Slide cuts along the width">
-            <span class="bp-sub">D</span><input type="number" id="bp-nudge-z" step="1" value="0" title="Slide cuts along the depth">
-            <span class="bp-sub">H</span><input type="number" id="bp-nudge-y" step="1" value="0" title="Slide cuts up/down">
-            <span class="sc-unit">mm</span>
-            <label class="bp-sub" for="bp-gap" title="Gap left between printed parts so they fit together">Gap</label>
-            <input type="number" id="bp-gap" step="0.05" min="0" max="0.5" value="0.15"><span class="sc-unit">mm</span>
+            <span class="bp-pair"><span class="bp-sub">W</span><input type="number" id="bp-nudge-x" step="1" value="0" title="Slide cuts along the width"></span>
+            <span class="bp-pair"><span class="bp-sub">D</span><input type="number" id="bp-nudge-z" step="1" value="0" title="Slide cuts along the depth"></span>
+            <span class="bp-pair"><span class="bp-sub">H</span><input type="number" id="bp-nudge-y" step="1" value="0" title="Slide cuts up/down"><span class="sc-unit">mm</span></span>
+            <span class="bp-pair"><label class="bp-sub" for="bp-gap" title="Gap left between printed parts so they fit together">Gap</label>
+            <input type="number" id="bp-gap" step="0.05" min="0" max="0.5" value="0.15"><span class="sc-unit">mm</span></span>
         </div>
         <div class="sc-row">
             <label class="sc-check" style="width:auto"><input type="checkbox" id="bp-connectors" checked> Connectors</label>
@@ -210,10 +208,10 @@
                 <option value="circle">Circle</option>
                 <option value="hexagon">Hexagon</option>
             </select>
-            <label class="bp-sub" for="bp-conn-size">Size</label>
-            <input type="number" id="bp-conn-size" step="0.5" min="2"><span class="sc-unit">mm</span>
-            <label class="bp-sub" for="bp-conn-tol" title="Sockets are printed this much larger than pegs">Tol</label>
-            <input type="number" id="bp-conn-tol" step="0.05" min="0" max="1" value="0.2"><span class="sc-unit">mm</span>
+            <span class="bp-pair"><label class="bp-sub" for="bp-conn-size">Size</label>
+            <input type="number" id="bp-conn-size" step="0.5" min="2"><span class="sc-unit">mm</span></span>
+            <span class="bp-pair"><label class="bp-sub" for="bp-conn-tol" title="Sockets are printed this much larger than pegs">Tol</label>
+            <input type="number" id="bp-conn-tol" step="0.05" min="0" max="1" value="0.2"><span class="sc-unit">mm</span></span>
             <label class="sc-check" style="width:auto" title="Engrave each part's grid ID on an inside face"><input type="checkbox" id="bp-engrave" checked> Engrave IDs</label>
         </div>
         <div class="sc-status" id="bp-conn-note" hidden></div>

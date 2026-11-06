@@ -89,7 +89,7 @@
 
     /* A one-part export is only "sealed" when nothing was opened or drilled. */
     function sealedHollow(mesh) {
-        if (!isHollow(mesh)) return false;
+        if (hollowStatus(mesh) !== "confirmed") return false;
         const receipt = mesh.userData.hollow;
         const opened = (receipt.openFaces || []).some((face) => face.opened === true);
         return !opened && !((receipt.holes && receipt.holes.count) || 0);
@@ -979,6 +979,7 @@
 
         // the Pieces panel yields to this panel (it would cover the fields on a phone)
         piecesWasVisible = window.getComputedStyle(piecesPanel).visibility !== "hidden";
+        gsap.killTweensOf([viewDock, actionDock, piecesPanel]); // a load's still-running fade-in must not win
         gsap.to([actionDock, piecesPanel], { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
         panelCollapse.reset(); // Big Print re-entry always starts expanded
         gsap.fromTo(panel, { y: 16 },
@@ -1010,6 +1011,7 @@
 
     function exit(modelLoaded = false) {
         if (!active) return;
+        gsap.killTweensOf(panel);
         resetExportConfirmation();
         disposePrintManifoldCache();
         active = false;
@@ -1029,7 +1031,12 @@
         } else if (!modelLoaded && exportCompleted) {
             const keptScale = scale;
             if (Math.abs(keptScale - 1) > 1e-9) {
-                model.geometry.scale(keptScale, keptScale, keptScale);
+                // bake into a copy: the old geometry may be the solid shape a confirmed hollow recorded
+                const baked = model.geometry.clone();
+                baked.scale(keptScale, keptScale, keptScale);
+                const previous = model.geometry;
+                model.geometry = baked;
+                previous.dispose(); // GPU copy only; the arrays stay readable
                 model.geometry.computeBoundingBox();
                 baseSize.multiplyScalar(keptScale);
                 scale = 1;
@@ -1765,8 +1772,8 @@
         if (CC.hollow.isOpen()) {
             // exit() fades the docks and the Pieces panel in after 0.1 s; without this they would
             // win over the panel's fade-out and show under the open Hollow panel.
-            gsap.killTweensOf([actionDock, piecesPanel]);
-            gsap.set([actionDock, piecesPanel], { autoAlpha: 0 });
+            gsap.killTweensOf([viewDock, actionDock, piecesPanel]);
+            gsap.set([viewDock, actionDock, piecesPanel], { autoAlpha: 0 });
         }
     });
     cancelBtn.addEventListener("click", () => {

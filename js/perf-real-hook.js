@@ -137,7 +137,9 @@
             stage = "hollow-preview";
             document.getElementById("hollow-btn").click();
             await waitFor(() => CC.hollow.isOpen(), "Hollow panel", 60000);
-            document.getElementById("hollow-lamp").click(); // lamp: 2.4 mm wall, open bottom
+            const lamp = document.getElementById("hollow-lamp"); // lamp: 2.4 mm wall, open bottom
+            lamp.checked = true;
+            lamp.dispatchEvent(new Event("change", { bubbles: true }));
             const hollowStatusText = () => document.getElementById("hollow-status").textContent;
             const previewStart = performance.now();
             document.getElementById("hollow-preview").click();

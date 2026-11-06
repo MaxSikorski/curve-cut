@@ -709,6 +709,9 @@ p { line-height: 1.6; color: inherit; opacity: 0.85; }
     flex-shrink: 0;
 }
 .bp-x { font-size: 0.75rem; color: var(--text-muted); }
+/* a label, its box and its unit stay together when a row wraps */
+.bp-pair { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+#bp-scale:disabled, #bp-scale-slider:disabled, #bp-size:disabled { opacity: 0.5; cursor: not-allowed; }
 .bp-conn-shape { flex: 0 0 auto !important; width: 104px; }
 /* Hollow panel (js/hollow.js) */
 .hollow-hint {

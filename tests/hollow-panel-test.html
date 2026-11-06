@@ -542,7 +542,7 @@
 
             // B1
             await enterBigPrint();
-            await waitFor(() => settled($("bigprint-panel")), 3000);
+            await waitFor(() => visible("bigprint-panel") && settled($("bigprint-panel")), 3000);
             const note1 = $("bp-hollow-note") ? $("bp-hollow-note").textContent : "";
             check("B1 confirmed enters: scale, slider and size boxes locked",
                 CC.bigPrint.isActive() && $("bp-scale").disabled && $("bp-scale-slider").disabled && $("bp-size").disabled);
@@ -696,7 +696,7 @@
             await waitFor(() => CC.pieces[0] !== hollowC, 4000);
             check("B7 undo again: solid, status none", hstatus() === "none", String(hstatus()));
             await enterBigPrint();
-            await waitFor(() => settled($("bigprint-panel")), 3000);
+            await waitFor(() => visible("bigprint-panel") && settled($("bigprint-panel")), 3000);
             check("B7 solid model: Hollow… visible, note says solid",
                 visible("bp-hollow-open") && $("bp-hollow-note").textContent.startsWith("Solid model."),
                 $("bp-hollow-note").textContent);
@@ -706,12 +706,12 @@
                 CC.bigPrint.isActive() && toast().includes("Set Scale back to 1×"), toast());
             setValue("bp-scale", 1);
             $("bp-hollow-open").click();
-            await waitFor(() => !CC.bigPrint.isActive() && visible("hollow-panel") && visible("view-dock") && dockSettled(), 4000);
-            await waitFor(() => settled($("view-dock")), 2000);
-            check("B7 scale 1: Big Print closes, panel open, action dock stays hidden, view dock back",
+            await waitFor(() => !CC.bigPrint.isActive() && visible("hollow-panel") && dockSettled(), 4000);
+            await sleep(1200); // the exit's delayed dock fade-ins would show by now if they won
+            check("B7 scale 1: Big Print closes, panel open, action dock and view dock hidden, as when opened from the main page",
                 !CC.bigPrint.isActive() && visible("hollow-panel")
                 && win.getComputedStyle($("action-dock")).visibility === "hidden"
-                && visible("view-dock") && CC.pieces[0].scale.x === 1 && CC.hollow.isOpen(),
+                && !visible("view-dock") && CC.pieces[0].scale.x === 1 && CC.hollow.isOpen(),
                 `active ${CC.bigPrint.isActive()}, panel ${visible("hollow-panel")}, dock ${win.getComputedStyle($("action-dock")).visibility}, `
                 + `view dock ${visible("view-dock")}, scale ${CC.pieces[0].scale.x}, open ${CC.hollow.isOpen()}`);
             escape();
@@ -779,6 +779,45 @@
             }
             frame.style.width = ""; frame.style.height = "";
             await sleep(300);
+
+            // B10: loading another model while a panel is open must not leave the Pieces panel hidden
+            await load(cube(), "cube10");
+            await waitFor(() => visible("pieces-panel") && settled($("pieces-panel")) && settled($("action-dock")), 5000);
+            await enterBigPrint();
+            await waitFor(() => !visible("pieces-panel") && settled($("pieces-panel")), 4000);
+            await load(cube(), "cube10b");
+            await waitFor(() => !CC.bigPrint.isActive(), 4000);
+            await sleep(1500);
+            check("B10 new model loaded while Big Print is open: Pieces panel is back", visible("pieces-panel") && CC.pieces.length === 1);
+            await waitFor(() => settled($("action-dock")) && visible("action-dock"), 4000);
+            await openPanel();
+            await waitFor(() => !visible("pieces-panel") && settled($("hollow-panel")), 4000);
+            await load(cube(), "cube10c");
+            await sleep(1500);
+            check("B10 new model loaded while the Hollow panel is open: panel closed, Pieces panel is back",
+                !visible("hollow-panel") && visible("pieces-panel") && visible("action-dock") && visible("view-dock"),
+                `panel ${visible("hollow-panel")}, pieces ${visible("pieces-panel")}, dock ${visible("action-dock")}, view ${visible("view-dock")}`);
+
+            // B11: the recorded solid shape must survive a Big Print scale bake on the solid model
+            await hollowCube();
+            await confirmAndSettle();
+            await waitFor(() => settled($("action-dock")), 4000);
+            const hollow11 = CC.pieces[0];
+            $("undo-btn").click();
+            await waitFor(() => CC.pieces[0] !== hollow11, 4000);
+            await enterBigPrint();
+            setValue("bp-scale", 2);
+            const e11 = await runExport();
+            $("bp-cancel").click();
+            await waitFor(() => !CC.bigPrint.isActive(), 4000);
+            await waitFor(() => settled($("action-dock")), 4000);
+            $("redo-btn").click();
+            await waitFor(() => CC.pieces[0] === hollow11, 4000);
+            const solid11 = CC.hollow.solidGeometry();
+            let size11 = "none";
+            if (solid11) { solid11.computeBoundingBox(); const v = new win.THREE.Vector3(); solid11.boundingBox.getSize(v); size11 = v.x.toFixed(2); }
+            check("B11 scale bake on the solid model leaves the recorded solid shape at 60", !!e11.result && size11 === "60.00",
+                `export ${!!e11.result}, solid width ${size11}`);
         } catch (error) {
             check("test harness did not throw", false, String(error && error.stack || error));
         }

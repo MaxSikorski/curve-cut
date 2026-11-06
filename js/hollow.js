@@ -379,6 +379,7 @@
         closeRequested = false;
         resetAfterRun = false;
         refresh();
+        gsap.killTweensOf([viewDock, actionDock, piecesPanel]); // a load's still-running fade-in must not win
         gsap.to([viewDock, actionDock, piecesPanel], { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
         panelCollapse.reset();
         // The fade starts at opacity 0, which gsap renders as visibility:hidden and
@@ -416,6 +417,7 @@
         token = null;
         release(entry);
         isOpenNow = false;
+        gsap.killTweensOf(panel); // closing mid-fade-in must not be overtaken by the opening tween
         gsap.to(panel, { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
         if (CC.pieces.length) {
             gsap.to(piecesPanel, { autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out", delay: 0.1 });

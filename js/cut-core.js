@@ -1818,6 +1818,8 @@
     window.CutCore = {
         init,
         isReady: () => !!wasm,
+        // The initialised Manifold module, for cores that need its static builders (hollow-core).
+        manifoldModule: () => wasm,
         weldGeometry, findBoundaryLoops, capBoundaryLoops,
         toManifold, toGeometry, isWatertight, repairGeometry,
         sampleSpline, buildCutter, cutWithCutter, cutGeometries,

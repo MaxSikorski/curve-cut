@@ -454,6 +454,62 @@
             && released.token === cacheToken && released.released === true,
             released && JSON.stringify(released));
 
+        // Lamp phase 1a: open faces and drilled holes ride in opts, stats carry the facts.
+        const lampOpts = () => ({
+            engine: "mesh", openFaces: ["bottom"],
+            holes: [{ point: { x: 5, y: 10, z: 5 }, direction: { x: 0, y: -1, z: 0 },
+                diameterMm: 2, depthMm: 1 }],
+        });
+        const lampMainVolume = () => {
+            const solid = CutCore.toManifold(geometryAdapter(closedBox()));
+            let result = null;
+            try {
+                result = CC.hollowCore.hollow(solid, 2, lampOpts());
+                return result.stats.volumeAfterMm3;
+            } finally {
+                if (result) result.hollow.delete();
+                solid.delete();
+            }
+        };
+        const lampMainExpected = lampMainVolume();
+        const lampInput = closedBox();
+        const lampToken = "compute-test-lamp";
+        await CC.compute.run("prime", { token: lampToken, geometry: lampInput, scale: 1 },
+            { transfer: [lampInput.vertProperties.buffer, lampInput.triVerts.buffer] });
+        let lampWorker = null;
+        try {
+            lampWorker = await CC.compute.run("hollowApply", {
+                token: lampToken, wallMm: 2, opts: lampOpts(),
+            });
+        } finally {
+            await CC.compute.run("release", { token: lampToken });
+        }
+        check("C1 worker hollowApply carries open faces and holes", !!lampWorker
+            && watertight(lampWorker) && lampWorker.stats.openFaces.length === 1
+            && lampWorker.stats.holes.count === 1
+            && Math.abs(lampWorker.stats.volumeAfterMm3 - lampMainExpected) < 1e-6,
+            lampWorker && `${lampWorker.stats.volumeAfterMm3} vs ${lampMainExpected}`);
+
+        const lampBadToken = "compute-test-lamp-bad";
+        const lampBadInput = closedBox();
+        await CC.compute.run("prime", { token: lampBadToken, geometry: lampBadInput, scale: 1 },
+            { transfer: [lampBadInput.vertProperties.buffer, lampBadInput.triVerts.buffer] });
+        let lampBadError = null;
+        try {
+            await CC.compute.run("hollowApply", {
+                token: lampBadToken, wallMm: 2,
+                opts: { holes: [{ point: { x: 5, y: 10, z: 5 }, direction: { x: 0, y: -1, z: 0 },
+                    diameterMm: 0, depthMm: 1 }] },
+            });
+        } catch (error) {
+            lampBadError = error;
+        } finally {
+            await CC.compute.run("release", { token: lampBadToken });
+        }
+        check("C2 worker hollowApply rejects a zero-diameter hole",
+            !!lampBadError && lampBadError.message === "Hole 1 needs a diameter above 0 mm.",
+            lampBadError && lampBadError.message);
+
         const cancelInput = subdividedClosedBox();
         const cancelWorker = CC.compute._worker;
         let cancelRequested = false;
@@ -543,6 +599,25 @@
         check("second runtime worker error enters degraded mode",
             demotionErrors === 2 && CC.compute.degraded,
             `${demotionErrors}/${CC.compute.degraded}`);
+
+        const lampDegradedInput = closedBox();
+        await CC.compute.run("prime", { token: "compute-test-lamp-main", geometry: lampDegradedInput, scale: 1 },
+            { transfer: [lampDegradedInput.vertProperties.buffer, lampDegradedInput.triVerts.buffer] });
+        let lampDegraded = null, lampDegradedError = null;
+        try {
+            lampDegraded = await CC.compute.run("hollowApply", {
+                token: "compute-test-lamp-main", wallMm: 2, opts: lampOpts(),
+            });
+        } catch (error) {
+            lampDegradedError = error;
+        } finally {
+            await CC.compute.run("release", { token: "compute-test-lamp-main" });
+        }
+        check("C3 main-thread hollowApply carries open faces and holes", !!lampDegraded
+            && CC.compute.degraded && lampDegraded.stats.openFaces.length === 1
+            && lampDegraded.stats.holes.count === 1 && !!lampWorker
+            && Math.abs(lampDegraded.stats.volumeAfterMm3 - lampWorker.stats.volumeAfterMm3) < 1e-6,
+            lampDegraded ? `${lampDegraded.stats.volumeAfterMm3}` : String(lampDegradedError && lampDegradedError.message));
 
         const degradedRouteInput = closedBox();
         const degradedRouteSource = scenePiece(degradedRouteInput, "degraded route");

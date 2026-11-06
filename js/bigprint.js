@@ -68,7 +68,8 @@
     let scale = 1;
     let exportCompleted = false;
     let gridGroup = null;      // THREE.Group of preview planes
-    let grid = null;           // last computeGrid result
+    let layout = null;         // last Core.resolveLayout result (wall lists + auto/hand modes)
+    let grid = null;           // layout.grid
     let printManifoldCache = null; // panel owns it; invalidation retires borrowed entries
     let printManifoldWarm = null;
     let printManifoldWarmCancelSerial = 0;
@@ -168,6 +169,18 @@
 
     for (const el of [marginInput, fullVolume, nudgeX, nudgeY, nudgeZ]) {
         el.addEventListener("input", refresh);
+    }
+    // A nudge past the "no extra parts" window is cut at the window edge, so show
+    // that: on Enter or blur the box is rewritten to the nudge that is really used.
+    for (const [axis, el] of [["x", nudgeX], ["y", nudgeY], ["z", nudgeZ]]) {
+        el.addEventListener("change", () => {
+            if (!active || explodeGroup || !layout || layout.mode[axis] !== "auto") return;
+            const eff = layout.nudge[axis];
+            if (Math.abs(eff - (parseFloat(el.value) || 0)) > 1e-9) {
+                el.value = Math.trunc(eff * 10) / 10;
+                refresh();
+            }
+        });
     }
 
     // ------------------------------------------------------ hollow controls
@@ -1161,7 +1174,8 @@
         updateConnNote();
         model.scale.setScalar(hollowStates.has(model) ? 1 : scale);
         const p = params();
-        grid = Core.computeGrid(p);
+        layout = Core.resolveLayout(layout, p);
+        grid = layout ? layout.grid : null;
         removeGrid();
 
         if (!grid) {
@@ -1214,10 +1228,11 @@
         status.classList.toggle("warning", count > WARN_CELL_COUNT);
         exportBtn.disabled = false;
 
-        // Nudge range follows the usable cell size.
-        nudgeX.max = grid.usable.x; nudgeX.min = -grid.usable.x;
-        nudgeY.max = grid.usable.y; nudgeY.min = -grid.usable.y;
-        nudgeZ.max = grid.usable.z; nudgeZ.min = -grid.usable.z;
+        // Nudge range is the window where no extra part appears (whole mm for the spinner).
+        for (const [axis, el] of [["x", nudgeX], ["y", nudgeY], ["z", nudgeZ]]) {
+            el.min = Math.ceil(layout.window[axis].lo) || 0;
+            el.max = Math.floor(layout.window[axis].hi) || 0;
+        }
     }
 
     // ------------------------------------------------------------ mode flow
@@ -1250,6 +1265,7 @@
         cancelPrintManifoldWarm();
         clearPrintManifoldCache();
         active = true;
+        layout = null;
         CC.bigPrintActive = true;
         exportCompleted = false;
         model = CC.pieces[0];
@@ -1325,6 +1341,7 @@
         CC.bigPrintActive = false;
         disposeProxies();
         removeGrid();
+        layout = null;
         if (!modelLoaded && !exportCompleted) {
             const restoredScale = Math.abs(scale - 1) > 1e-9;
             const restoredHollow = hollowStates.has(model) && restorePreHollow();
@@ -1906,8 +1923,10 @@
         const p = params();
         // recompute: refresh() is frozen in Exploded view, so the cached grid
         // can predate a bed/margin/nudge/connector edit made there
-        const g = Core.computeGrid(p);
+        layout = Core.resolveLayout(layout, p);
+        const g = layout ? layout.grid : null;
         if (!g) return;
+        const exportNudge = layout.nudge; // kept: layout may reset while the export runs
         const totalCells = Core.cellCount(g);
         if (totalCells > HARD_CELL_COUNT) {
             resetExportConfirmation();
@@ -2072,7 +2091,7 @@
                 version: CC.VERSION,
                 exportDate: new Date().toISOString(),
                 scale: +scale.toFixed(3),
-                size: p.size, bed: p.bed, margin: p.margin, nudge: p.nudge, gap,
+                size: p.size, bed: p.bed, margin: p.margin, nudge: exportNudge, gap,
                 format: fmt.toUpperCase(),
                 engraveIds: engraveBox.checked,
                 candidateCount: totalCells,

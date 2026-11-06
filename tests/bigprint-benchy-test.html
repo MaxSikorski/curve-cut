@@ -61,7 +61,10 @@
         const bed = { w: 70, d: 70, h: 70 }, margin = 5; // tiny bed -> many parts
         const CONN = { size: 6, depth: 5, shape: "circle", tolR: 0.2, tolD: 0.2 };
         // pegs reserve their depth on cut axes (Max, 2026-11-05: shrink cells)
-        const grid = B.computeGrid({ size, bed, margin, reserve: CONN.depth });
+        const gridP = { size, bed, margin, reserve: CONN.depth, nudge: { x: 0, y: 0, z: 0 } };
+        const grid = B.resolveLayout ? B.resolveLayout(null, gridP).grid : B.computeGrid(gridP);
+        check("wall-list grid deep-equals computeGrid",
+            JSON.stringify(grid) === JSON.stringify(B.computeGrid(gridP)));
         const cells = B.gridCells(grid, size, min);
         log(`6× benchy: ${size.x.toFixed(0)}×${size.z.toFixed(0)}×${size.y.toFixed(0)} mm, `
             + `grid ${grid.counts.x}×${grid.counts.z}×${grid.counts.y} = ${grid.total} candidate cells`);

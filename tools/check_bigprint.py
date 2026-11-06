@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """check_bigprint.py — run tests/bigprint-test.html headlessly and report PASS/FAIL.
 
-Covers the Big Print (v2.0) core math: grid cut positions (balanced, nudged,
+Covers the Big Print (v2.0) core math: wall lists, grid cut positions (balanced, nudged,
 segment-legal), part-count estimates, B2-style part IDs, scale⇄size linking.
 Grows with each Big Print build step (cut engine, connectors, engraving).
 

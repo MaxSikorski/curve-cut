@@ -200,6 +200,212 @@
         }
     }
 
+    function probeVolume(wasm, result, min, max) {
+        let probe = null, overlap = null;
+        try {
+            probe = translated(wasm.Manifold.cube(
+                [max[0] - min[0], max[1] - min[1], max[2] - min[2]], true),
+                [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2]);
+            overlap = result.intersect(probe);
+            return overlap.volume();
+        } finally {
+            dispose(overlap); dispose(probe);
+        }
+    }
+
+    // Digest over the bytes of toArrays(result.hollow): vertProperties, then triVerts.
+    function fnvDigest(H, manifold) {
+        const arrays = H.toArrays(manifold);
+        let hash = 0x811c9dc5;
+        for (const view of [arrays.vertProperties, arrays.triVerts]) {
+            const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+            for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 0x01000193) >>> 0;
+        }
+        return hash.toString(16).padStart(8, "0");
+    }
+
+    function checkOpenFacesAndHoles(wasm, H, cube) {
+        const GOLDEN_MESH = "330ce2e5"; // recorded on unchanged main
+        const GOLDEN_GRID = "ec639066"; // recorded on unchanged main
+        const SEGMENTS = H._test.HOLE_SEGMENTS;
+        const ngonArea = (r) => 0.5 * SEGMENTS * r * r * Math.sin(2 * Math.PI / SEGMENTS);
+        const near = (a, b, tol) => Math.abs(a - b) <= tol;
+        const run = (source, wall, opts) => {
+            const result = H.hollow(source, wall, opts);
+            ownedResults.push(result.hollow);
+            return result;
+        };
+        const pieces = (manifold) => {
+            const parts = manifold.decompose();
+            const count = parts.length;
+            parts.forEach(dispose);
+            return count;
+        };
+        const column = (result, lo, hi, half = 0.5) =>
+            probeVolume(wasm, result, [-half, lo, -half], [half, hi, half]);
+        const bottomRing = (result) =>
+            probeVolume(wasm, result, [-31, -29.55, -31], [31, -29.45, 31]);
+        const throwsWith = (name, expectedType, message, fn) => {
+            let got = "";
+            try { fn(); } catch (error) { got = `${error.constructor.name}: ${error.message}`; }
+            check(name, got === `${expectedType.name}: ${message}`, got);
+        };
+        const dir = (x, y, z) => ({ x, y, z });
+        const hole = (overrides) => Object.assign({
+            point: dir(0, 30, 0), direction: dir(0, -1, 0), diameterMm: 6, depthMm: 3,
+        }, overrides);
+
+        // T1 open bottom, mesh
+        const t1 = run(cube, 6, { openFaces: ["bottom"] });
+        const f1 = (t1.stats.openFaces || [])[0] || {};
+        check("T1 open bottom mesh engine + volume", t1.stats.engineUsed === "mesh"
+            && near(t1.stats.volumeAfterMm3, 91584, 1e-3), `${t1.stats.engineUsed} ${t1.stats.volumeAfterMm3}`);
+        check("T1 watertight one piece", statusOk(t1.hollow) && pieces(t1.hollow) === 1);
+        check("T1 ring 0.5 mm above bottom", near(bottomRing(t1.hollow), 129.6, 0.01)
+            && cavityIsOpen(wasm, t1.hollow, [0, -29.5, 0]), `${bottomRing(t1.hollow)}`);
+        check("T1 ray up from below is clear to the ceiling",
+            column(t1.hollow, -40, 23.9) < 1e-6 && column(t1.hollow, -40, 24.5) > 0,
+            `${column(t1.hollow, -40, 23.9)} / ${column(t1.hollow, -40, 24.5)}`);
+        check("T1 face fact", f1.label === "Bottom" && f1.opened === true
+            && near(f1.normal.x, 0, 1e-9) && near(f1.normal.y, -1, 1e-9) && near(f1.normal.z, 0, 1e-9)
+            && near(f1.openedAreaMm2, 2304, 1e-3), JSON.stringify(f1));
+        check("T1 removed volume and no warnings", near(t1.stats.openFacesRemovedMm3, 13824, 1e-3)
+            && t1.stats.warnings.length === 0, `${t1.stats.openFacesRemovedMm3} ${warningCodes(t1)}`);
+
+        // T2 open bottom, grid
+        const t2 = run(cube, 6, { engine: "grid", openFaces: ["bottom"] });
+        const ring2 = bottomRing(t2.hollow);
+        let band = null, bandHit = null, minY = NaN;
+        try {
+            band = translated(wasm.Manifold.cube([1, 80, 1], true), [0, 0, 0]);
+            bandHit = t2.hollow.intersect(band);
+            minY = bandHit.boundingBox().min[1];
+        } finally { dispose(bandHit); dispose(band); }
+        check("T2 open bottom grid", statusOk(t2.hollow) && pieces(t2.hollow) === 1
+            && Math.abs(ring2 - 129.6) / 129.6 < 0.03 && column(t2.hollow, -40, 20) < 1e-6
+            && minY >= 20 && minY <= 26, `ring=${ring2} minY=${minY}`);
+
+        // T3 neck guard
+        let neck = null, head = null, stepped = null;
+        try {
+            neck = translated(wasm.Manifold.cube([20, 30, 20], true), [0, 15, 0]);
+            head = translated(wasm.Manifold.cube([60, 30, 60], true), [0, 45, 0]);
+            stepped = neck.add(head);
+            const t3 = run(stepped, 4, { openFaces: ["bottom"] });
+            const wallProbe = probeVolume(wasm, t3.hollow, [7.5, 0, -0.5], [8.5, 1, 0.5]);
+            const floorProbe = probeVolume(wasm, t3.hollow, [14.5, 31.5, -0.5], [15.5, 32.5, 0.5]);
+            check("T3 neck guard keeps neck wall and head floor", statusOk(t3.hollow)
+                && pieces(t3.hollow) === 1 && wallProbe > 0 && floorProbe > 0
+                && column(t3.hollow, -5, 50) < 1e-6 && !warningCodes(t3).includes("open-face-thin-rim"),
+                `wall=${wallProbe} floor=${floorProbe} ${warningCodes(t3)}`);
+        } finally { dispose(stepped); dispose(head); dispose(neck); }
+
+        // T4 blind hole. A sealed cavity counts as its own mesh component in decompose(),
+        // so a blind hole keeps the same piece count as the plain hollow cube (2).
+        const t4 = run(cube, 6, { holes: [hole()] });
+        const removed4 = ngonArea(3) * 3;
+        const plainPieces = pieces(run(cube, 6, {}).hollow);
+        check("T4 blind hole", near(t4.stats.volumeAfterMm3, 105408 - removed4, 1e-3)
+            && t4.stats.holes && t4.stats.holes.count === 1
+            && near(t4.stats.holes.removedMm3, removed4, 1e-3)
+            && statusOk(t4.hollow) && pieces(t4.hollow) === plainPieces,
+            `${t4.stats.volumeAfterMm3} ${JSON.stringify(t4.stats.holes)} pieces=${pieces(t4.hollow)} plain=${plainPieces}`);
+
+        // T5 hole into the cavity
+        const t5 = run(cube, 6, { holes: [hole({ depthMm: 10 })] });
+        check("T5 hole into cavity", t5.stats.holes && near(t5.stats.holes.removedMm3, ngonArea(3) * 6, 1e-3)
+            && column(t5.hollow, 0, 31) < 1e-6 && statusOk(t5.hollow) && pieces(t5.hollow) === 1,
+            `${t5.stats.holes && t5.stats.holes.removedMm3}`);
+
+        // T6 rotated holes
+        const t6 = run(cube, 6, { holes: [
+            hole({ point: dir(30, 0, 0), direction: dir(-1, 0, 0) }),
+            hole({ point: dir(0, 0, -30), direction: dir(0, 0, 1) }),
+        ] });
+        const small = (c) => probeVolume(wasm, t6.hollow,
+            [c[0] - 0.25, c[1] - 0.25, c[2] - 0.25], [c[0] + 0.25, c[1] + 0.25, c[2] + 0.25]);
+        check("T6 two rotated holes", t6.stats.holes && near(t6.stats.holes.removedMm3, 2 * ngonArea(3) * 3, 1e-3)
+            && small([28.5, 0, 0]) < 1e-6 && small([0, 0, -28.5]) < 1e-6 && small([28.5, 0, 10]) > 0.1,
+            `${t6.stats.holes && t6.stats.holes.removedMm3} ${small([28.5, 0, 0])} ${small([0, 0, -28.5])} ${small([28.5, 0, 10])}`);
+
+        // T7 open bottom plus hole
+        const t7 = run(cube, 6, { openFaces: ["bottom"], holes: [hole()] });
+        check("T7 open bottom and hole", near(t7.stats.volumeAfterMm3, 91584 - removed4, 1e-3)
+            && statusOk(t7.hollow) && pieces(t7.hollow) === 1, `${t7.stats.volumeAfterMm3}`);
+
+        // T8 explicit plane, thin rim
+        let cone = null;
+        try {
+            cone = wasm.Manifold.cylinder(20, 10, 40, 64);
+            const t8 = run(cone, 4, { openFaces: [{ point: dir(0, 0, 0), normal: dir(0, 0, -1) }] });
+            const f8 = (t8.stats.openFaces || [])[0] || {};
+            check("T8 cone thin rim warns", statusOk(t8.hollow) && warningCodes(t8).includes("open-face-thin-rim")
+                && f8.label === "Face 1" && f8.opened === true, `${warningCodes(t8)} ${JSON.stringify(f8)}`);
+        } finally { dispose(cone); }
+
+        // T9 no cavity in reach
+        const t9 = run(cube, 6, { openFaces: [{ point: dir(0, -40, 0), normal: dir(0, -1, 0) }] });
+        const f9 = (t9.stats.openFaces || [])[0] || {};
+        check("T9 no cavity in reach", warningCodes(t9).includes("open-face-no-cavity")
+            && near(t9.stats.volumeAfterMm3, 105408, 1e-6) && f9.opened === false,
+            `${warningCodes(t9)} ${t9.stats.volumeAfterMm3}`);
+
+        // T10 validation messages
+        const bad = (opts) => () => H.hollow(cube, 6, opts);
+        throwsWith("T10 openFaces not a list", TypeError, "Open faces must be a list.", bad({ openFaces: "bottom" }));
+        throwsWith("T10 open face junk", TypeError, 'Open face 2 needs a point and a direction, or "bottom".',
+            bad({ openFaces: ["bottom", 5] }));
+        throwsWith("T10 open face missing normal", TypeError, 'Open face 1 needs a point and a direction, or "bottom".',
+            bad({ openFaces: [{ point: dir(0, 0, 0) }] }));
+        throwsWith("T10 open face no direction", RangeError, "Open face 1 has no direction.",
+            bad({ openFaces: [{ point: dir(0, 0, 0), normal: dir(0, 0, 0) }] }));
+        throwsWith("T10 holes not a list", TypeError, "Holes must be a list.", bad({ holes: {} }));
+        throwsWith("T10 hole missing", TypeError, "Hole 2 needs a point and a direction.",
+            bad({ holes: [hole(), {}] }));
+        throwsWith("T10 hole non-finite point", TypeError, "Hole 1 needs a point and a direction.",
+            bad({ holes: [hole({ point: dir(NaN, 0, 0) })] }));
+        throwsWith("T10 hole no direction", RangeError, "Hole 1 has no direction.",
+            bad({ holes: [hole({ direction: dir(0, 0, 0) })] }));
+        throwsWith("T10 hole diameter", RangeError, "Hole 1 needs a diameter above 0 mm.",
+            bad({ holes: [hole({ diameterMm: 0 })] }));
+        throwsWith("T10 hole diameter NaN", RangeError, "Hole 1 needs a diameter above 0 mm.",
+            bad({ holes: [hole({ diameterMm: NaN })] }));
+        throwsWith("T10 hole depth", RangeError, "Hole 1 needs a depth above 0 mm.",
+            bad({ holes: [hole({ depthMm: -1 })] }));
+
+        // T11 cancel inside open faces
+        let opened = false, cancelled = false;
+        try {
+            H.hollow(cube, 6, {
+                openFaces: ["bottom"],
+                onProgress: (stage) => { if (stage === "open-faces") opened = true; },
+                shouldCancel: () => opened,
+            });
+        } catch (error) {
+            cancelled = error instanceof H.HollowCancelled;
+        }
+        const afterCancel = run(cube, 6, {});
+        check("T11 cancel at open faces", opened && cancelled
+            && near(afterCancel.stats.volumeAfterMm3, 105408, 1e-6), `${opened} ${cancelled}`);
+
+        // T12 identity guard
+        const plain = run(cube, 6, {}), empty = run(cube, 6, { openFaces: [], holes: [] });
+        const a = H.toArrays(plain.hollow), b = H.toArrays(empty.hollow);
+        const sameBytes = a.vertProperties.length === b.vertProperties.length
+            && a.triVerts.length === b.triVerts.length
+            && a.vertProperties.every((v, i) => v === b.vertProperties[i])
+            && a.triVerts.every((v, i) => v === b.triVerts[i]);
+        const meshDigest = fnvDigest(H, plain.hollow);
+        const gridDigest = fnvDigest(H, run(cube, 6, { engine: "grid" }).hollow);
+        log(`digests: mesh=${meshDigest} grid=${gridDigest}`);
+        check("T12 empty lists change nothing", sameBytes);
+        check("T12 golden digests", meshDigest === GOLDEN_MESH && gridDigest === GOLDEN_GRID,
+            `${meshDigest} ${gridDigest}`);
+        check("T12 empty stats", !!plain.stats.holes && plain.stats.holes.count === 0
+            && plain.stats.holes.removedMm3 === 0 && Array.isArray(plain.stats.openFaces)
+            && plain.stats.openFaces.length === 0 && empty.stats.openFaces.length === 0);
+    }
+
     let wasm, cube, refined, thinRefined;
     const ownedResults = [];
     try {
@@ -353,6 +559,8 @@
         ownedResults.push(afterCancel.hollow);
         check("same source succeeds after cancellation", statusOk(afterCancel.hollow)
             && Math.abs(afterCancel.stats.volumeAfterMm3 - 105408) < 1e-6);
+
+        checkOpenFacesAndHoles(wasm, H, cube);
 
         document.title = failures.length ? `FAIL: ${failures.join("; ")}` : "PASS";
     } catch (error) {

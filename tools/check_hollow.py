@@ -2,7 +2,8 @@
 """check_hollow.py — run tests/hollow-test.html headlessly.
 
 Covers the analytic cube, hybrid selector and D2 tripwire, sampled-wall
-warnings, multi-cavity preservation, cancellation cleanup, and preview estimate.
+warnings, multi-cavity preservation, cancellation cleanup, preview estimate, and
+open faces plus drilled holes (watertight, volumes, neck guard, validation, cancel).
 
 Runs in real time through tools/browser.py (Playwright's headless Chromium).
 SKIPs loudly (exit 0) if that browser is not installed.

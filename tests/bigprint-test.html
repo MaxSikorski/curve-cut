@@ -583,6 +583,71 @@
                 hollow: { wallMm: 6, savedPct: 50, engineUsed: "grid", fellBack: false } });
             check("M1 manifest: no blocks line when no blocks were made",
                 !m1b.includes("Hollow parts:"));
+            // the connectors text never touches the ID column
+            const m1line = m1.split("\n").find((l) => l.startsWith("B1 "));
+            check("M2 manifest: thin-seam connectors text is followed by 2+ spaces before the ID column",
+                !!m1line && /seam too thin {2,}no \(no room/.test(m1line));
+            const m1head = m1.split("\n").find((l) => l.startsWith("ID ") && l.includes("engraved ID"));
+            check("M2 manifest: header pads connectors to the same width",
+                !!m1head && !!m1line && m1head.indexOf("engraved ID") === m1line.indexOf("no (no room"));
+        }
+
+        // L1 — assembly map front-view layout (to scale)
+        {
+            const lay = typeof B.assemblyMapLayout === "function" ? B.assemblyMapLayout : null;
+            const measure = (t) => t.length * 7; // stand-in for ctx.measureText
+            const pad = 34, lineH = 18;
+            const one = lay && lay({ colMm: [10], layerMm: [10, 10, 10, 10], rows: 1, pxPerMm: 4,
+                footerLines: ["x".repeat(57), "short"], measure }); // 57 chars = 399 px
+            check("L1 layout: width fits a 400 px footer line plus padding",
+                !!one && one.width >= 399 + 2 * pad);
+            check("L1 layout: footer lines sit fully inside the height",
+                !!one && one.footerY + 2 * lineH <= one.height);
+            const three = lay && lay({ colMm: [30, 12], layerMm: [20, 20, 5], rows: 3, pxPerMm: 4,
+                footerLines: ["a"], measure });
+            check("L1 layout: one panel per row, front row (row 3) first with the smallest y",
+                !!three && three.panels.length === 3 && three.panels[0].row === 3
+                && three.panels[1].row === 2 && three.panels[2].row === 1
+                && three.panels[0].y < three.panels[1].y && three.panels[1].y < three.panels[2].y);
+            const P = three.panels[0], cr = (c, l) => B.assemblyCellRect(P, c, l);
+            check("L1 layout: layer 1 is the bottom of a panel, higher layers above",
+                cr(0, 0).y > cr(0, 1).y && cr(0, 1).y > cr(0, 2).y
+                && cr(1, 0).x > cr(0, 0).x && cr(0, 0).y + cr(0, 0).h === P.y + P.h);
+            check("L1 layout: a narrow last column / thin top layer get proportionally fewer px",
+                cr(0, 0).w === 120 && cr(1, 0).w === 48 && cr(0, 2).h === 20 && cr(0, 0).h === 80);
+            check("L1 layout: panel aspect = model width / height within 1 px",
+                Math.abs(P.w - P.h * (42 / 45)) <= 1 && P.w === cr(0, 0).w + cr(1, 0).w);
+            check("L1 layout: panel titles",
+                B.assemblyPanelTitle(1, 1) === "Front view"
+                && B.assemblyPanelTitle(3, 3) === "Row 3 — front"
+                && B.assemblyPanelTitle(2, 3) === "Row 2"
+                && B.assemblyPanelTitle(1, 3) === "Row 1 — back");
+            const sc = B.assemblyScale ? B.assemblyScale([30, 30, 6], [20, 20, 20, 20, 8], 4, 5) : 0;
+            const big = lay({ colMm: [30, 30, 6], layerMm: [20, 20, 20, 20, 8], rows: 4, pxPerMm: sc,
+                footerLines: ["a", "b", "c", "d", "e"], measure });
+            check("L1 layout: scale keeps panels ≤ 600 px wide and the canvas ≤ 4096 px tall",
+                sc > 0 && big.panels[0].w <= 600 && big.height <= 4096);
+            check("L1 layout: smallest cell side never under 22 px (canvas may grow)",
+                B.assemblyScale([100, 1], [50], 1, 5) * 1 >= 22);
+            const sl = { colMm: [100, 0.3], layerMm: [30, 30, 30], rows: 3 };
+            const slLay = lay({ ...sl, pxPerMm: B.assemblyScale(sl.colMm, sl.layerMm, 3, 5),
+                footerLines: ["a"], measure });
+            const sl2 = { colMm: [100, 0.1], layerMm: [0.1, 30], rows: 12 };
+            const slLay2 = lay({ ...sl2, pxPerMm: B.assemblyScale(sl2.colMm, sl2.layerMm, 12, 5),
+                footerLines: ["a"], measure });
+            check("L1 layout: sliver columns/layers cannot push the canvas past 8192 px a side or 32e6 px",
+                slLay.width <= 8192 && slLay.height <= 8192 && slLay.width * slLay.height <= 32e6
+                && slLay2.width <= 8192 && slLay2.height <= 8192 && slLay2.width * slLay2.height <= 32e6);
+            const tallSc = B.assemblyScale([30], [30, 30, 30], 1, 5);
+            check("L1 layout: a 3:1 tall model's panel is at most 1000 px high",
+                lay({ colMm: [30], layerMm: [30, 30, 30], rows: 1, pxPerMm: tallSc,
+                    footerLines: ["a"], measure }).panels[0].h <= 1000);
+            const wAt = (px) => px * 3.6; // 6-char label
+            const f1 = B.assemblyLabelPx(60, 100, wAt), f2 = B.assemblyLabelPx(400, 400, wAt),
+                f3 = B.assemblyLabelPx(12, 12, wAt);
+            check("L1 label: fits 85% of a narrow cell; capped at 28 px; floor 10 px",
+                f1 >= 10 && wAt(f1) <= 60 * 0.85 + 1e-6 && f1 < 60 * 0.28
+                && f2 === 28 && f3 === 10);
         }
 
         // H9 — seamPlanes uses the same arithmetic as gridCells

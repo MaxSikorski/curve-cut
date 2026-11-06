@@ -171,6 +171,10 @@
             <input type="number" id="bp-margin" step="1" min="0" value="5"><span class="sc-unit">mm</span>
         </div>
         <div class="sc-row">
+            <label class="sc-check" style="width:auto" title="Skip the connector-peg reserve so parts fill the whole bed minus the margin"><input type="checkbox" id="bp-full-volume"> Use full build volume</label>
+        </div>
+        <div class="sc-status" id="bp-full-volume-note" hidden>Pegs now stick out into the margin, so leave the margin at least as deep as the pegs.</div>
+        <div class="sc-row">
             <label for="bp-bed-w">Bed</label>
             <input type="number" id="bp-bed-w" step="1" min="10" title="Bed width">
             <span class="bp-x">×</span>

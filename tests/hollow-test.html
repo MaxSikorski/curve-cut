@@ -239,7 +239,7 @@
             for (const name of Object.getOwnPropertyNames(target)) {
                 const original = Object.getOwnPropertyDescriptor(target, name);
                 if (!original || typeof original.value !== "function" || name === "constructor") continue;
-                const skipResult = name === "getMesh" || name.startsWith("_"); // Mesh is a plain JS copy; _Raw returns are library-internal vectors
+                const skipResult = name === "getMesh" || name.startsWith("_"); // Mesh is a plain JS copy; vendored Manifold's CrossSection.extrude never deletes its _ToPolygons vector — a small known library leak per extrude (vendor/ unchanged; see PR)
                 const fn = original.value;
                 let wrapped;
                 if (name === "delete") {
@@ -419,27 +419,31 @@
             bad({ holes: [hole({ depthMm: -1 })] }));
 
         // T11 cancel between two open faces: the error path must free the half-cut hollow
-        const live = trackLive(wasm, cube);
-        let cancelAtSecond = false, cancelled = false, liveBefore = -1, liveAfter = -2, liveNames = "";
-        try {
-            liveBefore = live.count();
+        for (const engine of ["mesh", "grid"]) {
+            const live = trackLive(wasm, cube);
+            let cancelAtSecond = false, cancelled = false, liveBefore = -1, liveAfter = -2, liveNames = "";
             try {
-                H.hollow(cube, 6, {
-                    openFaces: ["bottom", { point: dir(0, -30, 0), normal: dir(0, -1, 0) }],
-                    onProgress: (stage, fraction) => {
-                        if (stage === "open-faces" && fraction === 0.5) cancelAtSecond = true;
-                    },
-                    shouldCancel: () => cancelAtSecond,
-                });
-            } catch (error) {
-                cancelled = error instanceof H.HollowCancelled;
-            }
-            liveAfter = live.count(); liveNames = live.names();
-        } finally { live.stop(); }
-        const afterCancel = run(cube, 6, {});
-        check("T11 cancel between faces", cancelAtSecond && cancelled
-            && near(afterCancel.stats.volumeAfterMm3, 105408, 1e-6), `${cancelAtSecond} ${cancelled}`);
-        check("T11 cancel leaks nothing", liveBefore === liveAfter, `${liveBefore} vs ${liveAfter} (${liveNames})`);
+                liveBefore = live.count();
+                try {
+                    H.hollow(cube, 6, {
+                        engine,
+                        openFaces: ["bottom", { point: dir(0, -30, 0), normal: dir(0, -1, 0) }],
+                        onProgress: (stage, fraction) => {
+                            if (stage === "open-faces" && fraction === 0.5) cancelAtSecond = true;
+                        },
+                        shouldCancel: () => cancelAtSecond,
+                    });
+                } catch (error) {
+                    cancelled = error instanceof H.HollowCancelled;
+                }
+                liveAfter = live.count(); liveNames = live.names();
+            } finally { live.stop(); }
+            const afterCancel = run(cube, 6, {});
+            check(`T11 cancel between faces (${engine})`, cancelAtSecond && cancelled
+                && near(afterCancel.stats.volumeAfterMm3, 105408, 1e-6), `${cancelAtSecond} ${cancelled}`);
+            check(`T11 cancel leaks nothing (${engine})`, liveBefore === liveAfter,
+                `${liveBefore} vs ${liveAfter} (${liveNames})`);
+        }
 
         // T12 identity guard
         const plain = run(cube, 6, {}), empty = run(cube, 6, { openFaces: [], holes: [] });
@@ -493,9 +497,19 @@
             const t16 = run(funnel, 4, { openFaces: [{ point: dir(0, 0, 0), normal: dir(0, 0, -1) }] });
             const side = t16.stats.warnings.find((w) => w.code === "open-face-thin-side");
             check("T16 thin side warns", statusOk(t16.hollow) && !!side
-                && side.detail === "Face 1: the opening thins the side wall near this face; check the section view.",
+                && side.detail === "Open face 1 (Face 1): the opening thins the side wall near this face; check the section view.",
                 `${warningCodes(t16)}`);
         } finally { dispose(funnel); }
+
+        // T17 pocket shallower than the band: no false thin-side warning
+        let plate = null;
+        try {
+            plate = wasm.Manifold.cube([30, 7, 30], true);
+            const t17 = run(plate, 3, { openFaces: ["bottom"] });
+            check("T17 shallow pocket has no thin-side warning", statusOk(t17.hollow)
+                && t17.stats.openFaces[0].opened === true && !warningCodes(t17).includes("open-face-thin-side"),
+                `${warningCodes(t17)}`);
+        } finally { dispose(plate); }
     }
 
     let wasm, cube, refined, thinRefined;

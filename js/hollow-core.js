@@ -1245,9 +1245,12 @@
                                 const inset = own(ring.offset(-0.5 * wall));
                                 if (crossSectionArea(own(footprint.subtract(inset))) > 1) thinRim = true;
                             }
-                            const top = own(part.slice(zc + band));
-                            const reach = own(top.offset(0.25 * wall));
-                            if (crossSectionArea(own(footprint.subtract(reach))) > 1) thinSide = true;
+                            const topAt = Math.min(zc + band, part.boundingBox().max[2] - 0.01);
+                            const top = own(part.slice(topAt));
+                            if (!top.isEmpty()) {
+                                const reach = own(top.offset(0.25 * wall));
+                                if (crossSectionArea(own(footprint.subtract(reach))) > 1) thinSide = true;
+                            }
                         }
                         if (thinRim) {
                             warnings.push({
@@ -1258,13 +1261,13 @@
                         if (thinSide) {
                             warnings.push({
                                 code: "open-face-thin-side",
-                                detail: `Face ${n}: the opening thins the side wall near this face; check the section view.`,
+                                detail: `Open face ${n} (${label}): the opening thins the side wall near this face; check the section view.`,
                             });
                         }
                         if (openedCount < reaching.length) {
                             warnings.push({
                                 code: "open-face-partial",
-                                detail: `Face ${n}: one hollow pocket near this face could not be opened; it stays sealed.`,
+                                detail: `Open face ${n} (${label}): one hollow pocket near this face could not be opened; it stays sealed.`,
                             });
                         }
                         fact.openedAreaMm2 = openedArea;
@@ -1287,6 +1290,7 @@
         return control.stage("holes", () => {
             const Manifold = manifoldStatics();
             const cylinders = [], warnings = [];
+            const hollowBox = hollow.boundingBox();
             let merged = null, drilled = null;
             try {
                 holes.forEach((hole, index) => {
@@ -1300,8 +1304,10 @@
                     let cylinder = null, overlap = null;
                     try {
                         cylinder = raw.transform(frameFromAxis(origin, hole.direction).toWorld);
-                        overlap = hollow.intersect(cylinder);
-                        if (overlap.volume() > 1e-6) {
+                        const a = cylinder.boundingBox(), b = hollowBox;
+                        const boxesMeet = [0, 1, 2].every((k) => a.min[k] <= b.max[k] && a.max[k] >= b.min[k]);
+                        if (boxesMeet) overlap = hollow.intersect(cylinder);
+                        if (overlap && overlap.volume() > 1e-6) {
                             cylinders.push(cylinder);
                             cylinder = null;
                         } else {

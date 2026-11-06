@@ -2142,6 +2142,26 @@
     document.getElementById("bigprint-btn").addEventListener("click", enter);
     statsReset.addEventListener("click", resetImportScale);
     hollowApply.addEventListener("click", applyHollow);
+    document.getElementById("bp-glow-swatch").addEventListener("click", () => {
+        if (!CC.cutFlow.isEngineReady()) {
+            CC.toast("The cutting engine is still warming up — one moment.");
+            return;
+        }
+        let geometry = null;
+        try {
+            geometry = window.LampCore.buildGlowSwatch(window.HERSHEY_FONT);
+            const bytes = Core.serializeSTL(geometry);
+            download(new Blob([bytes], { type: "application/octet-stream" }), "glow-swatch.stl");
+            geometry.dispose();
+            geometry = null;
+            CC.toast("Glow swatch saved. Print it upright in your lamp filament with walls as perimeters only (no infill), then hold it about 100 mm from the LED strip.");
+        } catch (error) {
+            console.error(error);
+            CC.toast("Couldn't make the glow swatch — see the console.");
+        } finally {
+            if (geometry) geometry.dispose();
+        }
+    });
     cancelBtn.addEventListener("click", () => {
         if (hollowRunning) {
             CC.ops.cancel();

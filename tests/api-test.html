@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<canvas id="viewport" width="64" height="64"></canvas>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/three/STLLoader.js"></script>
+<script src="../vendor/fflate/fflate.min.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../assets/demo/voron-cube.stl.b64.js"></script>
+<script src="../js/cut-core.js"></script>
+<script src="../js/bigprint-core.js"></script>
+<script>
+/* A1 of the page API: reading and seeing (CC.api). Runs the real analysis-core.js,
+   ai-tools.js and api.js against a small stand-in for the app shell (pieces, ops,
+   a real WebGL renderer). Run via tools/check_api.py. Title: PASS or FAIL: <names>. */
+window.contextsMade = 0;
+const realGetContext = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
+    if (/webgl/.test(type)) window.contextsMade++;
+    return realGetContext.call(this, type, ...rest);
+};
+window.CurveCut = {
+    VERSION: "test",
+    pieces: [],
+    ops: { busyName: () => null },
+    renderer: new THREE.WebGLRenderer({ canvas: document.getElementById("viewport") }),
+    flyToView(name) { window.lastView = name; return true; },
+};
+</script>
+<script src="../js/analysis-core.js"></script>
+<script src="../js/ai-tools.js"></script>
+<script src="../js/api.js"></script>
+<script>
+(async () => {
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+    const rejects = async (promise) => { try { await promise; return null; } catch (e) { return e.message; } };
+
+    try {
+        const CC = window.CurveCut;
+        check("CC.api present", !!CC.api && typeof CC.api.invoke === "function");
+        await CutCore.init();
+
+        // ---- the tool list
+        const tools = window.CurveCutTools && window.CurveCutTools.tools;
+        const names = ["status", "list_pieces", "measure", "section_profile", "diagnose_mesh", "look", "set_view", "list_printers"];
+        check("tool list has the 8 reading tools",
+            Array.isArray(tools) && JSON.stringify(tools.map((t) => t.name)) === JSON.stringify(names));
+        check("every tool has a description and an object schema",
+            tools.every((t) => t.description.length > 20 && t.parameters.type === "object"));
+        check("JSON round trip of the list", JSON.stringify(JSON.parse(JSON.stringify(window.CurveCutTools))) === JSON.stringify(window.CurveCutTools));
+
+        const addPiece = (geometry, name, color) => {
+            const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color }));
+            mesh.name = name;
+            mesh.userData = {};
+            CC.pieces.push(mesh);
+            return mesh;
+        };
+        const reset = () => { CC.pieces.length = 0; window.dispatchEvent(new CustomEvent("curvecut:model-loaded")); };
+        const indexed = (geometry) => {
+            const w = CutCore.weldGeometry(geometry);
+            const g = new THREE.BufferGeometry();
+            g.setAttribute("position", new THREE.BufferAttribute(w.vertProperties, 3));
+            g.setIndex(new THREE.BufferAttribute(w.triVerts, 1));
+            return g;
+        };
+        const box = (x, y, z, cx, cy, cz) => new THREE.BoxGeometry(x, y, z).translate(cx, cy, cz).toNonIndexed();
+
+        // ---- empty scene
+        reset();
+        const empty = await CC.api.invoke("status");
+        check("status on an empty scene", empty.pieces === 0 && empty.model === null && empty.busy === null
+            && empty.api_version === "1.0", JSON.stringify(empty));
+        check("look on nothing says so", /Load a model/.test(await rejects(CC.api.invoke("look")) || ""));
+
+        // ---- the demo cube
+        const bin = atob(window.DEMO_MODEL_B64);
+        const packed = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) packed[i] = bin.charCodeAt(i);
+        const demo = new THREE.STLLoader().parse(fflate.unzlibSync(packed).buffer);
+        demo.rotateX(-Math.PI / 2);
+        const cube = indexed(demo);
+        cube.computeBoundingBox();
+        cube.translate(-(cube.boundingBox.min.x + cube.boundingBox.max.x) / 2, -cube.boundingBox.min.y,
+            -(cube.boundingBox.min.z + cube.boundingBox.max.z) / 2);
+        reset();
+        const cubeMesh = addPiece(cube, "Voron Cube (demo)", 0x9a9aa0);
+        cubeMesh.userData.sourceName = "Voron Cube (demo).stl";
+
+        const st = await CC.api.invoke("status");
+        check("status with a model", st.pieces === 1 && st.model === "Voron Cube (demo).stl" && st.where && "mode" in st, JSON.stringify(st));
+        const listed = await CC.api.invoke("list_pieces");
+        check("list_pieces row", listed.length === 1 && listed[0].id === "p1" && listed[0].visible === true
+            && /^#[0-9a-f]{6}$/.test(listed[0].color) && listed[0].size_mm.length === 3 && listed[0].volume_cm3 > 0,
+            JSON.stringify(listed));
+
+        const manifold = CutCore.toManifold(cube);
+        const manifoldVolume = manifold.volume();
+        manifold.delete();
+        const m = await CC.api.invoke("measure", {});
+        const row = m.pieces[0];
+        const off = Math.abs(row.volume_cm3 * 1000 - manifoldVolume) / manifoldVolume;
+        check("measure volume within 0.1% of Manifold", off < 0.001, `${row.volume_cm3 * 1000} vs ${manifoldVolume} (${(off * 100).toFixed(4)}%)`);
+        check("measure: demo cube is watertight, one shell, no open edges",
+            row.watertight === true && row.shells === 1 && row.open_edges === 0, JSON.stringify(row));
+        check("measure: the demo's best pose is no worse than its current one",
+            row.best_orientation.overhang_area_mm2 <= row.overhang.area_mm2 + 1e-6 && row.overhang.percent > 0, JSON.stringify(row.overhang));
+
+        // exact cube: 20 mm, so every number is checkable by hand
+        reset();
+        addPiece(indexed(box(20, 20, 20, 0, 10, 0)), "cube20", 0x6f95d4);
+        const c20 = (await CC.api.invoke("measure", { printer: "ender 3" }));
+        const r20 = c20.pieces[0];
+        check("20 mm cube numbers", r20.volume_cm3 === 8 && r20.surface_area_mm2 === 2400 && r20.triangles === 12
+            && r20.size_mm.join() === "20,20,20", JSON.stringify(r20));
+        check("printer name resolves and the cube fits", c20.printer === "Creality Ender 3" && c20.bed_mm.join() === "220,220,250" && r20.fits_bed === true);
+        check("bed_mm too small -> does not fit",
+            (await CC.api.invoke("measure", { bed_mm: [10, 100, 100] })).pieces[0].fits_bed === false);
+
+        // a ramp with a 45+ degree underside has overhang that flipping removes
+        const tilted = new THREE.BoxGeometry(40, 10, 10).rotateZ(Math.PI / 6).toNonIndexed();
+        tilted.computeBoundingBox();
+        tilted.translate(0, -tilted.boundingBox.min.y, 0);
+        reset();
+        addPiece(indexed(tilted), "tilted", 0xd47a72);
+        const tm = (await CC.api.invoke("measure", {})).pieces[0];
+        check("tilted bar has overhang now", tm.overhang.area_mm2 > 100 && tm.overhang.percent > 5, JSON.stringify(tm.overhang));
+        check("best orientation beats the current one", tm.best_orientation.overhang_area_mm2 < tm.overhang.area_mm2,
+            JSON.stringify(tm.best_orientation));
+
+        // ---- bad calls
+        check("unknown tool rejected", /Unknown tool/.test(await rejects(CC.api.invoke("cut_planar", {})) || ""));
+        check("unknown argument rejected", /unknown argument "foo"/.test(await rejects(CC.api.invoke("measure", { foo: 1 })) || ""));
+        check("bad enum rejected", /one of x, y, z/.test(await rejects(CC.api.invoke("section_profile", { axis: "w" })) || ""));
+        check("missing required rejected", /"view" is required/.test(await rejects(CC.api.invoke("set_view", {})) || ""));
+        check("unknown piece id names the real ones", /No piece "p9".*p1/.test(await rejects(CC.api.invoke("measure", { piece: "p9" })) || ""));
+
+        // ---- dumbbell: two plates joined by a thin bar
+        const plate = (cx) => CutCore.toManifold(box(20, 30, 30, cx, 15, 0));
+        const bar = CutCore.toManifold(box(40, 6, 6, 0, 15, 0));
+        const a = plate(-30), b = plate(30);
+        const union = a.add(bar).add(b);
+        const dumbbell = CutCore.toGeometry(union);
+        [a, b, bar, union].forEach((x) => x.delete());
+        reset();
+        addPiece(dumbbell, "dumbbell", 0x7db98a);
+        const prof = (await CC.api.invoke("section_profile", { axis: "x", samples: 20 })).slices;
+        const areas = prof.map((s) => s.area_mm2);
+        const neck = prof.reduce((lo, s) => (s.area_mm2 < lo.area_mm2 ? s : lo));
+        check("section_profile returns 20 slices from the low end",
+            prof.length === 20 && prof[0].at_mm < 3 && prof[19].at_mm > 77, JSON.stringify(prof.slice(0, 2)));
+        check("plates are 900 mm2, neck is 36 mm2", Math.abs(areas[0] - 900) < 1 && Math.abs(areas[19] - 900) < 1
+            && Math.abs(neck.area_mm2 - 36) < 1, `${areas[0]}, ${neck.area_mm2}`);
+        check("neck sits inside the bar (x 20 to 60)", neck.at_mm >= 20 && neck.at_mm <= 60, `at ${neck.at_mm}`);
+        check("dumbbell is a single island everywhere", prof.every((s) => s.islands === 1));
+
+        // ---- islands and holes
+        reset();
+        addPiece(indexed(box(10, 10, 10, -20, 5, 0)), "left", 0x6f95d4);
+        addPiece(indexed(box(10, 10, 10, 20, 5, 0)), "right", 0xd47a72);
+        const two = (await CC.api.invoke("section_profile", { axis: "z", samples: 4 })).slices;
+        check("two separate boxes cut along z are two islands", two.every((s) => s.islands === 2 && Math.abs(s.area_mm2 - 200) < 0.5), JSON.stringify(two[0]));
+        reset();
+        const outer = CutCore.toManifold(box(30, 30, 30, 0, 15, 0));
+        const hole = CutCore.toManifold(box(10, 40, 10, 0, 15, 0));
+        const holed = outer.subtract(hole);
+        addPiece(CutCore.toGeometry(holed), "holed", 0x9a9aa0);
+        [outer, hole, holed].forEach((x) => x.delete());
+        const through = (await CC.api.invoke("section_profile", { axis: "z", samples: 3 })).slices;
+        check("a through hole is subtracted from the area", through.every((s) => Math.abs(s.area_mm2 - 800) < 0.5 && s.islands === 1), JSON.stringify(through[1]));
+
+        // ---- a broken mesh
+        const broken = box(20, 20, 20, 0, 10, 0);
+        const posArr = broken.attributes.position.array;
+        const cutOne = new THREE.BufferGeometry();
+        cutOne.setAttribute("position", new THREE.BufferAttribute(posArr.slice(0, posArr.length - 9), 3)); // drop the last triangle
+        reset();
+        addPiece(indexed(cutOne), "holey", 0xd6bd6e);
+        const dg = (await CC.api.invoke("diagnose_mesh", {})).pieces[0];
+        check("diagnose finds the missing triangle", dg.open_edges === 3 && dg.hole_loops === 1 && dg.non_manifold_edges === 0, JSON.stringify(dg));
+        check("diagnose explains in plain language", dg.hints.some((h) => /open edge/.test(h) && /repair/i.test(h)), dg.hints.join(" | "));
+        check("measure says not watertight", (await CC.api.invoke("measure", {})).pieces[0].watertight === false);
+        reset();
+        addPiece(indexed(box(20, 20, 20, 0, 10, 0)), "ok", 0x9a9aa0);
+        check("a clean mesh gets a clean bill", (await CC.api.invoke("diagnose_mesh", {})).pieces[0].hints[0].startsWith("No defects"));
+        reset();
+        addPiece(indexed(box(20, 20, 20, 0, 10, 0)), "body", 0x9a9aa0);
+        addPiece(indexed(box(0.5, 0.5, 0.5, 40, 0.25, 0)), "speck", 0x9a9aa0);
+        const two2 = (await CC.api.invoke("diagnose_mesh", { piece: "p2" })).pieces;
+        check("diagnose one piece by id", two2.length === 1 && two2[0].id === "p2");
+
+        // ---- printers
+        const pr = await CC.api.invoke("list_printers");
+        check("list_printers mirrors BigPrintCore.PRINTERS", pr.length === BigPrintCore.PRINTERS.length
+            && pr[0].bed_mm.length === 3 && pr[0].brand === BigPrintCore.PRINTERS[0].brand);
+
+        // ---- look
+        reset();
+        addPiece(cube, "Voron Cube (demo)", 0x9a9aa0);
+        addPiece(indexed(box(10, 10, 10, 40, 5, 0)), "extra", 0xd47a72);
+        const contextsBefore = window.contextsMade;
+        const seen = await CC.api.invoke("look", { size: 512 });
+        const png = Uint8Array.from(atob(seen.png.$bytes), (c) => c.charCodeAt(0));
+        check("look: PNG signature", png[0] === 0x89 && png[1] === 0x50 && png[2] === 0x4e && png[3] === 0x47);
+        const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+        check("look: asked size (512 wide, 2x2 tiles)", bitmap.width === 512 && bitmap.height === 512 && seen.width === 512 && seen.height === 512, `${bitmap.width}x${bitmap.height}`);
+        const probe = document.createElement("canvas");
+        probe.width = bitmap.width; probe.height = bitmap.height;
+        const pctx = probe.getContext("2d");
+        pctx.drawImage(bitmap, 0, 0);
+        const px = pctx.getImageData(0, 0, probe.width, probe.height).data;
+        const colors = new Set();
+        let inked = 0;
+        for (let i = 0; i < px.length; i += 4) {
+            colors.add((px[i] >> 3) << 10 | (px[i + 1] >> 3) << 5 | (px[i + 2] >> 3));
+            if (Math.abs(px[i] - 0xf2) + Math.abs(px[i + 1] - 0xf2) + Math.abs(px[i + 2] - 0xf4) > 40) inked++;
+        }
+        check("look: picture is not blank", colors.size > 12 && inked / (px.length / 4) > 0.04, `${colors.size} colours, ${(100 * inked / (px.length / 4)).toFixed(1)}% inked`);
+        // each of the four tiles must hold the model, not just the first
+        const tileInk = [0, 1, 2, 3].map((t) => {
+            const tx = (t % 2) * 256, ty = Math.floor(t / 2) * 256;
+            const d = pctx.getImageData(tx + 20, ty + 20, 216, 216).data;
+            let n = 0;
+            for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - 0xf2) + Math.abs(d[i + 1] - 0xf2) + Math.abs(d[i + 2] - 0xf4) > 40) n++;
+            return n;
+        });
+        check("look: all four tiles drawn", tileInk.every((n) => n > 800), tileInk.join(", "));
+        check("look: legend names every piece by id and colour",
+            seen.legend.length === 2 && seen.legend[0].id === "p1" && seen.legend[1].color === "#d47a72", JSON.stringify(seen.legend));
+        check("look: views listed in order", seen.views.map((v) => v.view).join() === "front,right,top,iso", seen.views.map((v) => v.view).join());
+        check("look: front tile reads x right, z up", seen.views[0].right === "+x" && seen.views[0].up === "+z", JSON.stringify(seen.views[0]));
+        check("look made no WebGL context", window.contextsMade === contextsBefore, `${window.contextsMade - contextsBefore} new`);
+        const one = await CC.api.invoke("look", { views: ["top"], size: 200 });
+        check("look: one view, one tile", one.width === 200 && one.height === 200 && one.views.length === 1);
+        check("look: six views make 3 columns x 2 rows",
+            (await CC.api.invoke("look", { views: ["front", "back", "left", "right", "top", "bottom"], size: 300 })).height === 200);
+        const gl = CC.renderer.getContext();
+        check("app renderer survives look (context alive, target restored)", !gl.isContextLost() && CC.renderer.getRenderTarget() === null);
+        for (let i = 0; i < 8; i++) await CC.api.invoke("look", { size: 128 });
+        check("repeated looks still leak no context", window.contextsMade === contextsBefore);
+
+        // ---- set_view
+        const sv = await CC.api.invoke("set_view", { view: "top" });
+        check("set_view moves the camera", sv.ok === true && window.lastView === "top");
+    } catch (err) {
+        fails.push("exception: " + err.message);
+        log("EXCEPTION " + (err.stack || err));
+    }
+    document.title = fails.length ? "FAIL: " + fails.join("; ") : "PASS";
+})();
+</script>
+</body>
+</html>

@@ -15,6 +15,7 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 | `check_offline.py` | The double-click rule: no external URLs or module scripts, every local reference exists | no browser |
 | `check_smoke.py` | The app starts and loads a model with no page errors (`--root DIR` tests another tree, e.g. a release) | fast |
 | `check_pen.py`, `check_units.py` | Pen math; units and orientation | fast |
+| `check_api.py` | The page API step A1 (`CC.api` reading tools): tool list parses in Python, `tests/api-test.html`, and the real app answers `invoke` | medium |
 | `check_cut_engine.py`, `check_formats.py`, `check_repair.py`, `check_hollow.py` | Cut engine; OBJ/3MF; mesh repair; hollowing | fast to medium |
 | `check_bigprint.py` | Big Print grid math and cell cutter (plus the 6× Benchy acceptance when `test-assets/` has the Benchy) | medium to heavy |
 | `check_compute.py` | The compute worker (also runs `embed_worker.py --check`) | medium |

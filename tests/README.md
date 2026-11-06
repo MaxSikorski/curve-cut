@@ -14,6 +14,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `compute-test.html` | `check_compute.py` | The compute worker: fused repair, cache tokens, worker cuts match main-thread cuts, cancel, fallback |
 | `memory-test.html` | `check_memory.py` | Worker memory stats and the deferred recycle |
 | `property-test.html` | `check_property.py` | Random-seed invariants for cuts and hollows (volume, watertightness, kerf) |
+| `api-test.html` | `check_api.py` | Page API step A1 (`CC.api`): measure vs Manifold, section profile finds a dumbbell's neck, diagnosis, `look` PNG is the asked size and not blank with no WebGL leak; the check also parses `js/ai-tools.js` in Python and drives the real `index.html` |
 | `benchy-test.html` | `check_benchy.py` | Acceptance: 3DBenchy wavy cut, recut, watertight parts (needs `test-assets/3DBenchy.stl`) |
 | `bigprint-benchy-test.html` | `check_bigprint.py` | Acceptance: 6× Benchy through grid, kerf, connectors and engraved IDs (needs the Benchy) |
 

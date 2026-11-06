@@ -215,7 +215,7 @@
                                 const inWin = winOf(axis);
                                 const a = g.cuts[axis], b = lg.cuts[axis];
                                 if (inWin) {
-                                    const ok = a.length === b.length && a.every((v, k) => Math.abs(v - b[k]) <= 1e-9)
+                                    const ok = a.length === b.length && a.every((v, k) => v === b[k])
                                         && deepEq(g.room, lg.room) && deepEq(g.usable, lg.usable)
                                         && g.reserve === lg.reserve && g.counts[axis] === lg.counts[axis]
                                         && (!allIn || g.total === lg.total);

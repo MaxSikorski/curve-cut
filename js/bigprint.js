@@ -177,7 +177,7 @@
             if (!active || explodeGroup || !layout || layout.mode[axis] !== "auto") return;
             const eff = layout.nudge[axis];
             if (Math.abs(eff - (parseFloat(el.value) || 0)) > 1e-9) {
-                el.value = Math.trunc(eff * 10) / 10;
+                el.value = Math.trunc(eff * 100) / 100;
                 refresh();
             }
         });
@@ -1232,6 +1232,11 @@
         for (const [axis, el] of [["x", nudgeX], ["y", nudgeY], ["z", nudgeZ]]) {
             el.min = Math.ceil(layout.window[axis].lo) || 0;
             el.max = Math.floor(layout.window[axis].hi) || 0;
+            // a bed/printer/scale change can shrink the window under a typed value
+            if (layout.mode[axis] === "auto" && document.activeElement !== el
+                && Math.abs(layout.nudge[axis] - (parseFloat(el.value) || 0)) > 1e-9) {
+                el.value = Math.trunc(layout.nudge[axis] * 100) / 100;
+            }
         }
     }
 

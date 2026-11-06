@@ -854,7 +854,7 @@
 
     // Shared surface for the other modules (pen tool, cut engine).
     window.CurveCut = {
-        VERSION: "2.0.2b",
+        VERSION: "2.1.0",
         scene, camera, controls, renderer, canvas,
         drawActive: false,
         spline: null,

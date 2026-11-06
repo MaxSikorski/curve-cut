@@ -70,6 +70,7 @@
         const GAP = 0.15;
         const room = grid.room; // bed minus margin: parts WITH pegs must fit it
 
+        let boxHash = 0x811c9dc5;
         let parts = 0, engraved = 0, volSum = 0, allTight = true, allFit = true;
         let worstOver = 0;
         const tCut = performance.now();
@@ -82,6 +83,15 @@
             try { CutCore.toManifold(geo).delete(); } catch (e) { allTight = false; }
             geo.computeBoundingBox();
             const s = new THREE.Vector3();
+            {
+                const b = geo.boundingBox;
+                const str = `${cell.id}|${[b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z]
+                    .map((v) => v.toFixed(4)).join(",")}|`;
+                for (let i = 0; i < str.length; i++) {
+                    boxHash ^= str.charCodeAt(i);
+                    boxHash = Math.imul(boxHash, 0x01000193);
+                }
+            }
             geo.boundingBox.getSize(s);
             // pegs poke depth past the cell; the cell shrank by that much, so
             // the whole part still fits bed minus margin
@@ -95,6 +105,12 @@
         const cutS = (performance.now() - tCut) / 1000;
         solid.delete();
 
+        // part-box digest, recorded on unchanged main 8a68a0a (slivers phase 0, Step 0)
+        const BOX_GOLDEN = "385fef85";
+        const boxDigest = ((boxHash ^ parts) >>> 0).toString(16).padStart(8, "0");
+        log(`box digest ${boxDigest} (${parts} parts)`);
+        check("part boxes identical to main (box digest)", boxDigest === BOX_GOLDEN,
+            `digest ${boxDigest}, golden ${BOX_GOLDEN}`);
         log(`${parts} parts in ${cutS.toFixed(1)}s (${(cutS / parts).toFixed(2)}s/part), `
             + `${engraved} engraved`);
         check("multi-hundred-cell run produced a real fleet of parts", parts >= 60, String(parts));

@@ -559,6 +559,34 @@
             check("S1 no solid part reports a label pad", !anyPad);
         }
 
+        // S2 — same as S1 but with an in-window nudge (window is +-10 mm here), so
+        // the nudged cut positions must stay byte-identical across the wall-list rework.
+        const GOLDEN2 = "6eab47df"; // recorded on unchanged main 8a68a0a (slivers phase 0, Step 0)
+        {
+            const pS2 = { size: size100, bed: { w: 70, d: 70, h: 70 }, margin: 5, nudge: { x: 7, y: -4, z: 3 } };
+            const gridS2 = B.computeGrid(pS2);
+            const cellsS2 = [...B.gridCells(gridS2, size100, min100)];
+            const solidS2 = CutCore.toManifold(cube100);
+            const CONN_S2 = { size: 8, depth: 6, shape: "circle", tolR: 0.2, tolD: 0.1, spacing: 30 };
+            let hash = 0x811c9dc5, made = 0;
+            for (const cell of cellsS2) {
+                const g = CutCore.cutGridCell(solidS2, { ...cell, engraveId: cell.id }, 0.15, CONN_S2);
+                if (!g) continue;
+                made++;
+                const bytes = B.serializeSTL(g);
+                for (let i = 0; i < bytes.length; i++) {
+                    hash ^= bytes[i];
+                    hash = Math.imul(hash, 0x01000193);
+                }
+                g.dispose();
+            }
+            solidS2.delete();
+            const digest2 = (hash >>> 0).toString(16).padStart(8, "0");
+            log(`S2 digest ${digest2} (${made} parts)`);
+            check("S2 nudged solid parts are byte-identical to the recorded golden digest",
+                made === 8 && digest2 === GOLDEN2, `digest ${digest2}, golden ${GOLDEN2}, ${made} parts`);
+        }
+
         // M1 — manifest wording for the new columns and settings
         {
             const m1 = B.buildManifest(

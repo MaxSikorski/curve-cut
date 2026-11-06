@@ -196,6 +196,26 @@
         return Math.abs(s) / 2;
     };
 
+    /* A few points just inside a loop (edge midpoints nudged inward), so a loop that only
+       shares an edge with a neighbour is never mistaken for lying inside it. */
+    function interiorProbes(loop) {
+        let signed = 0;
+        for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+            signed += loop[j][0] * loop[i][1] - loop[i][0] * loop[j][1];
+        }
+        const nudge = Math.max(1e-6, 1e-3 * Math.sqrt(Math.abs(signed) / 2));
+        const flip = signed >= 0 ? 1 : -1;
+        const probes = [];
+        const stride = Math.max(1, Math.floor(loop.length / 5));
+        for (let i = 0; i < loop.length && probes.length < 5; i += stride) {
+            const [x0, y0] = loop[i], [x1, y1] = loop[(i + 1) % loop.length];
+            const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+            if (len === 0) continue;
+            probes.push([(x0 + x1) / 2 - flip * dy / len * nudge, (y0 + y1) / 2 + flip * dx / len * nudge]);
+        }
+        return probes.length ? probes : [loop[0]];
+    }
+
     function sectionProfile(mesh, axisName, samples) {
         const axis = AXIS[axisName];
         const { pos, tri } = toPrinter(mesh);
@@ -253,10 +273,22 @@
                 }
                 if (loop.length >= 3 && links.get(cur).includes(start)) loops.push(loop);
             }
-            const info = loops.map((loop) => ({ loop, area: loopArea(loop), depth: 0 }));
+            const info = loops.map((loop) => {
+                const box = [Infinity, Infinity, -Infinity, -Infinity];
+                for (const [x, y] of loop) {
+                    if (x < box[0]) box[0] = x;
+                    if (y < box[1]) box[1] = y;
+                    if (x > box[2]) box[2] = x;
+                    if (y > box[3]) box[3] = y;
+                }
+                return { loop, box, area: loopArea(loop), probes: interiorProbes(loop), depth: 0 };
+            });
             for (const a of info) {
                 for (const b of info) {
-                    if (b !== a && b.area > a.area && pointInLoop(a.loop[0][0], a.loop[0][1], b.loop)) a.depth++;
+                    if (b === a || b.area <= a.area || a.box[0] < b.box[0] || a.box[1] < b.box[1]
+                        || a.box[2] > b.box[2] || a.box[3] > b.box[3]) continue;
+                    const inside = a.probes.filter(([x, y]) => pointInLoop(x, y, b.loop)).length;
+                    if (inside * 2 > a.probes.length) a.depth++;
                 }
             }
             let area = 0, islands = 0;

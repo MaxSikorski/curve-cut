@@ -40,9 +40,39 @@
     /* A piece's triangles as {positions, index} (welded if it is a soup). */
     function meshOf(piece) {
         const g = piece.geometry;
-        if (g.getIndex()) return { positions: g.attributes.position.array, index: g.getIndex().array };
-        const w = window.CutCore.weldGeometry(g);
-        return { positions: w.vertProperties, index: w.triVerts };
+        let mesh;
+        if (g.getIndex()) mesh = { positions: g.attributes.position.array, index: g.getIndex().array };
+        else {
+            const w = window.CutCore.weldGeometry(g);
+            mesh = { positions: w.vertProperties, index: w.triVerts };
+        }
+        piece.updateMatrixWorld(true);
+        const e = piece.matrixWorld.elements;
+        const identity = piece.matrixWorld.equals(new THREE.Matrix4());
+        if (identity) return mesh;
+        // bake the piece's own scale/position (Big Print scales the model by its mesh) into world mm
+        const src = mesh.positions, positions = new Float32Array(src.length);
+        for (let i = 0; i < src.length; i += 3) {
+            const x = src[i], y = src[i + 1], z = src[i + 2];
+            positions[i] = e[0] * x + e[4] * y + e[8] * z + e[12];
+            positions[i + 1] = e[1] * x + e[5] * y + e[9] * z + e[13];
+            positions[i + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+        }
+        let index = mesh.index;
+        if (piece.matrixWorld.determinant() < 0) { // a mirror turns triangles inside out
+            index = index.slice();
+            for (let i = 0; i < index.length; i += 3) { const t = index[i + 1]; index[i + 1] = index[i + 2]; index[i + 2] = t; }
+        }
+        return { positions, index };
+    }
+
+    const worldBox = (piece) => { piece.updateMatrixWorld(true); return new THREE.Box3().setFromObject(piece); };
+
+    /* Why there is nothing to read: no model, or Big Print's exploded view hides it. */
+    function noVisibleReason() {
+        return CC.pieces.length && CC.bigPrintActive
+            ? "Big Print's exploded view is open — close it first."
+            : "No visible pieces. Load a model first.";
     }
 
     function mergedMesh(pieces) {
@@ -61,9 +91,7 @@
     }
 
     function sizeOf(piece) {
-        const g = piece.geometry;
-        g.computeBoundingBox();
-        const b = g.boundingBox;
+        const b = worldBox(piece);
         return [round(b.max.x - b.min.x), round(b.max.z - b.min.z), round(b.max.y - b.min.y)];
     }
 
@@ -108,14 +136,22 @@
     }
 
     function listPieces() {
+        CC.pieces.forEach((p) => p.updateMatrixWorld(true));
         return CC.pieces.map((p) => ({
             id: pidOf(p),
             name: p.name,
             visible: p.visible,
             color: colorOf(p),
             size_mm: sizeOf(p),
-            volume_cm3: round(window.CutCore.geometryVolume(p.geometry) / 1000),
+            volume_cm3: round(window.CutCore.geometryVolume(p.geometry) * Math.abs(p.matrixWorld.determinant()) / 1000),
         }));
+    }
+
+    function fitBed(size, bed) {
+        const ok = (s) => s.every((v, i) => v <= bed[i] + 0.01);
+        if (ok(size)) return { fits: true, how: "as is" };
+        if (ok([size[1], size[0], size[2]])) return { fits: true, how: "width and depth swapped" };
+        return { fits: false, how: null };
     }
 
     function measure(args) {
@@ -127,6 +163,7 @@
         } else if (args.bed_mm) bed = args.bed_mm;
         const out = chosen(args.piece).map((p) => {
             const m = Analysis.measure(meshOf(p));
+            const fit = bed ? fitBed(m.size_mm, bed) : null;
             return {
                 id: pidOf(p),
                 name: p.name,
@@ -139,7 +176,8 @@
                 open_edges: m.open_edges,
                 overhang: m.overhang,
                 best_orientation: m.best_orientation,
-                fits_bed: bed ? m.size_mm.every((v, i) => v <= bed[i] + 0.01) : null,
+                fits_bed: bed ? fit.fits : null,
+                fit_orientation: bed ? fit.how : null,
             };
         });
         return { printer, bed_mm: bed, pieces: out };
@@ -147,7 +185,7 @@
 
     function sectionProfile(args) {
         const visible = CC.pieces.filter((p) => p.visible);
-        if (!visible.length) throw new Error("No visible pieces to slice. Load a model first.");
+        if (!visible.length) throw new Error(noVisibleReason());
         const samples = args.samples || 40;
         return { axis: args.axis, slices: Analysis.sectionProfile(mergedMesh(visible), args.axis, samples) };
     }
@@ -202,40 +240,26 @@
        person's camera, scene and panels stay as they were. */
     async function look(args) {
         const visible = CC.pieces.filter((p) => p.visible);
-        if (!visible.length) throw new Error("No visible pieces to look at. Load a model first.");
+        if (!visible.length) throw new Error(noVisibleReason());
         const views = args.views || DEFAULT_LOOK;
         const size = Math.min(2048, Math.max(64, args.size || 768));
         const cols = views.length <= 1 ? 1 : views.length <= 4 ? 2 : 3;
         const rows = Math.ceil(views.length / cols);
         const tile = Math.floor(size / cols);
 
+        const renderer = CC.renderer;
+        if (renderer.getContext().isContextLost()) {
+            throw new Error("The graphics context was lost, so the model cannot be drawn. Reload the page.");
+        }
         const box = new THREE.Box3();
-        for (const p of visible) { p.geometry.computeBoundingBox(); box.union(p.geometry.boundingBox); }
+        for (const p of visible) box.union(worldBox(p));
         const center = box.getCenter(new THREE.Vector3());
         const radius = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, 1e-3);
         const half = radius * 1.2;
         const mmPerPx = (2 * half) / tile;
 
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0xf2f2f4);
-        scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a90, 1.0));
-        const key = new THREE.DirectionalLight(0xffffff, 0.7);
-        key.position.set(1, 2, 1.5);
-        scene.add(key);
-        const span = Math.max(10, Math.ceil(Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 2.5 / 10) * 10);
-        const grid = new THREE.GridHelper(span, span / 10, 0x9a9aa2, 0xd0d0d6);
-        scene.add(grid);
+        let target = null, grid = null;
         const materials = [];
-        for (const p of visible) {
-            const material = new THREE.MeshStandardMaterial({
-                color: p.material.color.getHex(), metalness: 0.05, roughness: 0.55, flatShading: true,
-            });
-            materials.push(material);
-            scene.add(new THREE.Mesh(p.geometry, material));
-        }
-
-        const renderer = CC.renderer;
-        const target = new THREE.WebGLRenderTarget(tile, tile, { samples: 4 });
         const canvas = document.createElement("canvas");
         canvas.width = tile * cols;
         canvas.height = tile * rows;
@@ -247,6 +271,28 @@
         const layout = [];
         const camera = new THREE.OrthographicCamera(-half, half, half, -half, 0.1, radius * 10);
         try {
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xf2f2f4);
+            scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a90, 1.0));
+            const key = new THREE.DirectionalLight(0xffffff, 0.7);
+            key.position.set(1, 2, 1.5);
+            scene.add(key);
+            const span = Math.max(10, Math.ceil(Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 2.5 / 10) * 10);
+            grid = new THREE.GridHelper(span, span / 10, 0x9a9aa2, 0xd0d0d6);
+            scene.add(grid);
+            for (const p of visible) {
+                const material = new THREE.MeshStandardMaterial({
+                    color: p.material.color.getHex(), metalness: 0.05, roughness: 0.55, flatShading: true,
+                });
+                materials.push(material);
+                const shown = new THREE.Mesh(p.geometry, material);
+                p.updateMatrixWorld(true);
+                shown.matrixAutoUpdate = false;
+                shown.matrix.copy(p.matrixWorld);
+                shown.matrixWorldNeedsUpdate = true;
+                scene.add(shown);
+            }
+            target = new THREE.WebGLRenderTarget(tile, tile, { samples: 4 });
             views.forEach((view, i) => {
                 const dir = new THREE.Vector3(...VIEW_DIRS[view]).normalize();
                 camera.position.copy(center).addScaledVector(dir, radius * 4);
@@ -289,10 +335,9 @@
             });
         } finally {
             renderer.setRenderTarget(null);
-            target.dispose();
+            if (target) target.dispose();
             materials.forEach((m) => m.dispose());
-            grid.geometry.dispose();
-            grid.material.dispose();
+            if (grid) { grid.geometry.dispose(); grid.material.dispose(); }
         }
         const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
         if (!blob) throw new Error("Could not encode the picture.");
@@ -319,7 +364,7 @@
                 if (value[name] === undefined) bad(`"${name}" is required`);
             }
             for (const name of Object.keys(value)) {
-                if (!schema.properties[name]) bad(`unknown argument "${name}" (allowed: ${Object.keys(schema.properties).join(", ") || "none"})`);
+                if (!Object.hasOwn(schema.properties, name)) bad(`unknown argument "${name}" (allowed: ${Object.keys(schema.properties).join(", ") || "none"})`);
                 check(schema.properties[name], value[name], `${path}.${name}`);
             }
         } else if (schema.type === "array") {

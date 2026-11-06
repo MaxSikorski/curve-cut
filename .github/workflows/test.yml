@@ -38,7 +38,7 @@ jobs:
         run: uv run --no-project python tools/check_smoke.py
       - name: Engine checks
         run: |
-          for c in pen units cut_engine formats repair hollow bigprint compute; do
+          for c in pen units cut_engine formats repair hollow bigprint compute api; do
             echo "::group::check_$c"
             uv run --no-project python tools/check_$c.py || { echo "::endgroup::"; echo "FAILED: check_$c"; exit 1; }
             echo "::endgroup::"

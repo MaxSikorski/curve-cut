@@ -221,6 +221,8 @@
                 && h.openFaces[0].label === "Bottom" && h.openFaces[0].opened === true && h.holes.count === 0,
                 JSON.stringify(h && { v: h.v, w: h.wallMm, l: h.lamp }));
             check("P5 CC.hollow.confirmed() is the receipt", CC.hollow.confirmed() === h);
+            check("P5 CC.hollow.status() is confirmed",
+                typeof CC.hollow.status === "function" && CC.hollow.status() === "confirmed");
             check("P5 view dock and pieces panel back",
                 await waitFor(() => visible("view-dock") && visible("pieces-panel"), 3000));
             const released5 = await waitFor(() => primed.size > 0 && leaked().length === 0, 6000);
@@ -242,6 +244,8 @@
             check("P6 undo: no chip note, not confirmed, units enabled",
                 !$("stats-detail").textContent.includes("hollow") && !CC.hollow.confirmed()
                 && !$("units-trigger").disabled);
+            check("P6 undo: CC.hollow.status() is none",
+                typeof CC.hollow.status === "function" && CC.hollow.status() === "none");
             $("redo-btn").click();
             await waitFor(() => CC.pieces[0] !== solid, 4000);
             check("P6 redo: hollow back with chip note",
@@ -443,6 +447,338 @@
             check("P14 blocked storage: panel and Preview still work", ok14 && !!previewMesh()
                 && pageErrors.length === 0, pageErrors.join("; "));
             escape();
+
+            // ===== lamp 1c: Big Print uses the confirmed hollow (B0-B9, B3b)
+            // P14 broke the frame's storage: start from a fresh frame
+            {
+                const oldCC = CC;
+                frame.src = frame.src;
+                await sleep(500);
+                await waitFor(() => frame.contentWindow && frame.contentWindow.CurveCut
+                    && frame.contentWindow.CurveCut !== oldCC, 30000);
+                await attach();
+            }
+            try { win.localStorage.removeItem("curvecut-hollow"); } catch (_) { /* ignore */ }
+            win.showSaveFilePicker = undefined;
+            const captures = [];
+            win.HTMLAnchorElement.prototype.click = function () {
+                captures.push({ name: this.download, href: this.href });
+            };
+            const hstatus = () => (typeof CC.hollow.status === "function" ? CC.hollow.status() : "no status()");
+            const toast = () => $("toast-live").textContent;
+            const settled = (el) => !win.gsap.isTweening(el);
+            const dockSettled = () => settled($("action-dock")) && settled($("hollow-panel"));
+            const hollowCube = async () => {
+                await load(cube(), "cube");
+                // the first load reveals the docks over about a second: let that finish before the panel hides them
+                await waitFor(() => visible("action-dock") && visible("view-dock"), 5000);
+                await waitFor(() => settled($("action-dock")) && settled($("view-dock")), 5000);
+                await openPanel();
+                setChecked("hollow-lamp", false);
+                setChecked("hollow-lamp", true); // wall 2.4 + Bottom, whatever was stored
+                await preview();
+            };
+            const confirmAndSettle = async () => {
+                $("hollow-confirm").click();
+                await waitFor(() => !visible("hollow-panel"), 4000);
+                await waitFor(dockSettled, 4000);
+            };
+            const readCapture = async (cap) =>
+                new Uint8Array(await (await win.fetch(cap.href)).arrayBuffer());
+            const stlVolume = (bytes) => signedVolume(new win.THREE.STLLoader().parse(
+                bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
+            const partNames = (zip) => Object.keys(zip).filter((n) => /^Part_.*\.stl$/.test(n)).sort();
+            const textOf = (bytes) => new win.TextDecoder().decode(bytes);
+            const setBed = (w, d, h, margin, gap) => {
+                setValue("bp-bed-w", w); setValue("bp-bed-d", d); setValue("bp-bed-h", h);
+                setValue("bp-margin", margin); setValue("bp-gap", gap);
+            };
+            const runExport = async () => {
+                captures.length = 0;
+                CC.bigPrint._lastExport = null;
+                await waitFor(() => CC.cutFlow.isEngineReady(), 60000);
+                // the Big Print warm-up can hold the coordinator for a moment: a refused click is retried
+                for (let attempt = 0; attempt < 10; attempt++) {
+                    if (!(await waitFor(idle, 60000))) log(`runExport: still busy with "${CC.ops.busyName()}" after 60 s`);
+                    await sleep(100);
+                    await waitFor(idle, 60000);
+                    $("bp-export").click();
+                    if (await waitFor(() => CC.ops.busyName() === "bigprint" || !!CC.bigPrint._lastExport, 1500)) break;
+                }
+                await waitFor(() => !!CC.bigPrint._lastExport || /failed|Stopped/.test(toast()), 300000);
+                await waitFor(idle, 60000);
+                const cap = captures[captures.length - 1];
+                const zip = cap ? win.fflate.unzipSync(await readCapture(cap)) : null;
+                return { result: CC.bigPrint._lastExport, zip, toast: toast(), zipName: cap && cap.name };
+            };
+            const enterBigPrint = async () => {
+                await waitFor(() => settled($("action-dock")), 4000);
+                // an automatic mesh check can start late and make the button refuse (toast): retry until it opens
+                for (let attempt = 0; attempt < 10; attempt++) {
+                    await waitFor(idle, 60000);
+                    await sleep(150);
+                    await waitFor(idle, 60000);
+                    $("bigprint-btn").click();
+                    if (await waitFor(() => CC.bigPrint.isActive(), 1500)) break;
+                }
+            };
+
+            // B0
+            await hollowCube();
+            const solidB = CC.pieces[0];
+            await waitFor(() => !visible("action-dock") && !visible("bigprint-btn"), 3000); // buttons ease their visibility
+            check("B0 unconfirmed: Big Print button not visible while the panel is open", !visible("bigprint-btn"),
+                `dock ${win.getComputedStyle($("action-dock")).visibility}/${win.getComputedStyle($("action-dock")).opacity}, `
+                + `button ${win.getComputedStyle($("bigprint-btn")).visibility}, open ${CC.hollow.isOpen()}`);
+            CC.bigPrint.enter();
+            check("B0 unconfirmed: enter() refused with the plain words",
+                !CC.bigPrint.isActive() && toast().includes("Hollow isn't confirmed yet: Confirm it in the Hollow panel"),
+                toast());
+            await confirmAndSettle();
+            const hollowB = CC.pieces[0];
+            check("B0 Confirm: status confirmed, solidGeometry is the old source geometry",
+                hstatus() === "confirmed" && hollowB !== solidB
+                && typeof CC.hollow.solidGeometry === "function" && CC.hollow.solidGeometry() === solidB.geometry, hstatus());
+
+            // B1
+            await enterBigPrint();
+            await waitFor(() => settled($("bigprint-panel")), 3000);
+            const note1 = $("bp-hollow-note") ? $("bp-hollow-note").textContent : "";
+            check("B1 confirmed enters: scale, slider and size boxes locked",
+                CC.bigPrint.isActive() && $("bp-scale").disabled && $("bp-scale-slider").disabled && $("bp-size").disabled);
+            check("B1 note names the hollow and the saving", note1.startsWith("Hollow 2.4 mm, open bottom · saves 81.3%"), note1);
+            check("B1 Hollow… button hidden", !!$("bp-hollow-open") && !visible("bp-hollow-open"));
+            check("B1 old hollow row gone", doc.getElementById("bp-hollow-on") === null
+                && doc.getElementById("bp-hollow-apply") === null && doc.getElementById("bp-glow-swatch") === null);
+            check("B1 desktop keeps the view dock", visible("view-dock"));
+
+            // B2
+            setValue("bp-scale", 3);
+            check("B2 lock holds: scale snaps back to 1, size 60",
+                CC.pieces[0].scale.x === 1 && $("bp-scale").value === "1" && $("bp-size").value === "60",
+                `${CC.pieces[0].scale.x} ${$("bp-scale").value} ${$("bp-size").value}`);
+
+            // B3
+            setChecked("bp-connectors", false);
+            setBed(40, 40, 40, 2, 0);
+            setChecked("bp-engrave", false);
+            $("bp-format").value = "stl";
+            const t3 = performance.now();
+            const e3 = await runExport();
+            const names3 = e3.zip ? partNames(e3.zip) : [];
+            const vol3 = names3.reduce((sum, n) => sum + stlVolume(e3.zip[n]), 0);
+            const man3 = e3.zip && e3.zip["manifest.txt"] ? textOf(e3.zip["manifest.txt"]) : "";
+            log(`B3 export ${Math.round(performance.now() - t3)} ms, ${names3.length} parts, volume ${vol3.toFixed(3)}`);
+            check("B3 hollow export: 8 parts in the zip", !!e3.result && e3.result.parts === 8 && names3.length === 8,
+                `${e3.result && e3.result.parts} / ${names3.length}`);
+            check("B3 summed part volume is the hollow volume (40490.496 +- 1)", near(vol3, 40490.496, 1), vol3.toFixed(3));
+            check("B3 manifest states the hollow",
+                man3.includes("Hollow:") && man3.includes("Wall: 2.4 mm") && man3.includes("Open faces: Bottom")
+                && man3.includes("Drilled holes: 0") && man3.includes("Material saved: 81.3%")
+                && !man3.includes("Asked to open"), man3.split("\n").filter((l) => /Hollow|Wall|Open|Drilled/.test(l)).join(" | "));
+            check("B3 done toast names the hollow choice", e3.toast.includes("hollow, 2.4 mm wall"), e3.toast);
+
+            // B4
+            setChecked("bp-connectors", true);
+            setChecked("bp-engrave", true);
+            const e4 = await runExport();
+            const man4 = e4.zip && e4.zip["manifest.txt"] ? textOf(e4.zip["manifest.txt"]) : "";
+            check("B4 blocks from the solid: manifest says so",
+                man4.includes("Hollow parts: connectors and ID labels sit on small solid blocks"),
+                man4.split("\n").filter((l) => /Hollow parts/.test(l)).join(" | "));
+            check("B4 no block failure, at least 8 parts",
+                !e4.toast.includes("couldn't be made") && !!e4.result && e4.result.parts >= 8,
+                `${e4.result && e4.result.parts} parts; ${e4.toast}`);
+
+            // B3b: a box, Lamp off, 6 mm wall, no open faces (ticket 1: the hollow choice agrees with the parts)
+            $("bp-cancel").click();
+            await waitFor(() => !CC.bigPrint.isActive(), 3000);
+            await load(new win.THREE.BoxGeometry(300, 600, 300).toNonIndexed(), "box");
+            const boxSolid = CC.pieces[0];
+            const setupBox = () => {
+                setChecked("bp-connectors", true);
+                setBed(350, 350, 340, 5, 0.15);
+                setValue("bp-conn-shape", "hexagon");
+                setValue("bp-conn-size", 10);
+                setValue("bp-conn-tol", 0.25);
+                setChecked("bp-engrave", true);
+                $("bp-format").value = "stl";
+            };
+            await enterBigPrint();
+            setupBox();
+            const t3b = performance.now();
+            const solidBox = await runExport();
+            const solidNames = solidBox.zip ? partNames(solidBox.zip) : [];
+            const solidVols = new Map(solidNames.map((n) => [n, stlVolume(solidBox.zip[n])]));
+            log(`B3b solid baseline ${Math.round(performance.now() - t3b)} ms, ${solidNames.length} parts`);
+            check("B3b solid baseline: parts and the solid-parts wording",
+                solidNames.length >= 2 && solidBox.toast.includes("solid parts")
+                && textOf(solidBox.zip["manifest.txt"]).includes("Hollow: none (solid parts)"),
+                `${solidNames.length} parts; ${solidBox.toast}`);
+            $("bp-cancel").click();
+            await waitFor(() => !CC.bigPrint.isActive(), 3000);
+            await waitFor(() => settled($("action-dock")), 4000);
+            await openPanel();
+            setChecked("hollow-lamp", true); setChecked("hollow-lamp", false);
+            setValue("hollow-wall", 6);
+            await preview();
+            await confirmAndSettle();
+            check("B3b box hollow confirmed, no open faces",
+                hstatus() === "confirmed" && CC.pieces[0].userData.hollow.wallMm === 6
+                && !CC.pieces[0].userData.hollow.openFaces.some((f) => f.opened === true));
+            await enterBigPrint();
+            setupBox();
+            const t3c = performance.now();
+            const hollowBox = await runExport();
+            const hollowNames = hollowBox.zip ? partNames(hollowBox.zip) : [];
+            const ratios = hollowNames.map((n) => stlVolume(hollowBox.zip[n]) / solidVols.get(n));
+            const manBox = hollowBox.zip ? textOf(hollowBox.zip["manifest.txt"]) : "";
+            log(`B3b hollow export ${Math.round(performance.now() - t3c)} ms, ${hollowNames.length} parts, `
+                + `ratios ${ratios.map((r) => r.toFixed(4)).join(", ")}`);
+            check("B3b hollow box: same parts as the solid baseline, every one under 25% of its solid volume",
+                hollowNames.length === solidNames.length && hollowNames.every((n) => solidVols.has(n))
+                && ratios.length > 0 && ratios.every((r) => r > 0 && r < 0.25),
+                `${hollowNames.length} parts; ratios ${ratios.map((r) => r.toFixed(4)).join(", ")}`);
+            check("B3b manifest: wall and connectors",
+                manBox.includes("Wall: 6 mm") && manBox.includes("Connectors: hexagon 10 mm, tolerance 0.25 mm"),
+                manBox.split("\n").filter((l) => /Wall|Connectors:/.test(l)).join(" | "));
+            check("B3b done toast says hollow, 6 mm wall", hollowBox.toast.includes("hollow, 6 mm wall"), hollowBox.toast);
+            $("bp-cancel").click();
+            await waitFor(() => !CC.bigPrint.isActive(), 3000);
+            await waitFor(() => settled($("action-dock")), 4000);
+            $("undo-btn").click();
+            await waitFor(() => CC.pieces[0] === boxSolid, 4000);
+            await enterBigPrint();
+            setupBox();
+            const soloBox = await runExport();
+            check("B3b after undoing the hollow: solid parts wording in toast and manifest",
+                soloBox.toast.includes("solid parts") && !soloBox.toast.includes("hollow, ")
+                && !!soloBox.zip && textOf(soloBox.zip["manifest.txt"]).includes("Hollow: none (solid parts)"),
+                soloBox.toast);
+            $("bp-cancel").click();
+            await waitFor(() => !CC.bigPrint.isActive(), 3000);
+
+            // back to the 60 mm cube for B5-B8: hollow it again
+            await hollowCube();
+            await confirmAndSettle();
+            const hollowC = CC.pieces[0];
+            await enterBigPrint();
+
+            // B5
+            let revertEvents = 0;
+            const onRevert = (e) => { if (e.detail && e.detail.source === "hollow-revert") revertEvents++; };
+            win.addEventListener("curvecut:pieces-changed", onRevert);
+            $("bp-cancel").click();
+            await waitFor(() => !CC.bigPrint.isActive(), 3000);
+            win.removeEventListener("curvecut:pieces-changed", onRevert);
+            check("B5 exit keeps the hollow: same mesh, still confirmed, no revert event",
+                !CC.bigPrint.isActive() && CC.pieces[0] === hollowC && hstatus() === "confirmed"
+                && revertEvents === 0, `revert events ${revertEvents}`);
+            await waitFor(() => settled($("action-dock")), 4000);
+
+            // B6: simplify/repair copy userData onto a NEW mesh with new geometry
+            CC.history.capture();
+            const copy = new win.THREE.Mesh(hollowC.geometry.clone(), hollowC.material);
+            Object.assign(copy.userData, hollowC.userData);
+            CC.scene.remove(hollowC); CC.scene.add(copy); CC.pieces[0] = copy;
+            win.dispatchEvent(new win.CustomEvent("curvecut:pieces-changed", { detail: { source: "simplify" } }));
+            check("B6 copied receipt on new geometry is out-of-date", hstatus() === "out-of-date", String(hstatus()));
+            $("bigprint-btn").click();
+            await sleep(300);
+            check("B6 Big Print refuses the out-of-date hollow",
+                !CC.bigPrint.isActive() && toast().includes("changed after you confirmed it"), toast());
+            $("undo-btn").click();
+            await waitFor(() => CC.pieces[0] === hollowC, 4000);
+            check("B6 undo brings the confirmed hollow back", hstatus() === "confirmed", String(hstatus()));
+
+            // B7
+            $("undo-btn").click();
+            await waitFor(() => CC.pieces[0] !== hollowC, 4000);
+            check("B7 undo again: solid, status none", hstatus() === "none", String(hstatus()));
+            await enterBigPrint();
+            await waitFor(() => settled($("bigprint-panel")), 3000);
+            check("B7 solid model: Hollow… visible, note says solid",
+                visible("bp-hollow-open") && $("bp-hollow-note").textContent.startsWith("Solid model."),
+                $("bp-hollow-note").textContent);
+            setValue("bp-scale", 2);
+            $("bp-hollow-open").click();
+            check("B7 scale 2: Hollow… refuses and stays in Big Print",
+                CC.bigPrint.isActive() && toast().includes("Set Scale back to 1×"), toast());
+            setValue("bp-scale", 1);
+            $("bp-hollow-open").click();
+            await waitFor(() => !CC.bigPrint.isActive() && visible("hollow-panel") && visible("view-dock") && dockSettled(), 4000);
+            await waitFor(() => settled($("view-dock")), 2000);
+            check("B7 scale 1: Big Print closes, panel open, action dock stays hidden, view dock back",
+                !CC.bigPrint.isActive() && visible("hollow-panel")
+                && win.getComputedStyle($("action-dock")).visibility === "hidden"
+                && visible("view-dock") && CC.pieces[0].scale.x === 1 && CC.hollow.isOpen(),
+                `active ${CC.bigPrint.isActive()}, panel ${visible("hollow-panel")}, dock ${win.getComputedStyle($("action-dock")).visibility}, `
+                + `view dock ${visible("view-dock")}, scale ${CC.pieces[0].scale.x}, open ${CC.hollow.isOpen()}`);
+            escape();
+            await waitFor(() => !visible("hollow-panel") && visible("action-dock"), 4000);
+            check("B7 Escape closes the panel, dock back", !visible("hollow-panel") && visible("action-dock"));
+
+            // B8
+            await openPanel();
+            await waitFor(() => CC.cutFlow.isEngineReady(), 60000);
+            captures.length = 0;
+            $("hollow-glow-swatch").click();
+            const swatch = captures[captures.length - 1];
+            const swatchBytes = swatch ? await readCapture(swatch) : new Uint8Array(0);
+            check("B8 glow swatch from the panel: one binary STL named glow-swatch.stl",
+                captures.length === 1 && !!swatch && swatch.name === "glow-swatch.stl"
+                && swatchBytes.length > 84 && (swatchBytes.length - 84) % 50 === 0,
+                `${captures.length} captures, ${swatchBytes.length} bytes`);
+            await waitFor(() => settled($("hollow-panel")), 3000); // closing mid-fade-in would leave the panel showing
+            escape();
+            await waitFor(() => dockSettled() && !visible("hollow-panel") && visible("action-dock"), 4000);
+
+            // B9 (ticket 2): every Big Print field reachable at phone and tablet sizes
+            for (const [fw, fh] of [[390, 844], [768, 1024]]) {
+                frame.style.width = fw + "px"; frame.style.height = fh + "px";
+                await sleep(400);
+                await load(cube(), `cube${fw}`);
+                await waitFor(() => visible("pieces-panel") && settled($("pieces-panel")) && settled($("action-dock")), 5000);
+                const piecesBefore = visible("pieces-panel");
+                // the visit popup can open by itself and would cover everything
+                if (visible("donate-modal")) { $("donate-close").click(); await sleep(600); }
+                await enterBigPrint();
+                await waitFor(() => visible("bigprint-panel") && settled($("bigprint-panel")) && settled($("pieces-panel")), 4000);
+                await waitFor(() => doc.querySelectorAll(".toast").length === 0, 8000);
+                if (visible("donate-modal")) { $("donate-close").click(); await waitFor(() => !visible("donate-modal"), 3000); }
+                const piecesYield = !visible("pieces-panel");
+                const viewHidden = !visible("view-dock");
+                const bad = [];
+                const controls = [...doc.querySelectorAll("#bigprint-panel input, #bigprint-panel select, #bigprint-panel button")]
+                    .filter((el) => el.getClientRects().length > 0 && win.getComputedStyle(el).visibility !== "hidden");
+                for (const el of controls) {
+                    el.scrollIntoView({ block: "center" });
+                    const r = el.getBoundingClientRect();
+                    const label = el.id || `${el.tagName.toLowerCase()}.${el.className}`;
+                    if (r.left < -0.5 || r.right > win.innerWidth + 0.5) { bad.push(`${label} outside x ${Math.round(r.left)}..${Math.round(r.right)}`); continue; }
+                    const hit = doc.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                    if (!hit || !(hit === el || el.contains(hit))) {
+                        bad.push(`${label} covered by ${hit ? (hit.id || hit.tagName.toLowerCase() + "." + hit.className) : "nothing (off screen)"}`);
+                    }
+                }
+                check(`B9 ${fw}x${fh}: every Big Print control inside the frame and not covered (${controls.length} checked)`,
+                    bad.length === 0, bad.join("; "));
+                check(`B9 ${fw}x${fh}: Cancel and Cut & Export among them`,
+                    controls.includes($("bp-cancel")) && controls.includes($("bp-export")));
+                check(`B9 ${fw}x${fh}: Pieces panel yields to Big Print`, piecesBefore && piecesYield,
+                    `before ${piecesBefore}, hidden in Big Print ${piecesYield}`);
+                if (fw <= 768) check(`B9 ${fw}x${fh}: view dock hidden while Big Print is active`, viewHidden);
+                setValue("bp-size", 120);
+                check(`B9 ${fw}x${fh}: typed Size took`,
+                    $("bp-size").value === "120" && Math.abs(CC.pieces[0].scale.x - 2) < 1e-9,
+                    `${$("bp-size").value} / scale ${CC.pieces[0].scale.x}`);
+                $("bp-cancel").click();
+                await waitFor(() => !CC.bigPrint.isActive() && settled($("pieces-panel")) && settled($("view-dock")), 4000);
+                check(`B9 ${fw}x${fh}: Pieces panel and view dock come back after Cancel`,
+                    await waitFor(() => visible("pieces-panel") && visible("view-dock"), 3000));
+            }
+            frame.style.width = ""; frame.style.height = "";
+            await sleep(300);
         } catch (error) {
             check("test harness did not throw", false, String(error && error.stack || error));
         }

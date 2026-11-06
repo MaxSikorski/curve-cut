@@ -38,17 +38,16 @@
     const elementIds = [
         "bigprint-panel", "action-dock", "view-dock", "bp-printer", "bp-bed-w",
         "bp-bed-d", "bp-bed-h", "bp-margin", "bp-scale-slider", "bp-scale",
-        "bp-size", "bp-nudge-x", "bp-nudge-y", "bp-nudge-z", "bp-hollow-on",
-        "bp-hollow-fields", "bp-hollow-wall", "bp-hollow-hint", "bp-hollow-apply",
-        "bp-hollow-teaser", "bp-hollow-status", "bp-status", "bp-export",
+        "bp-size", "bp-nudge-x", "bp-nudge-y", "bp-nudge-z", "bp-hollow-note",
+        "bp-hollow-open", "bp-status", "bp-export",
         "stats-reset", "bp-gap", "bp-connectors", "bp-conn-shape", "bp-conn-size",
         "bp-conn-tol", "bp-engrave", "bp-cancel", "bp-explode", "bp-explode-row",
         "bp-explode-amt", "bp-explode-note", "bp-format", "bigprint-btn",
-        "undo-btn", "redo-btn", "bp-glow-swatch", "bp-full-volume", "bp-full-volume-note",
+        "undo-btn", "redo-btn", "bp-full-volume", "bp-full-volume-note",
         "bp-conn-note",
     ];
     const selectIds = new Set(["bp-printer", "bp-conn-shape", "bp-format"]);
-    const buttonIds = new Set(["stats-reset", "bp-hollow-apply", "bp-glow-swatch", "bp-export", "bp-cancel",
+    const buttonIds = new Set(["stats-reset", "bp-hollow-open", "bp-export", "bp-cancel",
         "bp-explode", "bigprint-btn", "undo-btn", "redo-btn"]);
     for (const id of elementIds) {
         const element = document.createElement(selectIds.has(id) ? "select"
@@ -57,10 +56,7 @@
         if (element.tagName === "INPUT") element.type = "text";
         document.body.appendChild(element);
     }
-    document.getElementById("bp-hollow-on").type = "checkbox";
-    document.getElementById("bp-hollow-on").checked = false;
     document.getElementById("bp-full-volume").type = "checkbox";
-    document.getElementById("bp-hollow-wall").value = "2";
 
     CC.scene = new THREE.Scene();
     CC.pieces = [];

@@ -191,18 +191,10 @@
             <label class="bp-sub" for="bp-size" title="Longest side of the finished model">Size</label>
             <input type="number" id="bp-size" step="1" min="1"><span class="sc-unit">mm</span>
         </div>
-        <div class="sc-row">
-            <label class="sc-check" style="width:auto"><input type="checkbox" id="bp-hollow-on"> Hollow the model (save material)</label>
-            <span class="bp-hollow-teaser" id="bp-hollow-teaser"></span>
+        <div class="sc-row bp-hollow-row">
+            <span class="bp-hollow-note" id="bp-hollow-note" aria-live="polite"></span>
+            <button class="view-btn" id="bp-hollow-open" title="Leave Big Print and open the Hollow panel">Hollow…</button>
         </div>
-        <div class="sc-row bp-hollow-row" id="bp-hollow-fields" style="display:none">
-            <label for="bp-hollow-wall">Wall</label>
-            <input type="number" id="bp-hollow-wall" value="6" min="0.8" step="0.5"><span class="sc-unit">mm</span>
-            <span class="bp-hollow-hint" id="bp-hollow-hint">≈ 15 walls @ 0.4 mm</span>
-            <button class="view-btn" id="bp-glow-swatch" title="Print this test strip in your lamp filament to see how each wall thickness glows">Glow swatch STL</button>
-            <button class="view-btn view-btn-primary" id="bp-hollow-apply">Apply hollow</button>
-        </div>
-        <div class="sc-status bp-hollow-status" id="bp-hollow-status"></div>
         <div class="sc-row">
             <label title="Slide the cut grid to dodge fragile features">Nudge</label>
             <span class="bp-sub">W</span><input type="number" id="bp-nudge-x" step="1" value="0" title="Slide cuts along the width">
@@ -254,9 +246,10 @@
             <span class="sc-unit">mm</span>
             <span class="hollow-hint" id="hollow-wall-hint">≈ 15 walls @ 0.4 mm</span>
         </div>
-        <div class="sc-row">
+        <div class="sc-row hollow-lamp-row">
             <label class="sc-check" title="Thin walls that let light through, and an open bottom for the light. Use low-voltage (12/24 V) LEDs only."><input type="checkbox" id="hollow-lamp"> Lamp</label>
             <span class="hollow-hint">2.4 mm walls that glow, open bottom</span>
+            <button class="view-btn" id="hollow-glow-swatch" title="Print this test strip in your lamp filament to see how each wall thickness glows">Glow swatch STL</button>
         </div>
         <div class="sc-row">
             <span class="hollow-row-label" title="Faces left open: no wall across them">Open</span>

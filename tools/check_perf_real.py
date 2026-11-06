@@ -4,16 +4,18 @@
 Opens index.html#perfreal (see js/perf-real-hook.js) in real-time headless
 Chromium (tools/browser.py, Playwright) and drives
 test-assets/large-figure-hollow.stl through the real
-file input, simplify-decline, auto-repair, Big Print hollow-input, and curve
-cut paths. The fixture is local-only and is never copied into this script.
+file input, simplify-decline, auto-repair, Hollow panel (lamp wall: preview
+and Confirm, then Big Print entered on the confirmed hollow to check the scale
+lock), and curve cut paths. The fixture is local-only and is never copied into this script.
 
 The hook reports one strict title format:
-  PERFREAL load=<ms> repair=<ms> ltout=<ms> ltsan=<ms> hsave=<ms>
-           hsettle=<ms> cut=<ms> heap=<MB>
+  PERFREAL load=<ms> repair=<ms> ltout=<ms> ltsan=<ms> hprev=<ms>
+           hconf=<ms> cut=<ms> heap=<MB>
 
-Ratified budgets (DESIGN-PERF.md): repair <= 10000 ms, hollow savings <= 2000
-ms, hollow settled/warnings <= 10000 ms, worst unsanctioned long task <= 200
-ms, curve cut <= 20000 ms, and post-GC JS heap <= 250 MB. `ltsan` is reported
+Ratified budgets (DESIGN-PERF.md): repair <= 10000 ms, worst unsanctioned long
+task <= 200 ms, curve cut <= 20000 ms, and post-GC JS heap <= 250 MB. The two
+hollow budgets (preview <= 90 s, confirm <= 2 s) were approved by Max on
+2026-11-06 and replace the retired savings/settle steps. `ltsan` is reported
 for the sanctioned compute stages but has no pass/fail budget.
 
 Default advisory mode returns 0 for budget breaches after a completed
@@ -37,8 +39,8 @@ REAL_TIME_LIMIT_S = 600
 HARNESS_FAILURE = "harness did not complete — this is a defect, not a budget breach"
 
 REPAIR_BUDGET_MS = 10_000
-HOLLOW_SAVINGS_BUDGET_MS = 2_000
-HOLLOW_SETTLE_BUDGET_MS = 10_000
+HOLLOW_PREVIEW_BUDGET_MS = 90_000  # the design's phase-3 statue target; approved by Max 2026-11-06
+HOLLOW_CONFIRM_BUDGET_MS = 2_000   # approved by Max 2026-11-06
 LONG_OUTSIDE_BUDGET_MS = 200
 CUT_BUDGET_MS = 20_000
 HEAP_BUDGET_MB = 250
@@ -46,7 +48,7 @@ HEAP_BUDGET_MB = 250
 TITLE_RE = re.compile(
     r"PERFREAL load=(?P<load>-?\d+) repair=(?P<repair>-?\d+) "
     r"ltout=(?P<ltout>-?\d+) ltsan=(?P<ltsan>-?\d+) "
-    r"hsave=(?P<hsave>-?\d+) hsettle=(?P<hsettle>-?\d+) "
+    r"hprev=(?P<hprev>-?\d+) hconf=(?P<hconf>-?\d+) "
     r"cut=(?P<cut>-?\d+) heap=(?P<heap>-?(?:\d+(?:\.\d+)?))"
 )
 
@@ -63,8 +65,8 @@ def measurements(title: str):
 def budget_breaches(values):
     checks = [
         ("auto-repair", values["repair"], REPAIR_BUDGET_MS, "ms"),
-        ("hollow savings", values["hsave"], HOLLOW_SAVINGS_BUDGET_MS, "ms"),
-        ("hollow settle/warnings", values["hsettle"], HOLLOW_SETTLE_BUDGET_MS, "ms"),
+        ("hollow preview (lamp 2.4 mm, open bottom)", values["hprev"], HOLLOW_PREVIEW_BUDGET_MS, "ms"),
+        ("hollow confirm", values["hconf"], HOLLOW_CONFIRM_BUDGET_MS, "ms"),
         ("worst outside-sanctioned long task", values["ltout"], LONG_OUTSIDE_BUDGET_MS, "ms"),
         ("curve cut", values["cut"], CUT_BUDGET_MS, "ms"),
         ("post-GC JS heap slice", values["heap"], HEAP_BUDGET_MB, "MB"),
@@ -86,8 +88,8 @@ def print_measurements(values):
     print(f"  auto-repair (decline -> holes capped)    {values['repair']:>7} ms")
     print(f"  long task worst outside CC.ops           {values['ltout']:>7} ms")
     print(f"  long task worst inside CC.ops            {values['ltsan']:>7} ms")
-    print(f"  hollow savings text                      {values['hsave']:>7} ms")
-    print(f"  hollow warnings / settled status         {values['hsettle']:>7} ms")
+    print(f"  hollow preview (lamp 2.4 mm, open bottom) {values['hprev']:>7} ms")
+    print(f"  hollow confirm                           {values['hconf']:>7} ms")
     print(f"  curve cut                                {values['cut']:>7} ms")
     print(f"  JS heap post-GC (performance.memory JS slice)"
           f" {values['heap']:>7.1f} MB")

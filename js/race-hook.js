@@ -81,6 +81,7 @@
             await waitFor(() => !CC.ops.busy(), "the current operation to end");
         }
         if (CC.bigPrint.isActive()) CC.bigPrint.exit();
+        if (CC.hollow && CC.hollow.isOpen()) CC.hollow.close();
         newBtn.click();
         assert(CC.pieces.length === 0, "Start New did not clear the model");
     }
@@ -261,38 +262,49 @@
             assert(CC.pieces[0].scale.x === 1,
                 `scale-only cancel left model scale at ${CC.pieces[0].scale.x}`);
 
-            const beforeVolume = volumeOf(CC.pieces[0]);
-            const beforeTris = trisOf(CC.pieces[0]);
-            CC.bigPrint.enter();
-            assert(CC.bigPrint.isActive(), "Big Print mode did not open for restore test");
+            // a confirmed hollow belongs to the model: leaving Big Print keeps it
+            const setField = (id, value, type) => {
+                const el = document.getElementById(id);
+                if (typeof value === "boolean") el.checked = value; else el.value = value;
+                el.dispatchEvent(new Event(type, { bubbles: true }));
+            };
+            await waitFor(() => !CC.ops.busy(), "the cube load to settle");
+            CC.hollow.open();
+            assert(CC.hollow.isOpen(), "the Hollow panel did not open for the keep-hollow test");
+            setField("hollow-lamp", false, "change");
+            setField("hollow-open-bottom", false, "change");
+            setField("hollow-wall", 2, "input");
+            document.getElementById("hollow-preview").click();
+            await waitFor(() => !document.getElementById("hollow-confirm").disabled,
+                "the hollow preview to be ready");
+            document.getElementById("hollow-confirm").click();
+            await waitFor(() => CC.hollow.status() === "confirmed", "the hollow to be confirmed");
+            const hollowMesh = CC.pieces[0];
+            const hollowTris = trisOf(hollowMesh);
+            const hollowVolume = volumeOf(hollowMesh);
 
+            CC.bigPrint.enter();
+            assert(CC.bigPrint.isActive(), "Big Print mode did not open on the confirmed hollow");
+            assert(scaleInput.disabled, "the scale box was not locked on a hollow model");
             scaleInput.value = 3;
             scaleInput.dispatchEvent(new Event("input", { bubbles: true }));
-            const hollowOn = document.getElementById("bp-hollow-on");
-            hollowOn.checked = true;
-            hollowOn.dispatchEvent(new Event("change", { bubbles: true }));
-            document.getElementById("bp-hollow-wall").value = 2;
-            const hollowChanged = once("curvecut:pieces-changed",
-                (event) => event.detail.source === "hollow");
-            const hollowEnded = once("curvecut:op-ended",
-                (event) => event.detail.name === "hollow");
-            document.getElementById("bp-hollow-apply").click();
-            await Promise.all([hollowChanged, hollowEnded]);
-            assert(CC.pieces[0].userData.bigPrintHollow,
-                "restore fixture was not hollowed");
-
-            const hollowReverted = once("curvecut:pieces-changed",
-                (event) => event.detail.source === "hollow-revert");
+            assert(CC.pieces[0].scale.x === 1,
+                `a typed scale reached a hollow model (${CC.pieces[0].scale.x})`);
+            let revertEvents = 0;
+            const countRevert = (event) => {
+                if (event.detail && event.detail.source === "hollow-revert") revertEvents++;
+            };
+            window.addEventListener("curvecut:pieces-changed", countRevert);
             CC.bigPrint.exit();
-            await hollowReverted;
-            const restored = CC.pieces[0];
-            assert(restored.scale.x === 1, `cancel left model scale at ${restored.scale.x}`);
-            assert(!restored.userData.bigPrintHollow,
-                "cancel left bigPrintHollow metadata on the model");
-            assert(trisOf(restored) === beforeTris,
-                "cancel did not restore the pre-hollow triangle count");
-            assert(Math.abs(volumeOf(restored) - beforeVolume) < 1e-6,
-                "cancel did not restore the pre-hollow volume");
+            window.removeEventListener("curvecut:pieces-changed", countRevert);
+            assert(revertEvents === 0, "leaving Big Print reverted the confirmed hollow");
+            const kept = CC.pieces[0];
+            assert(kept === hollowMesh, "leaving Big Print replaced the hollow mesh");
+            assert(kept.userData.hollow, "leaving Big Print dropped the hollow receipt");
+            assert(trisOf(kept) === hollowTris, "leaving Big Print changed the hollow triangle count");
+            assert(Math.abs(volumeOf(kept) - hollowVolume) < 1e-6,
+                "leaving Big Print changed the hollow volume");
+            assert(kept.scale.x === 1, `leaving Big Print left model scale at ${kept.scale.x}`);
         }],
 
         ["save-picker-fallback", async () => {
@@ -363,9 +375,8 @@
             await sleep(500);
             await waitFor(() => !CC.ops.busy(), "load repair to end");
             // Headless Chromium has no idle periods, so the warm's idle callback
-            // only fires at its 1 s timeout, after the 180 ms hollow teaser has
-            // taken the op and primed the shared cache for it. Run idle callbacks
-            // promptly, as an idle visible tab does, so the warm owns its op.
+            // only fires at its 1 s timeout. Run idle callbacks promptly, as an
+            // idle visible tab does, so the warm starts at once and owns its op.
             const realIdle = window.requestIdleCallback;
             const realCancelIdle = window.cancelIdleCallback;
             window.requestIdleCallback = (callback) => setTimeout(() =>

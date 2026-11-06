@@ -25,6 +25,7 @@
     const cancelBtn = document.getElementById("hollow-cancel");
     const previewBtn = document.getElementById("hollow-preview");
     const confirmBtn = document.getElementById("hollow-confirm");
+    const swatchBtn = document.getElementById("hollow-glow-swatch");
 
     const STORAGE_KEY = "curvecut-hollow";
     const MIN_WALL_MM = 0.8;
@@ -43,6 +44,7 @@
     let token = null;        // { token, geometry, worker }, one per panel session
     let preview = null;      // { mesh, source, geometry, key, stats, readyText }
     let serial = 0;
+    const confirmedMeshes = new WeakMap(); // hollow mesh -> { geometry, solid }
 
     // ---------------------------------------------------------- formatting
 
@@ -132,9 +134,6 @@
         if (receipt) {
             return `This model is already hollow (${describe(receipt).replace(/^hollow /, "")}). `
                 + "Undo (⌘Z) to hollow it again with other settings.";
-        }
-        if (model && model.userData.bigPrintHollow) {
-            return "This model was already hollowed in Big Print. Undo (⌘Z) or reload the model to hollow it here.";
         }
         return null;
     }
@@ -460,6 +459,9 @@
             next.name = source.name;
             next.visible = true;
             next.userData = Object.assign({}, source.userData, { hollow: receipt });
+            // Big Print builds connector blocks and label pads from the solid shape; undo/redo bring back
+            // these same mesh objects, so the record stays valid.
+            confirmedMeshes.set(next, { geometry: next.geometry, solid: source.geometry });
             CC.history.capture();
             CC.scene.remove(source);
             CC.pieces[0] = next;
@@ -481,6 +483,50 @@
     function confirmed(mesh = CC.pieces[0]) {
         return (mesh && mesh.userData.hollow) || null;
     }
+
+    /* "none": no receipt. "confirmed": the mesh is the one Confirm made. "out-of-date": a receipt
+       copied onto a new mesh or geometry (simplify, repair), so it no longer describes the shape. */
+    function status(mesh = CC.pieces[0]) {
+        if (!confirmed(mesh)) return "none";
+        const record = confirmedMeshes.get(mesh);
+        return record && record.geometry === mesh.geometry ? "confirmed" : "out-of-date";
+    }
+
+    function solidGeometry(mesh = CC.pieces[0]) {
+        return status(mesh) === "confirmed" ? confirmedMeshes.get(mesh).solid : null;
+    }
+
+    // ---------------------------------------------------------- glow swatch
+
+    function download(blob, name) {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+    }
+
+    swatchBtn.addEventListener("click", () => {
+        if (!CC.cutFlow.isEngineReady()) {
+            CC.toast("The cutting engine is still warming up — one moment.");
+            return;
+        }
+        let geometry = null;
+        try {
+            geometry = window.LampCore.buildGlowSwatch(window.HERSHEY_FONT);
+            const bytes = window.BigPrintCore.serializeSTL(geometry);
+            download(new Blob([bytes], { type: "application/octet-stream" }), "glow-swatch.stl");
+            geometry.dispose();
+            geometry = null;
+            CC.toast("Glow swatch saved. Print it upright in your lamp filament with walls as perimeters only (no infill), then hold it about 100 mm from the LED strip.");
+        } catch (error) {
+            console.error(error);
+            CC.toast("Couldn't make the glow swatch — see the console.");
+        } finally {
+            if (geometry) geometry.dispose();
+        }
+    });
 
     // -------------------------------------------------------------- events
 
@@ -523,7 +569,7 @@
     });
 
     CC.hollow = {
-        open, close, confirmed, describe,
+        open, close, confirmed, describe, status, solidGeometry,
         isOpen: () => isOpenNow,
         busy: () => running,
         _test: { gridTooLargeMessage },

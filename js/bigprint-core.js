@@ -380,11 +380,18 @@ window.BigPrintCore = (() => {
         }
         L.push(`    Candidate cells: ${s.candidateCount === undefined ? rows.length : s.candidateCount}`);
         if (s.hollow) {
+            const open = s.hollow.openFaces || [];
+            const closed = s.hollow.closedFaces || [];
             L.push(`    Hollow:`);
             L.push(`      Wall: ${s.hollow.wallMm} mm`);
+            L.push(`      Open faces: ${open.length ? open.join(", ") : "none"}`);
+            if (closed.length) L.push(`      Asked to open but left closed: ${closed.join(", ")}`);
+            L.push(`      Drilled holes: ${s.hollow.holes || 0}`);
             L.push(`      Material saved: ${s.hollow.savedPct.toFixed(1)}%`);
             L.push(`      Engine: ${s.hollow.engineUsed}`);
             L.push(`      Fallback: ${s.hollow.fellBack ? "yes" : "no"}`);
+        } else {
+            L.push(`    Hollow: none (solid parts)`);
         }
         L.push(`  Part count: ${rows.length}`);
         L.push("");
@@ -528,24 +535,10 @@ window.BigPrintCore = (() => {
         };
     }
 
-    function hollowSavingsStory(savedPct, wallMm) {
-        if (!Number.isFinite(savedPct) || savedPct <= 5) {
-            return {
-                teaser: null,
-                status: "Not worth hollowing at this size and wall — the walls would fill the model.",
-            };
-        }
-        const rounded = Math.round(savedPct);
-        return {
-            teaser: savedPct >= 20 ? `could save ~${rounded}% material` : null,
-            status: `Hollowing could save ~${rounded}% of material at a ${wallMm} mm wall.`,
-        };
-    }
-
     return { PRINTERS, axisCuts, nudgeWindow, MIN_WALL_GAP_MM, cellLimit, gridFromWalls, checkWalls,
         resolveLayout, computeGrid, cellCount, gridCells, seamOf, seamGridPositions, seamPlanes,
         serializeSTL, serialize3MF, buildManifest, assemblyMapLayout, assemblyCellRect, assemblyScale, assemblyLabelPx,
         assemblyPanelTitle, explodedPosition, proxyTargetFor, explodeNoteText,
         colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,
-        partStory, hollowSavingsStory };
+        partStory };
 })();

@@ -967,8 +967,8 @@
         }
     }
 
-    function runMesh(source, arrays, wall, control, stageMs) {
-        let inner = null, hollow = null;
+    function runMesh(source, arrays, wall, control, stageMs, keepInner) {
+        let inner = null, hollow = null, keep = false;
         try {
             const moved = control.stage("mesh-qef", () => qefOffset(arrays, wall));
             const bvh = control.stage("mesh-bvh", () => makeBVH(arrays));
@@ -986,8 +986,10 @@
             if (validation.wallStats.rmsErrorMm > TRIPWIRE_RMS_MM) tripwireReasons.push("rms");
             if (validation.innerShells > shellLimit) tripwireReasons.push("shells");
             if (validation.wallStats.minMm < wall * TRIPWIRE_MIN_FACTOR) tripwireReasons.push("minimum");
+            keep = !!keepInner;
             return {
                 hollow,
+                inner: keep ? inner : null,
                 wallStats: validation.wallStats,
                 failed: tripwireReasons.length > 0,
                 tripwireReasons,
@@ -996,7 +998,7 @@
             dispose(hollow);
             throw error;
         } finally {
-            dispose(inner);
+            if (!keep) dispose(inner);
         }
     }
 
@@ -1017,8 +1019,8 @@
         capDirectedBoundaries(meshArrays, oriented.boundaryPairs, control);
     }
 
-    function runGrid(source, arrays, wall, control, stageMs) {
-        let grid = null, meshArrays = null, inner = null, hollow = null;
+    function runGrid(source, arrays, wall, control, stageMs, keepInner) {
+        let grid = null, meshArrays = null, inner = null, hollow = null, keep = false;
         const warnings = [];
         try {
             const spec = control.stage("grid-spec", () => gridSpec(arrays, wall));
@@ -1047,15 +1049,304 @@
             const bvh = control.stage("grid-bvh", () => makeBVH(arrays));
             const innerArrays = arraysFromManifold(inner);
             const wallStats = control.stage("grid-validate", () => sampleWallStats(innerArrays, bvh, wall));
-            return { hollow, wallStats, warnings };
+            keep = !!keepInner;
+            return { hollow, inner: keep ? inner : null, wallStats, warnings, gridH: spec.h };
         } catch (error) {
             dispose(hollow);
             throw error;
         } finally {
-            dispose(inner);
+            if (!keep) dispose(inner);
             grid = null;
             meshArrays = null;
         }
+    }
+
+    const HOLE_SEGMENTS = 48;
+    const DIRECTION_EPSILON = 1e-9;
+
+    const isVector = (value) => !!value && typeof value === "object"
+        && Number.isFinite(value.x) && Number.isFinite(value.y) && Number.isFinite(value.z);
+
+    function unitVector(vector) {
+        const length = Math.hypot(vector.x, vector.y, vector.z);
+        return { x: vector.x / length, y: vector.y / length, z: vector.z / length };
+    }
+
+    /* Bottom plane of a floor-seated (Y-up) model: centre of the bounding box
+       floor, normal pointing out of the model (down). */
+    function bottomPlane(manifold) {
+        const box = manifold.boundingBox();
+        return {
+            point: { x: (box.min[0] + box.max[0]) / 2, y: box.min[1], z: (box.min[2] + box.max[2]) / 2 },
+            normal: { x: 0, y: -1, z: 0 },
+        };
+    }
+
+    /* All coordinates in opts.openFaces and opts.holes are millimetres in the
+       frame of sourceManifold. In the worker that frame is AFTER payload.scale
+       is baked in, so callers must multiply clicked points by the scale. */
+    function parseFeatures(opts) {
+        const openFaces = [], holes = [];
+        if (opts.openFaces !== undefined) {
+            if (!Array.isArray(opts.openFaces)) throw new TypeError("Open faces must be a list.");
+            opts.openFaces.forEach((entry, i) => {
+                const n = i + 1;
+                if (entry === "bottom") { openFaces.push("bottom"); return; }
+                if (!entry || typeof entry !== "object" || !isVector(entry.point) || !isVector(entry.normal)) {
+                    throw new TypeError(`Open face ${n} needs a point and a direction, or "bottom".`);
+                }
+                if (Math.hypot(entry.normal.x, entry.normal.y, entry.normal.z) < DIRECTION_EPSILON) {
+                    throw new RangeError(`Open face ${n} has no direction.`);
+                }
+                openFaces.push({
+                    point: { x: entry.point.x, y: entry.point.y, z: entry.point.z },
+                    normal: unitVector(entry.normal),
+                });
+            });
+        }
+        if (opts.holes !== undefined) {
+            if (!Array.isArray(opts.holes)) throw new TypeError("Holes must be a list.");
+            opts.holes.forEach((entry, i) => {
+                const n = i + 1;
+                if (!entry || typeof entry !== "object" || !isVector(entry.point) || !isVector(entry.direction)) {
+                    throw new TypeError(`Hole ${n} needs a point and a direction.`);
+                }
+                if (Math.hypot(entry.direction.x, entry.direction.y, entry.direction.z) < DIRECTION_EPSILON) {
+                    throw new RangeError(`Hole ${n} has no direction.`);
+                }
+                if (!Number.isFinite(entry.diameterMm) || entry.diameterMm <= 0) {
+                    throw new RangeError(`Hole ${n} needs a diameter above 0 mm.`);
+                }
+                if (!Number.isFinite(entry.depthMm) || entry.depthMm <= 0) {
+                    throw new RangeError(`Hole ${n} needs a depth above 0 mm.`);
+                }
+                holes.push({
+                    point: { x: entry.point.x, y: entry.point.y, z: entry.point.z },
+                    direction: unitVector(entry.direction),
+                    diameterMm: entry.diameterMm,
+                    depthMm: entry.depthMm,
+                });
+            });
+        }
+        return { openFaces, holes };
+    }
+
+    /* Orthonormal frame with local +Z along `axis` (unit) and origin at `point`.
+       toLocal: world -> local; toWorld: local -> world. Column-major 4x4. */
+    function frameFromAxis(point, axis) {
+        const helper = Math.abs(axis.x) < 0.9 ? { x: 1, y: 0, z: 0 } : { x: 0, y: 1, z: 0 };
+        const u = unitVector({
+            x: helper.y * axis.z - helper.z * axis.y,
+            y: helper.z * axis.x - helper.x * axis.z,
+            z: helper.x * axis.y - helper.y * axis.x,
+        });
+        const v = {
+            x: axis.y * u.z - axis.z * u.y,
+            y: axis.z * u.x - axis.x * u.z,
+            z: axis.x * u.y - axis.y * u.x,
+        };
+        const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+        return {
+            toLocal: [
+                u.x, v.x, axis.x, 0,
+                u.y, v.y, axis.y, 0,
+                u.z, v.z, axis.z, 0,
+                -dot(u, point), -dot(v, point), -dot(axis, point), 1,
+            ],
+            toWorld: [
+                u.x, u.y, u.z, 0,
+                v.x, v.y, v.z, 0,
+                axis.x, axis.y, axis.z, 0,
+                point.x, point.y, point.z, 1,
+            ],
+        };
+    }
+
+    function crossSectionArea(section) {
+        if (typeof section.area === "function") return section.area();
+        let total = 0;
+        for (const ring of section.toPolygons()) {
+            for (let i = 0; i < ring.length; i++) {
+                const a = ring[i], b = ring[(i + 1) % ring.length];
+                total += (a[0] ?? a.x) * (b[1] ?? b.y) - (b[0] ?? b.x) * (a[1] ?? a.y);
+            }
+        }
+        return total / 2;
+    }
+
+    /* The Manifold static builders (extrude, cylinder) live on the module, not on
+       instances. CutCore owns the module; init has already run by the time any
+       manifold exists. */
+    function manifoldStatics() {
+        const module = root.CutCore && root.CutCore.manifoldModule
+            ? root.CutCore.manifoldModule() : null;
+        if (!module || !module.Manifold) throw new Error("Manifold module is not ready");
+        return module.Manifold;
+    }
+
+    /* Cut each plane open: project only the cavity layer just inside the plane
+       and extrude it straight out through the plane. Returns the new hollow
+       (the input `hollow` is NOT disposed; a different object means the caller
+       must dispose the old one). Every temporary is freed here. */
+    function applyOpenFaces(source, inner, hollow, faces, wall, gridH, control) {
+        return control.stage("open-faces", () => {
+            const facts = [], warnings = [];
+            let work = hollow;
+            try {
+                faces.forEach((face, index) => {
+                    control.progress("open-faces", index / faces.length);
+                    const n = index + 1;
+                    const resolved = face === "bottom" ? bottomPlane(source) : face;
+                    const label = face === "bottom" ? "Bottom" : `Face ${n}`;
+                    const fact = {
+                        index: n, label, point: resolved.point, normal: resolved.normal,
+                        openedAreaMm2: 0, opened: false,
+                    };
+                    facts.push(fact);
+                    const temps = [];
+                    const own = (value) => { temps.push(value); return value; };
+                    try {
+                        const into = { x: -resolved.normal.x, y: -resolved.normal.y, z: -resolved.normal.z };
+                        const frame = frameFromAxis(resolved.point, into);
+                        const above = own(own(inner.transform(frame.toLocal)).trimByPlane([0, 0, 1], 0));
+                        const parts = above.isEmpty() ? [] : above.decompose();
+                        parts.forEach(own);
+                        /* Each separate pocket gets its own floor height: only the layer just
+                           inside the plane is projected, never a whole cavity. */
+                        const reaching = parts
+                            .map((part) => ({ part, zc: part.boundingBox().min[2] }))
+                            .filter((entry) => entry.zc <= 2 * wall + 1);
+                        if (!reaching.length) {
+                            warnings.push({
+                                code: "open-face-no-cavity",
+                                detail: `Open face ${n} (${label}) doesn't reach the hollow inside, so it stays closed.`,
+                            });
+                            return;
+                        }
+                        const band = Math.max(0.5 * wall, gridH || 0);
+                        const margin = wall + 1;
+                        let ring = null, openedCount = 0, openedArea = 0, thinRim = false, thinSide = false;
+                        for (const { part, zc } of reaching) {
+                            control.check();
+                            const slab = own(part.trimByPlane([0, 0, -1], -(zc + band)));
+                            const footprint = own(slab.project());
+                            const area = crossSectionArea(footprint);
+                            if (!(area >= 1e-6)) continue;
+                            const tall = own(manifoldStatics().extrude(footprint, zc + band + margin));
+                            const prismLocal = own(tall.translate([0, 0, -margin]));
+                            const prism = own(prismLocal.transform(frame.toWorld));
+                            const next = work.subtract(prism);
+                            if (work !== hollow) dispose(work);
+                            work = next;
+                            openedCount++;
+                            openedArea += area;
+                            if (!ring) ring = own(own(source.transform(frame.toLocal)).slice(0.5));
+                            if (!ring.isEmpty()) {
+                                const inset = own(ring.offset(-0.5 * wall));
+                                if (crossSectionArea(own(footprint.subtract(inset))) > 1) thinRim = true;
+                            }
+                            const topAt = Math.min(zc + band, part.boundingBox().max[2] - 0.01);
+                            const top = own(part.slice(topAt));
+                            if (!top.isEmpty()) {
+                                const reach = own(top.offset(0.25 * wall));
+                                if (crossSectionArea(own(footprint.subtract(reach))) > 1) thinSide = true;
+                            }
+                        }
+                        if (thinRim) {
+                            warnings.push({
+                                code: "open-face-thin-rim",
+                                detail: `Open face ${n} (${label}) leaves a rim thinner than the wall near its edge.`,
+                            });
+                        }
+                        if (thinSide) {
+                            warnings.push({
+                                code: "open-face-thin-side",
+                                detail: `Open face ${n} (${label}): the opening thins the side wall near this face; check the section view.`,
+                            });
+                        }
+                        if (openedCount < reaching.length) {
+                            warnings.push({
+                                code: "open-face-partial",
+                                detail: `Open face ${n} (${label}): one hollow pocket near this face could not be opened; it stays sealed.`,
+                            });
+                        }
+                        fact.openedAreaMm2 = openedArea;
+                        fact.opened = openedCount === reaching.length;
+                    } finally {
+                        for (const temp of temps) dispose(temp);
+                    }
+                });
+            } catch (error) {
+                if (work !== hollow) dispose(work);
+                throw error;
+            }
+            return { hollow: work, facts, warnings };
+        });
+    }
+
+    /* Drill all holes with one union and one subtract. Same ownership rule as
+       applyOpenFaces: the input `hollow` is not disposed. */
+    function applyHoles(hollow, holes, control) {
+        return control.stage("holes", () => {
+            const Manifold = manifoldStatics();
+            const cylinders = [], warnings = [];
+            const hollowBox = hollow.boundingBox();
+            let merged = null, drilled = null;
+            try {
+                holes.forEach((hole, index) => {
+                    const r = hole.diameterMm / 2, lead = Math.max(1, r);
+                    const origin = {
+                        x: hole.point.x - hole.direction.x * lead,
+                        y: hole.point.y - hole.direction.y * lead,
+                        z: hole.point.z - hole.direction.z * lead,
+                    };
+                    const raw = Manifold.cylinder(hole.depthMm + lead, r, r, HOLE_SEGMENTS, false);
+                    let cylinder = null, overlap = null;
+                    try {
+                        cylinder = raw.transform(frameFromAxis(origin, hole.direction).toWorld);
+                        const a = cylinder.boundingBox(), b = hollowBox;
+                        const boxesMeet = [0, 1, 2].every((k) => a.min[k] <= b.max[k] && a.max[k] >= b.min[k]);
+                        if (boxesMeet) overlap = hollow.intersect(cylinder);
+                        if (overlap && overlap.volume() > 1e-6) {
+                            cylinders.push(cylinder);
+                            cylinder = null;
+                        } else {
+                            warnings.push({
+                                code: "hole-missed",
+                                detail: `Hole ${index + 1} doesn't touch the model; nothing was drilled.`,
+                            });
+                        }
+                    } finally {
+                        dispose(overlap); dispose(cylinder); dispose(raw);
+                    }
+                });
+                const count = cylinders.length;
+                if (!count) return { hollow, count, warnings };
+                control.check();
+                if (count === 1) {
+                    merged = cylinders.pop();
+                } else {
+                    try {
+                        merged = Manifold.union(cylinders);
+                    } catch (error) {
+                        merged = cylinders.shift();
+                        while (cylinders.length) {
+                            const next = merged.add(cylinders[0]);
+                            dispose(merged); dispose(cylinders.shift());
+                            merged = next;
+                        }
+                    }
+                }
+                drilled = hollow.subtract(merged);
+                return { hollow: drilled, count, warnings };
+            } catch (error) {
+                dispose(drilled);
+                throw error;
+            } finally {
+                dispose(merged);
+                for (const cylinder of cylinders) dispose(cylinder);
+            }
+        });
     }
 
     function validateInputs(sourceManifold, wallMm, opts) {
@@ -1067,11 +1358,12 @@
         if (engine !== "auto" && engine !== "mesh" && engine !== "grid") {
             throw new RangeError("opts.engine must be auto, mesh, or grid");
         }
-        return engine;
+        const features = parseFeatures(opts);
+        return { engine, openFaces: features.openFaces, holes: features.holes };
     }
 
     function hollow(sourceManifold, wallMm, opts = {}) {
-        const requestedEngine = validateInputs(sourceManifold, wallMm, opts);
+        const { engine: requestedEngine, openFaces, holes } = validateInputs(sourceManifold, wallMm, opts);
         const stageMs = {}, control = makeControl(opts, stageMs), started = now();
         const arrays = control.stage("prepare", () => arraysFromManifold(sourceManifold));
         const volumeBeforeMm3 = sourceManifold.volume();
@@ -1079,9 +1371,10 @@
             ? (arrays.triVerts.length / 3 <= MESH_TRIANGLE_LIMIT ? "mesh" : "grid")
             : requestedEngine;
         let attempt = null, fellBack = false, tripwireReasons = [];
+        const keepInner = openFaces.length > 0;
         if (selected === "mesh") {
             try {
-                attempt = runMesh(sourceManifold, arrays, wallMm, control, stageMs);
+                attempt = runMesh(sourceManifold, arrays, wallMm, control, stageMs, keepInner);
             } catch (error) {
                 if (error instanceof HollowCancelled) throw error;
                 attempt = null;
@@ -1089,22 +1382,42 @@
             }
             if (!attempt || attempt.failed) {
                 if (attempt) tripwireReasons = attempt.tripwireReasons.slice();
-                if (attempt) dispose(attempt.hollow);
-                attempt = runGrid(sourceManifold, arrays, wallMm, control, stageMs);
+                if (attempt) { dispose(attempt.hollow); dispose(attempt.inner); }
+                attempt = runGrid(sourceManifold, arrays, wallMm, control, stageMs, keepInner);
                 fellBack = true;
             }
         } else {
-            attempt = runGrid(sourceManifold, arrays, wallMm, control, stageMs);
+            attempt = runGrid(sourceManifold, arrays, wallMm, control, stageMs, keepInner);
         }
+        let current = attempt.hollow;
+        const kept = attempt.inner || null;
         try {
             control.check();
-            const volumeAfterMm3 = attempt.hollow.volume();
-            const savedPct = 100 * (1 - volumeAfterMm3 / volumeBeforeMm3);
             const warnings = attempt.warnings ? attempt.warnings.slice() : [];
             warnings.push(...wallWarnings(attempt.wallStats, wallMm));
+            let facts = [], openFacesRemovedMm3 = 0, holesStat = { count: 0, removedMm3: 0 };
+            if (openFaces.length) {
+                const before = current.volume();
+                const stepped = applyOpenFaces(sourceManifold, kept, current, openFaces, wallMm,
+                    attempt.gridH, control);
+                if (stepped.hollow !== current) { dispose(current); current = stepped.hollow; }
+                facts = stepped.facts;
+                warnings.push(...stepped.warnings);
+                openFacesRemovedMm3 = before - current.volume();
+            }
+            if (holes.length) {
+                const before = current.volume();
+                const stepped = applyHoles(current, holes, control);
+                if (stepped.hollow !== current) { dispose(current); current = stepped.hollow; }
+                warnings.push(...stepped.warnings);
+                holesStat = { count: stepped.count, removedMm3: before - current.volume() };
+            }
+            control.check();
+            const volumeAfterMm3 = current.volume();
+            const savedPct = 100 * (1 - volumeAfterMm3 / volumeBeforeMm3);
             stageMs.total = now() - started;
-            return {
-                hollow: attempt.hollow,
+            const result = {
+                hollow: current,
                 stats: {
                     engineUsed: fellBack ? "grid" : selected,
                     fellBack,
@@ -1115,12 +1428,17 @@
                     wallStats: attempt.wallStats,
                     warnings,
                     stageMs,
-                    triangles: attempt.hollow.numTri(),
+                    triangles: current.numTri(),
+                    openFaces: facts,
+                    openFacesRemovedMm3,
+                    holes: holesStat,
                 },
             };
-        } catch (error) {
-            dispose(attempt.hollow);
-            throw error;
+            current = null;
+            return result;
+        } finally {
+            dispose(current);
+            dispose(kept);
         }
     }
 
@@ -1170,6 +1488,7 @@
         wallWarnings,
         HollowCancelled,
         HollowGridTooLarge,
-        _test: { marchGrid, orientMesh, auditGridMesh, edgeKey },
+        bottomPlane,
+        _test: { marchGrid, orientMesh, auditGridMesh, edgeKey, HOLE_SEGMENTS },
     };
 })();

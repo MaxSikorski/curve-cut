@@ -194,6 +194,7 @@
             <label for="bp-hollow-wall">Wall</label>
             <input type="number" id="bp-hollow-wall" value="6" min="0.8" step="0.5"><span class="sc-unit">mm</span>
             <span class="bp-hollow-hint" id="bp-hollow-hint">≈ 15 walls @ 0.4 mm</span>
+            <button class="view-btn" id="bp-glow-swatch" title="Print this test strip in your lamp filament to see how each wall thickness glows">Glow swatch STL</button>
             <button class="view-btn view-btn-primary" id="bp-hollow-apply">Apply hollow</button>
         </div>
         <div class="sc-status bp-hollow-status" id="bp-hollow-status"></div>
@@ -423,6 +424,7 @@
     <script src="js/cut.js"></script>
     <script src="js/cutmodes.js"></script>
     <script src="js/hollow-core.js"></script>
+    <script src="js/lamp-core.js"></script>
     <script src="js/compute.js"></script>
     <script src="js/bigprint-core.js"></script>
     <script src="js/bigprint.js"></script>

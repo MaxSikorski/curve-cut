@@ -11,6 +11,7 @@ Classic scripts (no modules, no build step) loaded in order by `index.html`; eve
 | `cut-core.js` / `cut.js` | Cut engine (spline ribbon, Manifold booleans, connectors, hollow-seam blocks and label pads) / cut preview and apply |
 | `cutmodes.js` | Cut mode picker: Curve, Planar, Dovetail |
 | `hollow-core.js` | Hybrid hollowing engine (mesh-native and grid marching cubes) |
+| `lamp-core.js` | Printable lamp filament glow swatch geometry |
 | `bigprint-core.js` / `bigprint.js` | Big Print math (presets, grid, part IDs) / Big Print mode UI, hollow and streaming export |
 | `units-core.js` / `units.js` | Units and orientation math / the Units & Orientation panel |
 | `compute.js` | Dispatcher for the compute worker (repair, hollow, cut off the main thread), with main-thread fallback |

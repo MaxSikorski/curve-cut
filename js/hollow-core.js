@@ -697,6 +697,8 @@
             [[0, 1, 5, 4], [0, 9, 4, 8]], [[1, 2, 6, 5], [1, 10, 5, 9]],
             [[3, 2, 6, 7], [2, 10, 6, 11]], [[0, 3, 7, 4], [3, 11, 7, 8]],
         ];
+        const edgeFaceMask = new Int8Array(12);
+        faces.forEach((f, i) => f[1].forEach((e) => { edgeFaceMask[e] |= 1 << i; }));
         const adjA = new Int8Array(12), adjB = new Int8Array(12), edgeVert = new Int32Array(12);
         const loop = new Int8Array(12), gi = new Int32Array(8), gv = new Float32Array(8);
         const connect = (a, b) => {
@@ -784,8 +786,30 @@
                             previous = edge; edge = next;
                         }
                         if (count < 3) continue;
-                        for (let q = 1; q < count - 1; q++) {
-                            let a = edgeVert[loop[0]], b = edgeVert[loop[q]], c = edgeVert[loop[q + 1]];
+                        // Avoid face-flat fan triangles duplicated by the neighboring cube.
+                        let apex = -1, centerVertex = -1;
+                        if (count > 3) {
+                            for (let r = 0; r < count && apex < 0; r++) {
+                                let ok = true;
+                                for (let q = 1; q < count - 1 && ok; q++) {
+                                    const e0 = loop[r], e1 = loop[(r + q) % count], e2 = loop[(r + q + 1) % count];
+                                    if (edgeFaceMask[e0] & edgeFaceMask[e1] & edgeFaceMask[e2]) ok = false;
+                                }
+                                if (ok) apex = r;
+                            }
+                            if (apex < 0) {
+                                let sx = 0, sy = 0, sz = 0;
+                                for (let q = 0; q < count; q++) { const P = edgeVert[loop[q]] * 3; sx += vp[P]; sy += vp[P + 1]; sz += vp[P + 2]; }
+                                vp = growF32(vp, nv * 3 + 3);
+                                vp[nv * 3] = sx / count; vp[nv * 3 + 1] = sy / count; vp[nv * 3 + 2] = sz / count;
+                                centerVertex = nv++;
+                            }
+                        } else apex = 0;
+                        const triCount = centerVertex >= 0 ? count : count - 2;
+                        for (let q = 0; q < triCount; q++) {
+                            let a, b, c;
+                            if (centerVertex >= 0) { a = centerVertex; b = edgeVert[loop[q]]; c = edgeVert[loop[(q + 1) % count]]; }
+                            else { a = edgeVert[loop[apex]]; b = edgeVert[loop[(apex + q + 1) % count]]; c = edgeVert[loop[(apex + q + 2) % count]]; }
                             if (a === b || b === c || c === a) continue;
                             const A = a * 3, B = b * 3, C = c * 3;
                             const ux = vp[B] - vp[A], uy = vp[B + 1] - vp[A + 1], uz = vp[B + 2] - vp[A + 2];
@@ -802,7 +826,8 @@
                                 + px * py * (gv[6] - gv[2]) + (1 - px) * py * (gv[7] - gv[3]);
                             let direction = -(nnx * gx + nny * gy + nnz * gz);
                             if (Math.abs(direction) < 1e-12) {
-                                for (const loopEdge of [loop[0], loop[q], loop[q + 1]]) {
+                                const start = centerVertex >= 0 ? q : apex + q + 1;
+                                for (const loopEdge of [loop[apex >= 0 ? apex : q], loop[start % count], loop[(start + 1) % count]]) {
                                     const pair = edgeCorners[loopEdge];
                                     const inside = (cubeMask & (1 << pair[0])) ? pair[0] : pair[1];
                                     const outside = inside === pair[0] ? pair[1] : pair[0];
@@ -1128,5 +1153,6 @@
         wallWarnings,
         HollowCancelled,
         HollowGridTooLarge,
+        _test: { marchGrid, orientMesh },
     };
 })();

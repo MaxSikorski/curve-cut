@@ -44,10 +44,11 @@
         "stats-reset", "bp-gap", "bp-connectors", "bp-conn-shape", "bp-conn-size",
         "bp-conn-tol", "bp-engrave", "bp-cancel", "bp-explode", "bp-explode-row",
         "bp-explode-amt", "bp-explode-note", "bp-format", "bigprint-btn",
-        "undo-btn", "redo-btn",
+        "undo-btn", "redo-btn", "bp-glow-swatch", "bp-full-volume", "bp-full-volume-note",
+        "bp-conn-note",
     ];
     const selectIds = new Set(["bp-printer", "bp-conn-shape", "bp-format"]);
-    const buttonIds = new Set(["stats-reset", "bp-hollow-apply", "bp-export", "bp-cancel",
+    const buttonIds = new Set(["stats-reset", "bp-hollow-apply", "bp-glow-swatch", "bp-export", "bp-cancel",
         "bp-explode", "bigprint-btn", "undo-btn", "redo-btn"]);
     for (const id of elementIds) {
         const element = document.createElement(selectIds.has(id) ? "select"
@@ -58,6 +59,7 @@
     }
     document.getElementById("bp-hollow-on").type = "checkbox";
     document.getElementById("bp-hollow-on").checked = false;
+    document.getElementById("bp-full-volume").type = "checkbox";
     document.getElementById("bp-hollow-wall").value = "2";
 
     CC.scene = new THREE.Scene();

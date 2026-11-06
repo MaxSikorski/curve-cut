@@ -91,11 +91,14 @@
             input.value = value;
             input.dispatchEvent(new Event("input", { bubbles: true }));
         };
+        // connectors off FIRST (with the event): pegs reserve room in the grid
+        const connectors = document.getElementById("bp-connectors");
+        connectors.checked = false;
+        connectors.dispatchEvent(new Event("change", { bubbles: true }));
         set("bp-bed-w", 12);
         set("bp-bed-d", 30);
         set("bp-bed-h", 30);
         set("bp-margin", 1);
-        document.getElementById("bp-connectors").checked = false;
         document.getElementById("bp-engrave").checked = false;
         document.getElementById("bp-format").value = "stl";
         assert(!exportBtn.disabled, "small Big Print grid is not exportable");

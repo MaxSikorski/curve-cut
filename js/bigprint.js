@@ -1561,7 +1561,7 @@
     const engraveBox = document.getElementById("bp-engrave");
     const cancelBtn = document.getElementById("bp-cancel");
     // connectors change the cell size (pegs reserve room), so re-grid
-    connBox.addEventListener("change", refresh);
+    connBox.addEventListener("change", () => { refresh(); updateConnNote(); });
     connSize.addEventListener("input", refresh);
     engraveBox.addEventListener("change", updateConnNote);
 
@@ -1804,7 +1804,9 @@
     async function cutAndExport() {
         if (running) return;
         const p = params();
-        const g = grid;
+        // recompute: refresh() is frozen in Exploded view, so the cached grid
+        // can predate a bed/margin/nudge/connector edit made there
+        const g = Core.computeGrid(p);
         if (!g) return;
         const totalCells = Core.cellCount(g);
         if (totalCells > HARD_CELL_COUNT) {

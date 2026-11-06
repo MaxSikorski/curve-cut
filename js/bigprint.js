@@ -18,6 +18,8 @@
     const bedD = document.getElementById("bp-bed-d");
     const bedH = document.getElementById("bp-bed-h");
     const marginInput = document.getElementById("bp-margin");
+    const fullVolume = document.getElementById("bp-full-volume");
+    const fullVolumeNote = document.getElementById("bp-full-volume-note");
     const scaleSlider = document.getElementById("bp-scale-slider");
     const scaleInput = document.getElementById("bp-scale");
     const sizeInput = document.getElementById("bp-size");
@@ -164,7 +166,7 @@
     sizeInput.addEventListener("input", () =>
         setScale(Core.scaleForTarget(longestSide(), parseFloat(sizeInput.value) || 0), "size"));
 
-    for (const el of [marginInput, nudgeX, nudgeY, nudgeZ]) {
+    for (const el of [marginInput, fullVolume, nudgeX, nudgeY, nudgeZ]) {
         el.addEventListener("input", refresh);
     }
 
@@ -1115,7 +1117,7 @@
                 h: parseFloat(bedH.value) || 0,
             },
             margin: Math.max(parseFloat(marginInput.value) || 0, 0),
-            reserve: pegReach(),
+            reserve: fullVolume.checked ? 0 : pegReach(),
             nudge: {
                 x: parseFloat(nudgeX.value) || 0,
                 y: parseFloat(nudgeY.value) || 0,
@@ -1155,6 +1157,7 @@
     function refresh() {
         if (!active || explodeGroup) return; // frozen while exploded
         resetExportConfirmation();
+        fullVolumeNote.hidden = !fullVolume.checked;
         updateConnNote();
         model.scale.setScalar(hollowStates.has(model) ? 1 : scale);
         const p = params();
@@ -1265,6 +1268,7 @@
         printerSelect.value = "0";
         applyPreset();
         marginInput.value = 5;
+        fullVolume.checked = false;
         nudgeX.value = 0; nudgeY.value = 0; nudgeZ.value = 0;
         hollowWall.value = hollowState ? model.userData.bigPrintHollow.wallMm : 6;
         hollowOn.checked = !!hollowState;
@@ -1819,7 +1823,7 @@
         const footerLines = [
             `${s.name} — ×${s.scale}  ·  ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm  ·  ${occupied.size} parts`,
             `Front view, to scale: columns = letters (left→right), layers bottom-up; one panel per row (front row first)`,
-            `Printer ${s.printer}, margin ${s.margin} mm · gap ${s.gap} mm · connectors ${s.connectors}`,
+            `Printer ${s.printer}, margin ${s.margin} mm · gap ${s.gap} mm · connectors ${s.connectors}${s.fullVolume ? " · full build volume (pegs use the margin)" : ""}`,
         ];
         const edges = (axis, len) => [0, ...g.cuts[axis], len];
         const bx = edges("x", s.size.x), by = edges("y", s.size.y), bz = edges("z", s.size.z);
@@ -2081,6 +2085,7 @@
                 settings.seams = seams;
                 settings.seamsWithPegs = seamsWithPegs;
             }
+            if (fullVolume.checked) settings.fullVolume = true;
             settings.blocks = !!outerCtx;
             if (model.userData.bigPrintHollow) {
                 const hollow = model.userData.bigPrintHollow;

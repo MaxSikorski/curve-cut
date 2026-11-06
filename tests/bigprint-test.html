@@ -107,6 +107,11 @@
             JSON.stringify(gPeg.usable));
         check("reserve: an uncut axis keeps the full room (no seams, no pegs)",
             gPeg.cuts.z.length === 0 && gPeg.usable.z === 490, JSON.stringify(gPeg.usable));
+        // full build volume: the panel passes reserve 0, so cut-axis cells use the whole room
+        const gFull = B.computeGrid({ ...sv, reserve: 0 });
+        check("full build volume: reserve 0 gives cut-axis cells the full room (490)",
+            gFull.usable.x === 490 && gFull.usable.y === 490 && gFull.usable.z === 490 && gFull.reserve === 0,
+            JSON.stringify(gFull.usable));
         const segOk = (g, axis, total) => {
             const b = [0, ...g.cuts[axis], total];
             return b.slice(1).every((v, i) => v - b[i] + 9.6 <= g.room[axis] + 1e-9);

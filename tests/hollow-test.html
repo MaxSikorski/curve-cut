@@ -744,6 +744,10 @@
         const fan = [];
         for (let i = 1; i <= 200; i++) fan.push(0, i, i % 200 + 1);
         compareOrient(H, "fan 200", 201, Uint32Array.from(fan));
+        // fully degenerate triangle among ordinary ones
+        compareOrient(H, "degenerate (a,a,a)", 6, Uint32Array.from([0, 1, 2, 1, 0, 3, 4, 4, 4, 2, 1, 5]));
+        // vertex count far above the used count
+        compareOrient(H, "sparse vertices", 100000, Uint32Array.from([0, 99999, 50000, 99999, 0, 7, 7, 0, 50000]));
         check(`T19 flat edge table matches the BigInt reference (${oracle.cases} cases)`,
             oracle.firstMismatch === "", oracle.firstMismatch);
     }

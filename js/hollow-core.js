@@ -857,11 +857,12 @@
        share it with the audit is still open. */
     function buildEdgeTable(t, vertices, control) {
         const nt = t.length / 3;
-        if (nt >= 2147483648) throw new Error("orientation table limit exceeded");
+        // start[] holds prefix sums up to 3 * nt, and triangle * 2 + direction must fit 32 bits too.
+        if (3 * nt > 0xFFFFFFFF) throw new Error("orientation table limit exceeded");
         const start = new Uint32Array(vertices + 1), edges = new Uint32Array(6 * nt);
         const outOfRange = () => new Error("orientation table: vertex index out of range");
-        for (let q = 0; q < t.length; q += 3) {
-            if ((q & 49151) === 0) control.check();
+        for (let q = 0, tri = 0; q < t.length; q += 3, tri++) {
+            if ((tri & 16383) === 0) control.check();
             for (let k = 0; k < 3; k++) {
                 const a = t[q + k], b = t[q + (k + 1) % 3], lo = a < b ? a : b;
                 if (lo >= vertices || (a > b ? a : b) >= vertices) throw outOfRange();
@@ -873,13 +874,14 @@
             sum += start[v]; start[v] = sum;
         }
         start[vertices] = t.length;
-        for (let q = t.length - 3; q >= 0; q -= 3) {
-            if ((q & 49151) === 0) control.check();
+        for (let tri = nt - 1; tri >= 0; tri--) {
+            const q = tri * 3;
+            if ((tri & 16383) === 0) control.check();
             for (let k = 2; k >= 0; k--) {
                 const a = t[q + k], b = t[q + (k + 1) % 3];
                 const slot = --start[a < b ? a : b];
                 edges[2 * slot] = a < b ? b : a;
-                edges[2 * slot + 1] = (q / 3) * 2 + (a < b ? 0 : 1);
+                edges[2 * slot + 1] = tri * 2 + (a < b ? 0 : 1);
             }
         }
         for (let v = 0; v < vertices; v++) {

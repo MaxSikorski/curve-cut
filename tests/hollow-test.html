@@ -57,20 +57,18 @@
                 grid[x + 5 * y + 25 * z] = block[i++];
             }
             const marched = H._test.marchGrid(grid, spec, control);
+            compareOrient(H, "fan block", marched.vertices, marched.triVerts);
             const result = H._test.orientMesh(marched, control);
             fanDigest.add(result.boundaryPairs, result.overused, result.conflicts, marched.triVerts);
             return result;
         };
         const soup = { vertices: 6, triVerts: new Uint32Array([
             0, 1, 2, 1, 0, 3, 0, 1, 4, 1, 0, 5,
-        ]), misorientedEdges: 0 };
+        ]) };
         let auditError = "";
         try { H._test.auditGridMesh(soup, control); } catch (error) { auditError = error.message; }
         check("grid audit rejects four uses with zero misorientation",
             auditError === "grid mesh audit failed: overused=1, conflicts=0", auditError);
-        // With 10 grid nodes the old lo * 10 + hi gives 12 for both edges.
-        check("grid edge keys distinguish vertices beyond node count",
-            H._test.edgeKey(0, 12) !== H._test.edgeKey(1, 2));
         const clean = (result) => result.overused === 0 && result.conflicts === 0;
         const fixedResult = audit(fixed);
         check("grid fan fixed checkerboard", clean(fixedResult),
@@ -583,6 +581,284 @@
         check("T18 raw grid audit identical to main (G1-G5)", same, JSON.stringify(got));
     }
 
+    // Pre-PR reference: orientMesh as it was on main d8571e0 (64-bit packed records), test-only.
+    function orientMeshBigInt(arrays, control) {
+        const t = arrays.triVerts, nt = t.length / 3, nv = arrays.vertices;
+        if (nv > 2097151 || nt > 2097151) throw new Error("orientation pack limit exceeded");
+        const records = new BigUint64Array(t.length), vertexMask = (1n << 21n) - 1n;
+        let write = 0;
+        for (let q = 0; q < t.length; q += 3) {
+            if ((q & 16383) === 0) control.check();
+            for (const pair of [[t[q], t[q + 1]], [t[q + 1], t[q + 2]], [t[q + 2], t[q]]]) {
+                const lo = Math.min(pair[0], pair[1]), hi = Math.max(pair[0], pair[1]);
+                const direction = pair[0] < pair[1] ? 0n : 1n;
+                records[write++] = (BigInt(lo) << 43n) | (BigInt(hi) << 22n)
+                    | (BigInt(q / 3) << 1n) | direction;
+            }
+        }
+        records.sort();
+        const parent = new Int32Array(nt), rank = new Uint8Array(nt), parity = new Uint8Array(nt);
+        for (let i = 0; i < nt; i++) parent[i] = i;
+        const find = (value) => {
+            if (parent[value] === value) return value;
+            const old = parent[value], rootValue = find(old);
+            parity[value] ^= parity[old];
+            parent[value] = rootValue;
+            return rootValue;
+        };
+        let conflicts = 0, overused = 0;
+        const boundaryRecords = [];
+        for (let i = 0; i < records.length;) {
+            if ((i & 16383) === 0) control.check();
+            const key = records[i] >> 22n, start = i;
+            while (i < records.length && (records[i] >> 22n) === key) i++;
+            const count = i - start;
+            if (count === 1) {
+                const record = records[start];
+                boundaryRecords.push(Number(key >> 21n), Number(key & vertexMask),
+                    Number((record >> 1n) & 2097151n), Number(record & 1n));
+                continue;
+            }
+            if (count !== 2) { overused++; continue; }
+            const first = records[start], second = records[start + 1];
+            const a = Number((first >> 1n) & 2097151n), b = Number((second >> 1n) & 2097151n);
+            const relation = Number(first & 1n) ^ Number(second & 1n) ^ 1;
+            const rootA = find(a), parityA = parity[a], rootB = find(b), parityB = parity[b];
+            if (rootA === rootB) {
+                if ((parityA ^ parityB) !== relation) conflicts++;
+            } else if (rank[rootA] < rank[rootB]) {
+                parent[rootA] = rootB;
+                parity[rootA] = parityA ^ parityB ^ relation;
+            } else {
+                parent[rootB] = rootA;
+                parity[rootB] = parityA ^ parityB ^ relation;
+                if (rank[rootA] === rank[rootB]) rank[rootA]++;
+            }
+        }
+        for (let triangle = 0; triangle < nt; triangle++) {
+            if ((triangle & 16383) === 0) control.check();
+            find(triangle);
+            if (parity[triangle]) {
+                const q = triangle * 3, swap = t[q + 1];
+                t[q + 1] = t[q + 2]; t[q + 2] = swap;
+            }
+        }
+        const boundaryPairs = [];
+        for (let i = 0; i < boundaryRecords.length; i += 4) {
+            const lo = boundaryRecords[i], hi = boundaryRecords[i + 1];
+            const direction = boundaryRecords[i + 3] ^ parity[boundaryRecords[i + 2]];
+            boundaryPairs.push(direction === 0 ? lo : hi, direction === 0 ? hi : lo);
+        }
+        return { boundaryPairs, overused, conflicts };
+    }
+
+    // T19 bookkeeping: every case runs the reference and the flat table on copies of one input.
+    const oracle = { cases: 0, firstMismatch: "" };
+    function compareOrient(H, label, vertices, triVerts) {
+        const control = { check() {}, progress() {} };
+        const oldMesh = { vertices, triVerts: triVerts.slice() };
+        const newMesh = { vertices, triVerts: triVerts.slice() };
+        const oldResult = orientMeshBigInt(oldMesh, control);
+        const newResult = H._test.orientMesh(newMesh, control);
+        const same = oldResult.overused === newResult.overused
+            && oldResult.conflicts === newResult.conflicts
+            && oldResult.boundaryPairs.length === newResult.boundaryPairs.length
+            && oldResult.boundaryPairs.every((value, i) => value === newResult.boundaryPairs[i])
+            && oldMesh.triVerts.length === newMesh.triVerts.length
+            && oldMesh.triVerts.every((value, i) => value === newMesh.triVerts[i]);
+        oracle.cases++;
+        if (!same && !oracle.firstMismatch) {
+            oracle.firstMismatch = `${label}: old overused=${oldResult.overused} conflicts=${oldResult.conflicts}`
+                + ` boundary=${oldResult.boundaryPairs.length}; new overused=${newResult.overused}`
+                + ` conflicts=${newResult.conflicts} boundary=${newResult.boundaryPairs.length}`;
+        }
+        return { oldResult, newResult, same };
+    }
+
+    function seededRandom(seed) {
+        let state = seed >>> 0;
+        return () => {
+            state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+            return state / 4294967296;
+        };
+    }
+
+    function checkOrientOracle(wasm, H) {
+        const ICO = [
+            [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+            [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+            [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+            [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+        ];
+        let cavitySource = null, flat = null, round = null;
+        const marchedCases = [];
+        try {
+            marchedCases.push(["G1", rawMarch(H, cube, 6)]);
+            round = refinedIcosphere(wasm, 20, 6);
+            marchedCases.push(["G2", rawMarch(H, round, 6)]);
+            flat = refinedIcosphere(wasm, 20, 6, 0.2);
+            marchedCases.push(["G3", rawMarch(H, flat, 6)]);
+            const first = translated(wasm.Manifold.sphere(6, 24), [-12, 0, 0]);
+            const second = translated(wasm.Manifold.sphere(6, 24), [12, 0, 0]);
+            cavitySource = subtractAll(wasm.Manifold.cube([60, 40, 40], true), [first, second]);
+            marchedCases.push(["G4", rawMarch(H, cavitySource, 2)]);
+        } finally { dispose(cavitySource); dispose(flat); dispose(round); }
+        for (const [label, marched] of marchedCases) {
+            compareOrient(H, label, marched.vertices, marched.triVerts);
+        }
+        // 500 seeded random soups, some with repeated vertices and repeated triangles
+        for (let seed = 1; seed <= 500; seed++) {
+            const random = seededRandom(seed * 7919);
+            const vertices = 3 + Math.floor(random() * 38), count = 1 + Math.floor(random() * 80);
+            const list = [];
+            for (let i = 0; i < count; i++) {
+                const tri = [Math.floor(random() * vertices), Math.floor(random() * vertices),
+                    Math.floor(random() * vertices)];
+                if (random() < 0.1) tri[1 + Math.floor(random() * 2)] = tri[0];
+                const copies = random() < 0.15 ? 2 + Math.floor(random() * 3) : 1;
+                for (let c = 0; c < copies; c++) list.push(...tri);
+            }
+            compareOrient(H, `soup ${seed}`, vertices, Uint32Array.from(list));
+        }
+        // closed icosahedron with random triangles flipped
+        for (let seed = 1; seed <= 50; seed++) {
+            const random = seededRandom(seed * 104729);
+            const list = [];
+            for (const face of ICO) list.push(...(random() < 0.4 ? [face[0], face[2], face[1]] : face));
+            const result = compareOrient(H, `icosahedron ${seed}`, 12, Uint32Array.from(list));
+            if (result.newResult.overused || result.newResult.conflicts || result.newResult.boundaryPairs.length) {
+                oracle.firstMismatch = oracle.firstMismatch || `icosahedron ${seed} not closed and consistent`;
+            }
+        }
+        // Moebius strip: conflicts expected
+        const strip = [], rungs = 20;
+        for (let i = 0; i < rungs; i++) {
+            const next = (i + 1) % rungs, twist = next === 0;
+            const a = 2 * i, b = 2 * i + 1;
+            const c = twist ? 1 : 2 * next, d = twist ? 0 : 2 * next + 1;
+            strip.push(a, c, d, a, d, b);
+        }
+        const moebius = compareOrient(H, "moebius", 2 * rungs, Uint32Array.from(strip));
+        if (!(moebius.newResult.conflicts > 0)) oracle.firstMismatch = oracle.firstMismatch || "moebius has no conflicts";
+        // a 200-triangle fan: one bucket far above the insertion-sort size
+        const fan = [];
+        for (let i = 1; i <= 200; i++) fan.push(0, i, i % 200 + 1);
+        compareOrient(H, "fan 200", 201, Uint32Array.from(fan));
+        check(`T19 flat edge table matches the BigInt reference (${oracle.cases} cases)`,
+            oracle.firstMismatch === "", oracle.firstMismatch);
+    }
+
+    // A torus (or Klein bottle) of W x H quads, two triangles each; vertex numbers are doubled
+    // so the odd numbers stay unused and the vertex count passes 2,097,151 as well.
+    function gridSurface(W, H, klein, scale = 2) {
+        const triVerts = new Uint32Array(W * H * 6);
+        const vertex = (i, j) => {
+            if (i === W) return klein ? scale * (((H - j) % H + H) % H) : scale * (j % H);
+            return scale * ((i % W) * H + (j % H));
+        };
+        let write = 0;
+        for (let i = 0; i < W; i++) for (let j = 0; j < H; j++) {
+            const a = vertex(i, j), b = vertex(i + 1, j), c = vertex(i + 1, j + 1), d = vertex(i, j + 1);
+            triVerts[write++] = a; triVerts[write++] = b; triVerts[write++] = c;
+            triVerts[write++] = a; triVerts[write++] = c; triVerts[write++] = d;
+        }
+        return triVerts;
+    }
+
+    function auditMessage(H, mesh) {
+        const control = { check() {}, progress() {} };
+        try { H._test.auditGridMesh(mesh, control); } catch (error) { return error.message; }
+        return "";
+    }
+
+    function checkLargeAudit(H) {
+        const W = 1050, N = 1050, nt = 2 * W * N, vertices = 2 * W * N;
+        const control = { check() {}, progress() {} };
+        const clean = gridSurface(W, N, false);
+        const sameArray = (x, y) => x.length === y.length && x.every((value, i) => value === y[i]);
+
+        // T20a clean torus
+        let oriented = null, orientError = "";
+        const copyA = { vertices, triVerts: clean.slice(), vertProperties: null };
+        try { oriented = H._test.orientMesh(copyA, control); } catch (error) { orientError = error.message; }
+        check("T20a orientMesh accepts a 2.2 M-triangle closed mesh", !!oriented && oriented.overused === 0
+            && oriented.conflicts === 0 && oriented.boundaryPairs.length === 0 && sameArray(copyA.triVerts, clean),
+            orientError || (oriented && `${oriented.overused}/${oriented.conflicts}`));
+        const copyB = { vertices, triVerts: clean.slice(), vertProperties: null };
+        const started = performance.now();
+        const auditError = auditMessage(H, copyB);
+        const auditMs = performance.now() - started;
+        log(`T20a audit time ${auditMs.toFixed(0)} ms for ${nt} triangles`);
+        check("T20a audit of 2.2 M triangles passes within 10 s", auditError === ""
+            && sameArray(copyB.triVerts, clean) && auditMs <= 10000, `${auditError} ${auditMs.toFixed(0)} ms`);
+
+        // T20b memory budget and neighbour-readiness
+        let table = H._test.buildEdgeTable(clean, vertices, control);
+        const bytes = table.start.byteLength + table.edges.byteLength;
+        const expected = 4 * (vertices + 1) + 24 * nt;
+        const degree = new Uint8Array(vertices);
+        for (let lo = 0; lo < vertices; lo++) {
+            let previous = -1;
+            for (let s = table.start[lo]; s < table.start[lo + 1]; s++) {
+                const hi = table.edges[2 * s];
+                if (hi !== previous) { degree[lo]++; degree[hi]++; previous = hi; }
+            }
+        }
+        let wrong = 0;
+        for (let v = 0; v < vertices; v++) if (degree[v] !== (v % 2 === 0 ? 6 : 0)) wrong++;
+        log(`edge table ${bytes} bytes (${(bytes / nt).toFixed(1)} per triangle)`);
+        check("T20b edge table memory is 4(V+1)+24T bytes and every vertex has 6 neighbours",
+            bytes === expected && wrong === 0, `${bytes} vs ${expected}; ${wrong} vertices off`);
+        table = null;
+
+        // T20c one flipped triangle
+        const flipped = clean.slice(), at = 3 * 123457;
+        const swap = flipped[at + 1]; flipped[at + 1] = flipped[at + 2]; flipped[at + 2] = swap;
+        const meshC = { vertices, triVerts: flipped, vertProperties: null };
+        const errorC = auditMessage(H, meshC);
+        let differ = 0;
+        for (let q = 0; q < clean.length; q += 3) {
+            if (meshC.triVerts[q] !== clean[q] || meshC.triVerts[q + 1] !== clean[q + 1]
+                || meshC.triVerts[q + 2] !== clean[q + 2]) differ++;
+        }
+        log(`T20c ${differ === 1 ? "stray triangle fixed back" : "whole surface turned"} (${differ} triangles differ)`);
+        check("T20c one flipped triangle is made consistent", errorC === "" && (differ === 1 || differ === nt - 1),
+            `${errorC} differ=${differ}`);
+        meshC.triVerts = null;
+
+        // T20d one triangle removed
+        const hole = new Uint32Array(clean.length - 3);
+        hole.set(clean.subarray(0, 3 * 77777)); hole.set(clean.subarray(3 * 77778), 3 * 77777);
+        const open = H._test.orientMesh({ vertices, triVerts: hole.slice() }, control);
+        check("T20d missing triangle leaves one 3-edge boundary", open.boundaryPairs.length === 6
+            && open.overused === 0 && open.conflicts === 0, `${open.boundaryPairs.length}`);
+        const meshD = { vertices, triVerts: hole, vertProperties: null };
+        const errorD = auditMessage(H, meshD);
+        check("T20d audit caps the hole", errorD === "" && meshD.triVerts.length === 3 * nt,
+            `${errorD} ${meshD.triVerts.length}`);
+        meshD.triVerts = null;
+
+        // T20e one triangle duplicated
+        const doubled = new Uint32Array(clean.length + 3);
+        doubled.set(clean); doubled.set(clean.subarray(3 * 5, 3 * 6), clean.length);
+        const errorE = auditMessage(H, { vertices, triVerts: doubled, vertProperties: null });
+        check("T20e duplicated triangle stops the audit",
+            errorE === "grid mesh audit failed: overused=3, conflicts=0", errorE);
+
+        // T20f Klein bottle
+        const errorF = auditMessage(H, { vertices, triVerts: gridSurface(W, N, true), vertProperties: null });
+        const conflictsF = Number((/conflicts=(\d+)/.exec(errorF) || [0, 0])[1]);
+        check("T20f Klein bottle stops the audit", errorF.startsWith("grid mesh audit failed: overused=0, conflicts=")
+            && conflictsF > 0, errorF);
+
+        // Logged only: old BigInt orientMesh against the flat table on 2.0 M triangles.
+        const small = gridSurface(1000, 1000, false, 1);
+        const timeIt = (fn, mesh) => { const t0 = performance.now(); fn(mesh, control); return performance.now() - t0; };
+        const oldMs = timeIt(orientMeshBigInt, { vertices: 1000000, triVerts: small.slice() });
+        const newMs = timeIt(H._test.orientMesh, { vertices: 1000000, triVerts: small.slice() });
+        log(`orientMesh on 2,000,000 triangles: BigInt reference ${oldMs.toFixed(0)} ms, flat table ${newMs.toFixed(0)} ms`);
+    }
+
     let wasm, cube, refined, thinRefined;
     const ownedResults = [];
     try {
@@ -739,6 +1015,8 @@
 
         checkOpenFacesAndHoles(wasm, H, cube);
         checkRawAuditGoldens(wasm, H);
+        checkOrientOracle(wasm, H);
+        checkLargeAudit(H);
 
         document.title = failures.length ? `FAIL: ${failures.join("; ")}` : "PASS";
     } catch (error) {

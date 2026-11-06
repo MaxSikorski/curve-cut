@@ -382,10 +382,17 @@
         refresh();
         gsap.to([viewDock, actionDock, piecesPanel], { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
         panelCollapse.reset();
+        // The fade starts at opacity 0, which gsap renders as visibility:hidden and
+        // drops focus. Focus once the first frame has made the panel visible.
+        let focused = false;
         gsap.fromTo(panel, { y: 16 }, {
             autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out",
+            onUpdate: () => {
+                if (focused || !isOpenNow || +gsap.getProperty(panel, "opacity") <= 0) return;
+                focused = true;
+                wallInput.focus();
+            },
         });
-        wallInput.focus();
     }
 
     function close() {

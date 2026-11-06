@@ -163,7 +163,8 @@
             check("P1 view dock and pieces panel hidden while open", !visible("view-dock") && !visible("pieces-panel"));
             check("P1 Open row label is not a form label", $("hollow-open-faces").previousElementSibling.tagName === "SPAN");
             await waitFor(() => doc.activeElement === $("hollow-wall"), 2000);
-            check("P1 focus on the wall field", doc.activeElement === $("hollow-wall"));
+            check("P1 focus on the wall field", doc.activeElement === $("hollow-wall"),
+                doc.activeElement && (doc.activeElement.id || doc.activeElement.tagName));
             check("P1 defaults: wall 6, Lamp and Bottom off",
                 $("hollow-wall").value === "6" && !$("hollow-lamp").checked && !$("hollow-open-bottom").checked);
             check("P1 hint", $("hollow-wall-hint").textContent === "≈ 15 walls @ 0.4 mm",
@@ -283,6 +284,7 @@
                 pm9 && String(signedVolume(pm9.geometry)));
             check("P9 status without bottom open", !statusText().includes("bottom open"), statusText());
             await load(cube(), "cube2");
+            await waitFor(() => !visible("hollow-panel"), 3000); // the close fade takes 0.4 s
             check("P9 panel closed, no preview, old source visible, all pieces visible",
                 !visible("hollow-panel") && previewMesh() === null && old9.visible === true
                 && CC.pieces.every((m) => m.visible));

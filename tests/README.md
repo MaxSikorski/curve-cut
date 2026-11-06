@@ -4,7 +4,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 
 | Page | Runner | What it proves |
 |---|---|---|
-| `pen-test.html` | `check_pen.py` | Pen math: smooth handles, corners, point insertion, rigid moves, hit distances |
+| `pen-test.html` | `check_pen.py` | Pen math: smooth handles, corners, point insertion, rigid moves, hit distances + phone mode dock stays compact (390×844; covered by `hollow-panel-test.html`) |
 | `cut-test.html` | `check_cut_engine.py` | Cut engine: spline cuts give watertight pieces with conserved volume |
 | `formats-test.html` | `check_formats.py` | OBJ import, 3MF export round trip, basic repair ladder |
 | `repair-test.html` | `check_repair.py` | Boundary-loop repair of open meshes, plus old-vs-new weld/loop/repair equivalence |

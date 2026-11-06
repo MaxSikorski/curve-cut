@@ -629,6 +629,15 @@
                 sc > 0 && big.panels[0].w <= 600 && big.height <= 4096);
             check("L1 layout: smallest cell side never under 22 px (canvas may grow)",
                 B.assemblyScale([100, 1], [50], 1, 5) * 1 >= 22);
+            const sl = { colMm: [100, 0.3], layerMm: [30, 30, 30], rows: 3 };
+            const slLay = lay({ ...sl, pxPerMm: B.assemblyScale(sl.colMm, sl.layerMm, 3, 5),
+                footerLines: ["a"], measure });
+            const sl2 = { colMm: [100, 0.1], layerMm: [0.1, 30], rows: 12 };
+            const slLay2 = lay({ ...sl2, pxPerMm: B.assemblyScale(sl2.colMm, sl2.layerMm, 12, 5),
+                footerLines: ["a"], measure });
+            check("L1 layout: sliver columns/layers cannot push the canvas past 8192 px a side or 32e6 px",
+                slLay.width <= 8192 && slLay.height <= 8192 && slLay.width * slLay.height <= 32e6
+                && slLay2.width <= 8192 && slLay2.height <= 8192 && slLay2.width * slLay2.height <= 32e6);
             const tallSc = B.assemblyScale([30], [30, 30, 30], 1, 5);
             check("L1 layout: a 3:1 tall model's panel is at most 1000 px high",
                 lay({ colMm: [30], layerMm: [30, 30, 30], rows: 1, pxPerMm: tallSc,

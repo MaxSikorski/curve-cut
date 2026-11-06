@@ -1754,22 +1754,35 @@
        WebGL is unavailable — the map is then drawn without silhouettes. Call
        dispose() when done. */
     function createSilhouettePainter(mesh, size) {
-        let renderer = null, material = null;
+        let renderer = null, material = null, wrapper = null;
         const dispose = () => {
+            if (wrapper) wrapper.dispose();
             if (material) material.dispose();
-            if (renderer) renderer.dispose();
+            if (renderer) {
+                renderer.dispose();
+                renderer.forceContextLoss(); // dispose() alone leaves the GPU context alive
+                renderer.domElement.width = renderer.domElement.height = 0;
+            }
+            wrapper = material = renderer = null;
         };
         try {
             renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true });
             renderer.setPixelRatio(1);
             renderer.setClearColor(0xffffff, 0);
             renderer.localClippingEnabled = true;
+            const gl = renderer.getContext();
+            const maxPx = Math.min(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
+                ...gl.getParameter(gl.MAX_VIEWPORT_DIMS));
             const planes = [new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)];
             material = new THREE.MeshBasicMaterial({ color: 0xc8c8c8, side: THREE.DoubleSide, clippingPlanes: planes });
-            // same frame as refresh(): centred on X/Z, floor at Y=0
-            const shape = new THREE.Mesh(mesh.geometry, material);
+            // a throwaway wrapper, so the live model geometry never gets a dispose listener from this renderer
+            const src = mesh.geometry;
+            wrapper = new THREE.BufferGeometry();
+            wrapper.setIndex(src.index);
+            wrapper.setAttribute("position", src.attributes.position);
+            // same frame as refresh(): centred on X/Z, floor at Y=0 (the export ignores rotation)
+            const shape = new THREE.Mesh(wrapper, material);
             shape.scale.copy(mesh.scale);
-            shape.quaternion.copy(mesh.quaternion);
             shape.updateMatrixWorld(true);
             const box = new THREE.Box3().setFromObject(shape);
             shape.position.set(-(box.min.x + box.max.x) / 2, -box.min.y, -(box.min.z + box.max.z) / 2);
@@ -1784,10 +1797,12 @@
                 paint(ctx, dx, dy, w, h, z0, z1) {
                     planes[0].constant = -z0; // keep z ≥ z0
                     planes[1].constant = z1;  // keep z ≤ z1
-                    renderer.setSize(w, h, false);
+                    const k = Math.min(1, maxPx / Math.max(w, h)); // too big for the GPU: render smaller, draw scaled
+                    renderer.setSize(Math.max(1, Math.floor(w * k)), Math.max(1, Math.floor(h * k)), false);
                     renderer.render(scene, camera);
                     ctx.drawImage(renderer.domElement, dx, dy, w, h);
                 },
+                _contextLost: () => !renderer || renderer.getContext().isContextLost(),
             };
         } catch (err) {
             console.warn("assembly map silhouettes skipped:", err);
@@ -1815,8 +1830,14 @@
         const footerFont = "12px Inter, sans-serif";
         mctx.font = footerFont;
         const measure = (t) => mctx.measureText(t).width;
+        const measureTitle = (t) => { // titles are drawn bold 15 px
+            mctx.font = "bold 15px Inter, sans-serif";
+            const w = mctx.measureText(t).width;
+            mctx.font = footerFont;
+            return w;
+        };
         const pxPerMm = Core.assemblyScale(colMm, layerMm, rows, footerLines.length);
-        const lay = Core.assemblyMapLayout({ colMm, layerMm, rows, pxPerMm, footerLines, measure });
+        const lay = Core.assemblyMapLayout({ colMm, layerMm, rows, pxPerMm, footerLines, measure, measureTitle });
         canvas.width = lay.width;
         canvas.height = lay.height;
         const ctx = canvas.getContext("2d");
@@ -1825,7 +1846,7 @@
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.textBaseline = "middle";
 
-        const painter = createSilhouettePainter(mesh, s.size);
+        let painter = createSilhouettePainter(mesh, s.size);
         try {
             for (const panel of lay.panels) {
                 const ri = panel.row - 1;
@@ -1833,8 +1854,16 @@
                 ctx.font = "bold 15px Inter, sans-serif";
                 ctx.textAlign = "left";
                 ctx.fillText(Core.assemblyPanelTitle(panel.row, rows), panel.x, panel.y - 13);
-                if (painter) painter.paint(ctx, panel.x, panel.y, panel.w, panel.h,
-                    bz[ri] - s.size.z / 2, bz[ri + 1] - s.size.z / 2);
+                if (painter) {
+                    try {
+                        painter.paint(ctx, panel.x, panel.y, panel.w, panel.h,
+                            bz[ri] - s.size.z / 2, bz[ri + 1] - s.size.z / 2);
+                    } catch (err) {
+                        console.warn("assembly map silhouettes skipped:", err);
+                        painter.dispose();
+                        painter = null;
+                    }
+                }
                 ctx.textAlign = "center";
                 for (let li = 0; li < layers; li++) {
                     for (let ci = 0; ci < cols; ci++) {
@@ -2202,7 +2231,7 @@
     });
 
     const bigPrintApi = {
-        enter, exit, resetImportScale, isActive: () => active,
+        enter, exit, resetImportScale, isActive: () => active, _createSilhouettePainter: createSilhouettePainter,
         _memoryReport: () => {
             const liveMainManifoldCacheCount = printManifoldCache
                 && !printManifoldCache.deleted ? 1 : 0;

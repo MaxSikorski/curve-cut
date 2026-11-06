@@ -327,7 +327,8 @@ window.BigPrintCore = (() => {
        positions, layer 1 at the bottom. Pure geometry, no DOM: the caller
        passes `measure(text)` → px width (ctx.measureText). colMm / layerMm are
        the mm extents of each column (left→right) and layer (bottom-up). */
-    const MAP_MAX_PANEL_W = 600, MAP_MAX_PANEL_H = 1000, MAP_MAX_H = 4096, MAP_MIN_CELL = 22;
+    const MAP_MAX_PANEL_W = 600, MAP_MAX_PANEL_H = 1000, MAP_MAX_H = 4096, MAP_MIN_CELL = 22,
+        MAP_HARD_SIDE = 8192, MAP_MAX_AREA = 32e6;
 
     function assemblyPanelTitle(row, rows) {
         if (rows === 1) return "Front view";
@@ -335,14 +336,18 @@ window.BigPrintCore = (() => {
     }
 
     /* px per mm: widest panel ≤ 600 px, tallest ≤ 1000 px, canvas ≤ 4096 px tall,
-       but the
-       smallest cell side is never under 22 px (then the canvas just grows). */
+       but the smallest cell side is never under 22 px (then the canvas grows).
+       Hard ceiling over all of that: canvas side ≤ 8192 px, area ≤ 32e6 px. */
     function assemblyScale(colMm, layerMm, rows, footerCount, { pad = 34, header = 26, gapPx = 18, lineH = 18 } = {}) {
         const sum = (a) => a.reduce((t, v) => t + v, 0);
         const fixed = pad / 2 + rows * (header + gapPx) + footerCount * lineH + pad;
-        const s = Math.min(MAP_MAX_PANEL_W / sum(colMm), MAP_MAX_PANEL_H / sum(layerMm),
-            (MAP_MAX_H - fixed) / (rows * sum(layerMm)));
-        return Math.max(s, MAP_MIN_CELL / Math.min(...colMm, ...layerMm));
+        const sx = sum(colMm), sy = rows * sum(layerMm);
+        const s = Math.min(MAP_MAX_PANEL_W / sx, MAP_MAX_PANEL_H / sum(layerMm), (MAP_MAX_H - fixed) / sy);
+        const grown = Math.max(s, MAP_MIN_CELL / Math.min(...colMm, ...layerMm));
+        // area: (sx·s + 2·pad)(sy·s + fixed) ≤ 32e6, solved for s
+        const a = sx * sy, b = sx * fixed + 2 * pad * sy, c = 2 * pad * fixed - MAP_MAX_AREA;
+        const byArea = (-b + Math.sqrt(b * b - 4 * a * c)) / (2 * a);
+        return Math.min(grown, (MAP_HARD_SIDE - 2 * pad) / sx, (MAP_HARD_SIDE - fixed) / sy, 0.999 * byArea);
     }
 
     /* ID label size for one cell: 28% of the short side, at most 28 px, then
@@ -354,7 +359,7 @@ window.BigPrintCore = (() => {
         return tw > w * 0.85 ? Math.max(10, px * (w * 0.85) / tw) : px;
     }
 
-    function assemblyMapLayout({ colMm, layerMm, rows, pxPerMm, footerLines, measure,
+    function assemblyMapLayout({ colMm, layerMm, rows, pxPerMm, footerLines, measure, measureTitle = measure,
             pad = 34, header = 26, gapPx = 18, lineH = 18 }) {
         // rounded cumulative edges, so cells tile the panel exactly
         const edges = (mm) => {
@@ -366,7 +371,7 @@ window.BigPrintCore = (() => {
         const panelW = ex[ex.length - 1], panelH = ey[ey.length - 1];
         let inner = panelW;
         for (const t of footerLines) inner = Math.max(inner, measure(t));
-        for (let r = 1; r <= rows; r++) inner = Math.max(inner, measure(assemblyPanelTitle(r, rows)));
+        for (let r = 1; r <= rows; r++) inner = Math.max(inner, measureTitle(assemblyPanelTitle(r, rows)));
         const panels = [];
         let y = pad / 2;
         for (let row = rows; row >= 1; row--) { // rows number back→front, so the front row is the highest

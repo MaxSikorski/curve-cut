@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+    <style>iframe { width: 1280px; height: 800px; border: 0; }</style>
+</head>
+<body>
+<pre id="log"></pre>
+<iframe id="app"></iframe>
+<script>
+/* The Hollow panel (lamp phase 1b), driven through the real app in the frame.
+   Run via tools/check_hollow_panel.py (needs --allow-file-access-from-files so
+   this page can reach the frame). Result in document.title. */
+(() => {
+    "use strict";
+
+    const frame = document.getElementById("app");
+    // keep the welcome tour from starting by itself (it would take focus and Escape)
+    try { localStorage.setItem("curvecut-tour", "done"); } catch (_) { /* the tour is then handled per step */ }
+    frame.src = "../index.html";
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitFor = async (test, timeout = 8000) => {
+        const deadline = performance.now() + timeout;
+        while (performance.now() < deadline) {
+            let ok = false;
+            try { ok = test(); } catch (_) { ok = false; }
+            if (ok) return true;
+            await sleep(25);
+        }
+        try { return !!test(); } catch (_) { return false; }
+    };
+
+    let win, doc, CC, THREE_;
+    const $ = (id) => doc.getElementById(id);
+    const visible = (id) => {
+        const el = $(id);
+        if (!el || el.hidden) return false;
+        const cs = win.getComputedStyle(el);
+        return cs.visibility !== "hidden" && cs.display !== "none" && parseFloat(cs.opacity) > 0.5;
+    };
+    const setValue = (id, value) => {
+        const el = $(id);
+        el.value = String(value);
+        el.dispatchEvent(new win.Event("input", { bubbles: true }));
+        el.dispatchEvent(new win.Event("change", { bubbles: true }));
+    };
+    const setChecked = (id, on) => {
+        const el = $(id);
+        if (el.checked !== on) el.click();
+    };
+    const rawEscape = () => win.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    // the welcome tour can start by itself and would own Escape: end it first
+    const escape = () => { if (CC.tour && CC.tour.isActive()) CC.tour.end(); rawEscape(); };
+    const triCount = (geometry) => {
+        const index = geometry.getIndex();
+        return (index ? index.count : geometry.attributes.position.count) / 3;
+    };
+    const signedVolume = (geometry) => {
+        const p = geometry.attributes.position, index = geometry.getIndex();
+        const n = index ? index.count : p.count;
+        const at = (i) => { const k = index ? index.getX(i) : i; return [p.getX(k), p.getY(k), p.getZ(k)]; };
+        let v = 0;
+        for (let i = 0; i < n; i += 3) {
+            const a = at(i), b = at(i + 1), c = at(i + 2);
+            v += (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0])) / 6;
+        }
+        return v;
+    };
+    const previewMesh = () => CC.scene.children.find((o) => o.userData && o.userData.hollowPreview) || null;
+    const cube = () => new win.THREE.BoxGeometry(60, 60, 60).toNonIndexed();
+    const ball = () => new win.THREE.SphereGeometry(1000, 200, 200).toNonIndexed();
+    const idle = () => !CC.ops.busy();
+    const load = async (geometry, name) => {
+        // an automatic mesh check can start late and make the app refuse the load: retry until it lands
+        for (let attempt = 0; attempt < 8; attempt++) {
+            await waitFor(idle, 60000);
+            await sleep(300);
+            await waitFor(idle, 60000);
+            CC.loadGeometry(geometry, name);
+            if (CC.pieces.length === 1 && CC.pieces[0].name === name) break;
+        }
+        await waitFor(idle, 60000);
+        await sleep(50);
+        await waitFor(idle, 60000);
+    };
+    const attach = async () => {
+        await waitFor(() => frame.contentWindow && frame.contentWindow.CurveCut
+            && typeof frame.contentWindow.CurveCut.loadGeometry === "function"
+            && frame.contentWindow.CurveCut.hollow && frame.contentWindow.CurveCut.compute
+            && frame.contentWindow.CurveCut.hollowCore, 30000);
+        win = frame.contentWindow; doc = win.document; CC = win.CurveCut;
+        spyCompute();
+        if (CC.tour && CC.tour.isActive()) CC.tour.end(); // the welcome tour owns Escape and focus
+        win.addEventListener("error", (e) => pageErrors.push(String(e.message)));
+    };
+    const pageErrors = [];
+    const near = (a, b, tol) => Math.abs(a - b) <= tol;
+    // which "hollow-panel-N" worker copies were primed, and which were really released
+    const primed = new Set(), released = new Set();
+    const spyCompute = () => {
+        const real = CC.compute.run;
+        CC.compute.run = function (op, payload, options) {
+            const promise = real.call(this, op, payload, options);
+            const name = payload && payload.token;
+            if (typeof name === "string" && name.startsWith("hollow-panel-")) {
+                if (op === "prime") primed.add(name);
+                if (op === "release") promise.then(() => released.add(name), () => {});
+            }
+            return promise;
+        };
+    };
+    const leaked = () => [...primed].filter((n) => !released.has(n));
+    const lastToast = () => { const t = doc.querySelectorAll(".toast .stats-name"); return t.length ? t[t.length - 1].textContent : ""; };
+    const statusText = () => $("hollow-status").textContent;
+    const history = [];
+    const watchStatus = () => new win.MutationObserver(() => history.push(statusText()))
+        .observe($("hollow-status"), { childList: true, characterData: true, subtree: true });
+    const openPanel = async () => {
+        // the button refuses (toast) while an automatic check still runs: retry
+        const deadline = performance.now() + 60000;
+        while (performance.now() < deadline && !visible("hollow-panel")) {
+            await waitFor(idle, 60000);
+            $("hollow-btn").click();
+            await waitFor(() => visible("hollow-panel"), 2500);
+        }
+    };
+    // the automatic mesh check can start a moment after a load: Preview would be refused
+    const clickPreview = async () => { await waitFor(idle, 60000); await sleep(150); await waitFor(idle, 60000); $("hollow-preview").click(); };
+    const preview = async () => {
+        await clickPreview();
+        return waitFor(() => !$("hollow-confirm").disabled, 60000);
+    };
+
+    (async () => {
+        try {
+            // P0
+            await attach();
+            check("P0 harness: CurveCut reachable in the frame", !!CC);
+            check("P0 harness: 1a engine present (CC.hollowCore.bottomPlane)",
+                !!(CC && CC.hollowCore && CC.hollowCore.bottomPlane));
+            watchStatus();
+            try { win.localStorage.removeItem("curvecut-hollow"); } catch (_) { /* ignore */ }
+
+            await load(cube(), "cube");
+            const solid = CC.pieces[0];
+            const undoBefore = CC.history.memoryReport().undoEntries;
+
+            // P1
+            check("P1 hollow button sits in the action dock",
+                !!$("hollow-btn") && !!$("hollow-btn").closest("#action-dock"));
+            await openPanel();
+            await waitFor(() => !visible("action-dock"), 3000);
+            check("P1 panel visible, dock hidden", visible("hollow-panel") && !visible("action-dock"));
+            await waitFor(() => !visible("view-dock") && !visible("pieces-panel"), 3000);
+            check("P1 view dock and pieces panel hidden while open", !visible("view-dock") && !visible("pieces-panel"));
+            check("P1 Open row label is not a form label", $("hollow-open-faces").previousElementSibling.tagName === "SPAN");
+            await waitFor(() => doc.activeElement === $("hollow-wall"), 2000);
+            check("P1 focus on the wall field", doc.activeElement === $("hollow-wall"),
+                doc.activeElement && (doc.activeElement.id || doc.activeElement.tagName));
+            check("P1 defaults: wall 6, Lamp and Bottom off",
+                $("hollow-wall").value === "6" && !$("hollow-lamp").checked && !$("hollow-open-bottom").checked);
+            check("P1 hint", $("hollow-wall-hint").textContent === "≈ 15 walls @ 0.4 mm",
+                $("hollow-wall-hint").textContent);
+            check("P1 Confirm disabled", $("hollow-confirm").disabled);
+            check("P1 idle status", statusText().startsWith("Set the wall, then Preview hollowed."), statusText());
+
+            // P2
+            setChecked("hollow-lamp", true);
+            check("P2 Lamp tick sets 2.4 + Bottom",
+                $("hollow-wall").value === "2.4" && $("hollow-open-bottom").checked
+                && $("hollow-wall-hint").textContent === "≈ 6 walls @ 0.4 mm", $("hollow-wall").value);
+            setChecked("hollow-lamp", false);
+            check("P2 Lamp untick resets 6 + Bottom off",
+                $("hollow-wall").value === "6" && !$("hollow-open-bottom").checked);
+            setChecked("hollow-lamp", true);
+
+            // P3
+            await waitFor(idle, 60000); await sleep(300);
+            const ok3 = await preview();
+            const pm = previewMesh();
+            check("P3 preview ready", ok3 && !!pm);
+            check("P3 source untouched, hidden, 12 triangles",
+                CC.pieces[0] === solid && solid.visible === false && triCount(solid.geometry) === 12);
+            check("P3 preview volume 40490.496", pm && near(signedVolume(pm.geometry), 40490.496, 0.01),
+                pm && String(signedVolume(pm.geometry)));
+            check("P3 history unchanged", CC.history.memoryReport().undoEntries === undoBefore);
+            check("P3 status", statusText().startsWith("Preview ready · saves 81.3% of material · bottom open"), statusText());
+            check("P3 no stale badge, no warnings", !visible("hollow-stale") && $("hollow-warnings").hidden);
+
+            // P4
+            setValue("hollow-wall", 3);
+            check("P4 wall change -> Out of date",
+                visible("hollow-stale") && $("hollow-stale").textContent === "Out of date"
+                && $("hollow-confirm").disabled
+                && statusText().startsWith("Settings changed since the preview"), statusText());
+            setValue("hollow-wall", 2.4);
+            check("P4 wall back -> fresh", !visible("hollow-stale") && !$("hollow-confirm").disabled);
+            setChecked("hollow-open-bottom", false);
+            const staleOff = visible("hollow-stale") && $("hollow-confirm").disabled;
+            setChecked("hollow-open-bottom", true);
+            check("P4 Bottom off -> stale, on -> fresh",
+                staleOff && !visible("hollow-stale") && !$("hollow-confirm").disabled);
+
+            // P5
+            const geo5 = previewMesh().geometry;
+            // another compute job (Big Print's own release in the real app) is running at Confirm time
+            CC.compute.run("ping", {}).catch(() => {});
+            $("hollow-confirm").click();
+            await waitFor(() => !visible("hollow-panel"), 4000);
+            const h = CC.pieces[0].userData.hollow;
+            check("P5 one piece, same geometry object", CC.pieces.length === 1 && CC.pieces[0].geometry === geo5);
+            check("P5 receipt", !!h && h.v === 1 && h.wallMm === 2.4 && h.lamp === true
+                && h.openFaces[0].label === "Bottom" && h.openFaces[0].opened === true && h.holes.count === 0,
+                JSON.stringify(h && { v: h.v, w: h.wallMm, l: h.lamp }));
+            check("P5 CC.hollow.confirmed() is the receipt", CC.hollow.confirmed() === h);
+            check("P5 view dock and pieces panel back",
+                await waitFor(() => visible("view-dock") && visible("pieces-panel"), 3000));
+            const released5 = await waitFor(() => primed.size > 0 && leaked().length === 0, 6000);
+            check("P5 panel's worker copy released after Confirm", released5, `leaked ${leaked().join(",")}`);
+            check("P5 chip note", $("stats-detail").textContent.includes("· hollow 2.4 mm, open bottom"),
+                $("stats-detail").textContent);
+            await waitFor(() => visible("action-dock"), 3000);
+            check("P5 panel hidden, dock visible", !visible("hollow-panel") && visible("action-dock"));
+            check("P5 no preview mesh left", previewMesh() === null);
+            check("P5 one undo step", CC.history.memoryReport().undoEntries === undoBefore + 1);
+            check("P5 units locked, reset hidden", $("units-trigger").disabled && $("stats-reset").hidden);
+
+            // P6
+            $("undo-btn").click();
+            await waitFor(() => CC.pieces[0] === solid, 4000);
+            check("P6 undo: original mesh back, visible, 12 tris, volume 216000",
+                CC.pieces[0] === solid && solid.visible === true && triCount(solid.geometry) === 12
+                && near(signedVolume(solid.geometry), 216000, 0.01));
+            check("P6 undo: no chip note, not confirmed, units enabled",
+                !$("stats-detail").textContent.includes("hollow") && !CC.hollow.confirmed()
+                && !$("units-trigger").disabled);
+            $("redo-btn").click();
+            await waitFor(() => CC.pieces[0] !== solid, 4000);
+            check("P6 redo: hollow back with chip note",
+                !!CC.pieces[0].userData.hollow && $("stats-detail").textContent.includes("· hollow 2.4 mm, open bottom"));
+
+            // P7
+            await openPanel();
+            check("P7 already hollow", statusText().startsWith("This model is already hollow (2.4 mm, open bottom)")
+                && $("hollow-preview").disabled && $("hollow-confirm").disabled, statusText());
+            escape();
+            await waitFor(() => !visible("hollow-panel"), 3000);
+            check("P7 Escape closes", !visible("hollow-panel"),
+                `tour ${CC.tour.isActive()} open ${CC.hollow.isOpen()} busy ${CC.ops.busyName()} errs ${pageErrors.join("|")} tourfn ${String(CC.tour.isActive)}`);
+            $("undo-btn").click();
+            await waitFor(() => CC.pieces[0] === solid, 4000);
+
+            // P8
+            const extra = new win.THREE.Mesh(solid.geometry.clone(), solid.material);
+            CC.scene.add(extra); CC.pieces.push(extra);
+            win.dispatchEvent(new win.CustomEvent("curvecut:pieces-changed"));
+            await openPanel();
+            check("P8 more than one piece", statusText().startsWith("Hollow before cutting")
+                && $("hollow-preview").disabled && $("hollow-confirm").disabled, statusText());
+            CC.scene.remove(extra); CC.pieces.pop();
+            win.dispatchEvent(new win.CustomEvent("curvecut:pieces-changed"));
+            await waitFor(() => !$("hollow-preview").disabled, 2000);
+            check("P8 back to idle", statusText().startsWith("Set the wall") && !$("hollow-preview").disabled, statusText());
+            escape();
+            await waitFor(() => !visible("hollow-panel"), 3000);
+
+            // P9
+            await openPanel();
+            setChecked("hollow-lamp", true); setChecked("hollow-lamp", false);
+            setValue("hollow-wall", 6);
+            await waitFor(idle, 60000); await sleep(300);
+            await preview();
+            const pm9 = previewMesh();
+            const old9 = CC.pieces[0];
+            check("P9 plain preview volume 105408", pm9 && near(signedVolume(pm9.geometry), 105408, 0.01),
+                pm9 && String(signedVolume(pm9.geometry)));
+            check("P9 status without bottom open", !statusText().includes("bottom open"), statusText());
+            await load(cube(), "cube2");
+            await waitFor(() => !visible("hollow-panel"), 3000); // the close fade takes 0.4 s
+            check("P9 panel closed, no preview, old source visible, all pieces visible",
+                !visible("hollow-panel") && previewMesh() === null && old9.visible === true
+                && CC.pieces.every((m) => m.visible));
+            await waitFor(idle, 60000);
+            const released9 = await waitFor(() => leaked().length === 0, 6000);
+            check("P9 panel's worker copy released", released9, `leaked ${leaked().join(",")}`);
+
+            // P10
+            await load(ball(), "ball");
+            const ballMesh = CC.pieces[0];
+            check("P10 ball watertight and over 50k tris",
+                win.CutCore.isWatertight(ballMesh.geometry) && triCount(ballMesh.geometry) > 50000,
+                String(triCount(ballMesh.geometry)));
+            await openPanel();
+            setChecked("hollow-lamp", true);
+            await clickPreview();
+            await waitFor(() => /too big|failed|cancelled/.test(statusText()), 120000);
+            await waitFor(idle, 30000);
+            check("P10 grid-too-large message",
+                statusText().includes("too big to hollow at 2.4 mm walls yet")
+                && statusText().includes("64 million") && statusText().includes("mm or thicker"),
+                statusText() + " || history: " + history.slice(-6).join(" | "));
+            check("P10 model unchanged, no preview, not busy",
+                CC.pieces[0] === ballMesh && ballMesh.visible && previewMesh() === null && idle());
+
+            // P11
+            const fmt = CC.hollow._test.gridTooLargeMessage;
+            const m11 = fmt(2.4, 85800000);
+            check("P11 formatter with voxels", m11.includes("86 million") && m11.includes("about 2.7 mm"), m11);
+            check("P11 formatter without voxels", fmt(2.4) ===
+                "This model is too big to hollow at 2.4 mm walls yet. Try a thicker wall for now. Thin lamp walls on big models come with the smooth-inside update.");
+
+            // P12 (panel is open on the ball)
+            setChecked("hollow-lamp", false);
+            setChecked("hollow-open-bottom", false);
+            setValue("hollow-wall", 16);
+            await clickPreview();
+            const started = await waitFor(() => CC.ops.busyName() === "hollow", 20000);
+            const pill = await waitFor(() => /^Hollowing/.test((doc.getElementById("progress-label") || {}).textContent || ""), 60000);
+            check("P12 hollow running with Hollowing pill", started && pill);
+            escape();
+            const stopped = await waitFor(idle, 20000);
+            await waitFor(() => statusText().startsWith("Hollowing cancelled"), 3000);
+            check("P12 Escape stops within 20 s, status says so",
+                stopped && statusText().startsWith("Hollowing cancelled — model unchanged."), statusText());
+            check("P12 model unchanged, no preview, panel open",
+                CC.pieces[0] === ballMesh && ballMesh.visible && previewMesh() === null && visible("hollow-panel"));
+            escape();
+            await waitFor(() => !visible("hollow-panel"), 3000);
+            await load(cube(), "cube3");
+            await openPanel();
+            setValue("hollow-wall", 6);
+            await preview();
+            const pm12 = previewMesh();
+            check("P12 worker recovered: next preview works",
+                pm12 && near(signedVolume(pm12.geometry), 105408, 0.01),
+                statusText() + " || history: " + history.slice(-6).join(" | "));
+            escape();
+            await waitFor(() => !visible("hollow-panel"), 3000);
+
+            // P15-P19: review fixes (cube3 is loaded, panel closed)
+            await openPanel();
+            setValue("hollow-wall", 6);
+            await preview();
+            const src15 = CC.pieces[0];
+            $("units-trigger").click();
+            await sleep(500);
+            check("P15 units refused while the Hollow panel is open",
+                !visible("units-overlay") && lastToast().includes("Close the Hollow panel first"), lastToast());
+            $("stats-repair").click();
+            await sleep(500);
+            check("P15 repair refused while the Hollow panel is open",
+                !CC.ops.busy() && CC.pieces[0] === src15 && src15.visible === false
+                && lastToast().includes("Close the Hollow panel first"), lastToast());
+
+            // P16: a replaced piece that inherited the hidden flag is shown again
+            const other16 = new win.THREE.Mesh(src15.geometry.clone(), src15.material);
+            other16.visible = false;
+            CC.scene.add(other16); CC.pieces[0] = other16;
+            win.dispatchEvent(new win.CustomEvent("curvecut:pieces-changed"));
+            check("P16 every piece visible after the model changed under a preview",
+                other16.visible === true && src15.visible === true && previewMesh() === null);
+            CC.scene.remove(other16); CC.pieces[0] = src15;
+            win.dispatchEvent(new win.CustomEvent("curvecut:pieces-changed"));
+
+            // P17: compute busy at the moment of the run: status must not stick on "Hollowing…"
+            await preview();
+            let ping = null;
+            await waitFor(() => { try { ping = CC.compute.run("ping", {}); return true; } catch (_) { return false; } }, 5000);
+            $("hollow-preview").click();
+            await ping.catch(() => {});
+            await sleep(400);
+            check("P17 busy refusal leaves a sane status and an enabled Preview",
+                !statusText().includes("press Escape") && !$("hollow-preview").disabled
+                && lastToast().includes("still running"), statusText() + " | " + lastToast());
+            check("P17 not left running", !CC.hollow.busy() && idle());
+
+            // P18: undo with an earlier step present while a preview is shown
+            await waitFor(idle, 60000);
+            CC.history.capture();
+            await preview();
+            const src18 = CC.pieces[0];
+            $("undo-btn").click();
+            await waitFor(() => previewMesh() === null, 4000);
+            check("P18 undo under a preview: source visible, no preview, panel says so",
+                CC.pieces.every((m) => m.visible) && previewMesh() === null
+                && statusText().startsWith("The model changed"), statusText());
+            check("P18 undo: source geometry still drawn", src18.visible === true || CC.pieces[0] !== src18);
+
+            // P19: Escape does nothing to the panel while the tour is running
+            const realActive = CC.tour.isActive;
+            CC.tour.isActive = () => true;
+            rawEscape();
+            await sleep(300);
+            const stayed = visible("hollow-panel");
+            CC.tour.isActive = realActive;
+            check("P19 Escape ignored while the tour is active", stayed);
+            escape();
+            await waitFor(() => !visible("hollow-panel"), 3000);
+            check("P19 view dock and pieces panel restored on close",
+                await waitFor(() => visible("view-dock") && visible("pieces-panel"), 3000));
+
+            // P13
+            await openPanel();
+            setChecked("hollow-lamp", false);
+            setValue("hollow-wall", 3.2);
+            setChecked("hollow-open-bottom", true);
+            escape();
+            await waitFor(() => !visible("hollow-panel"), 3000);
+            const stored = JSON.parse(win.localStorage.getItem("curvecut-hollow"));
+            check("P13 stored settings", stored && stored.v === 1 && stored.wallMm === 3.2
+                && stored.lamp === false && stored.openBottom === true, JSON.stringify(stored));
+            frame.src = frame.src;
+            await sleep(500);
+            await waitFor(() => frame.contentWindow && frame.contentWindow.CurveCut
+                && frame.contentWindow.CurveCut !== CC, 30000);
+            await attach();
+            await load(cube(), "cube4");
+            await openPanel();
+            check("P13 restored after reload", $("hollow-wall").value === "3.2"
+                && $("hollow-open-bottom").checked && !$("hollow-lamp").checked, $("hollow-wall").value);
+            escape();
+            await waitFor(() => !visible("hollow-panel"), 3000);
+
+            // P14
+            win.localStorage.setItem("curvecut-hollow", "{not json");
+            await openPanel();
+            check("P14 bad JSON -> defaults", $("hollow-wall").value === "6"
+                && !$("hollow-lamp").checked && !$("hollow-open-bottom").checked);
+            escape();
+            await waitFor(() => !visible("hollow-panel"), 3000);
+            Object.defineProperty(win, "localStorage", { get() { throw new Error("blocked"); } });
+            await openPanel();
+            setValue("hollow-wall", 6);
+            const ok14 = await preview();
+            check("P14 blocked storage: panel and Preview still work", ok14 && !!previewMesh()
+                && pageErrors.length === 0, pageErrors.join("; "));
+            escape();
+        } catch (error) {
+            check("test harness did not throw", false, String(error && error.stack || error));
+        }
+        document.title = fails.length ? "FAIL: " + fails.join(", ") : "PASS";
+    })();
+})();
+</script>
+</body>
+</html>

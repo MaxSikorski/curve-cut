@@ -47,7 +47,7 @@
             add(box(length, 4, 60, 0, 2, 0));
             steps.forEach((step, i) => {
                 const x = -length / 2 + 23 + i * 38;
-                add(box(30, 30, step, x, 19, 0));
+                add(box(30, 30.01, step, x, 18.995, 0)); // 0.01 mm into the plate: a real overlap, not touching faces
                 label(step.toFixed(1), 7, x, 15 + step / 2);
             });
             label("GLOW", 5, -length / 2 + 13, 26);

@@ -59,15 +59,16 @@
         const size = { x: baseSize.x * K, y: baseSize.y * K, z: baseSize.z * K };
         const min = { x: -size.x / 2, y: 0, z: -size.z / 2 };
         const bed = { w: 70, d: 70, h: 70 }, margin = 5; // tiny bed -> many parts
-        const grid = B.computeGrid({ size, bed, margin });
+        const CONN = { size: 6, depth: 5, shape: "circle", tolR: 0.2, tolD: 0.2 };
+        // pegs reserve their depth on cut axes (Max, 2026-11-05: shrink cells)
+        const grid = B.computeGrid({ size, bed, margin, reserve: CONN.depth });
         const cells = B.gridCells(grid, size, min);
         log(`6× benchy: ${size.x.toFixed(0)}×${size.z.toFixed(0)}×${size.y.toFixed(0)} mm, `
             + `grid ${grid.counts.x}×${grid.counts.z}×${grid.counts.y} = ${grid.total} candidate cells`);
         check("a serious part count", grid.total >= 100, String(grid.total));
 
         const GAP = 0.15;
-        const CONN = { size: 6, depth: 5, shape: "circle", tolR: 0.2, tolD: 0.2 };
-        const usable = grid.usable;
+        const room = grid.room; // bed minus margin: parts WITH pegs must fit it
 
         let parts = 0, engraved = 0, volSum = 0, allTight = true, allFit = true;
         let worstOver = 0;
@@ -82,8 +83,9 @@
             geo.computeBoundingBox();
             const s = new THREE.Vector3();
             geo.boundingBox.getSize(s);
-            // pegs may poke depth past the cell — that still has to fit the bed
-            const lim = { x: usable.x + CONN.depth, y: usable.y + CONN.depth, z: usable.z + CONN.depth };
+            // pegs poke depth past the cell; the cell shrank by that much, so
+            // the whole part still fits bed minus margin
+            const lim = room;
             if (s.x > lim.x + 0.01 || s.y > lim.y + 0.01 || s.z > lim.z + 0.01) {
                 allFit = false;
                 worstOver = Math.max(worstOver, s.x - lim.x, s.y - lim.y, s.z - lim.z);

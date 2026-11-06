@@ -107,6 +107,10 @@
             input.value = value;
             input.dispatchEvent(new Event("input", { bubbles: true }));
         };
+        // a 2 mm cell has no room for pegs; this fixture tests the cell cap
+        const connectors = document.getElementById("bp-connectors");
+        connectors.checked = false;
+        connectors.dispatchEvent(new Event("change", { bubbles: true }));
         set("bp-bed-w", 10);
         set("bp-bed-d", 10);
         set("bp-bed-h", 10);

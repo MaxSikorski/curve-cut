@@ -146,6 +146,88 @@
             check("P0 harness: CurveCut reachable in the frame", !!CC);
             check("P0 harness: 1a engine present (CC.hollowCore.bottomPlane)",
                 !!(CC && CC.hollowCore && CC.hollowCore.bottomPlane));
+
+            // Mode dock compact on a phone: exercise the real app in a resizable frame.
+            const oldWidth = frame.style.width, oldHeight = frame.style.height;
+            try {
+                frame.style.width = "390px"; frame.style.height = "844px";
+                check("mode dock compact on a phone: frame is 390x844",
+                    await waitFor(() => win.innerWidth === 390 && win.innerHeight === 844, 3000),
+                    `${win.innerWidth}x${win.innerHeight}`);
+                await load(cube(), "phone-cube");
+                // the donation prompt opens ~2.2 s after a non-first page load and would sit over the model
+                const closeDonate = async () => {
+                    if (!visible("donate-modal")) return;
+                    $("donate-close").click();
+                    await waitFor(() => !visible("donate-modal"), 3000);
+                };
+                await sleep(2500); await closeDonate();
+                await sleep(300); await waitFor(idle, 60000);
+                $("draw-btn").click();
+                await sleep(1000); // mode dock and draw UI tweens settle
+                const dock = $("mode-dock"), rect = dock.getBoundingClientRect();
+                check("mode dock compact on a phone: dock visible", visible("mode-dock"));
+                check("mode dock compact on a phone: height <= 64px", rect.height <= 64, `${rect.height}px`);
+                check("mode dock compact on a phone: inside frame width",
+                    rect.left >= 0 && rect.right <= win.innerWidth, `${rect.left}..${rect.right}`);
+                const buttons = [...dock.querySelectorAll(".mode-btn")];
+                check("mode dock compact on a phone: three visible buttons", buttons.length === 3
+                    && buttons.every((button) => {
+                        const style = win.getComputedStyle(button), bounds = button.getBoundingClientRect();
+                        return style.display !== "none" && style.visibility !== "hidden"
+                            && parseFloat(style.opacity) > 0.5 && bounds.width > 0 && bounds.height > 0;
+                    }));
+                const planar = dock.querySelector('[data-mode="planar"]');
+                const curve = dock.querySelector('[data-mode="curve"]');
+                planar.click();
+                check("mode dock compact on a phone: planar active", planar.classList.contains("active"));
+                await sleep(1000);
+                await closeDonate();
+                const center = doc.elementFromPoint(win.innerWidth / 2, win.innerHeight / 2);
+                check("mode dock compact on a phone: center reaches 3D canvas", center === $("viewport"),
+                    (() => { const path = []; for (let e = center; e && path.length < 5; e = e.parentElement) path.push(e.tagName + (e.id ? "#" + e.id : "") + (e.className && typeof e.className === "string" ? "." + e.className.split(" ").join(".") : "")); return path.join(" < ") + " op=" + (center ? win.getComputedStyle(center.closest("[id]") || center).opacity : ""); })());
+                curve.click();
+                check("mode dock compact on a phone: curve active", curve.classList.contains("active"));
+                await sleep(1000);
+
+                // Synthetic pointers cannot be captured; deliver the same sequence to the hit target.
+                const layer = $("draw-layer"), capture = layer.setPointerCapture;
+                layer.setPointerCapture = () => {};
+                try {
+                    const pointer = (type, x, y, buttons) => {
+                        const target = doc.elementFromPoint(x, y);
+                        target.dispatchEvent(new win.PointerEvent(type, {
+                            bubbles: true, pointerId: 1, pointerType: "mouse", button: 0,
+                            buttons, clientX: x, clientY: y,
+                        }));
+                    };
+                    const x = win.innerWidth / 2, y = win.innerHeight / 2;
+                    pointer("pointerdown", x, y, 1); pointer("pointerup", x, y, 0);
+                    pointer("pointerdown", x + 70, y, 1);
+                    pointer("pointermove", x + 90, y - 10, 1);
+                    pointer("pointerup", x + 90, y - 10, 0);
+                } finally {
+                    layer.setPointerCapture = capture;
+                }
+                $("draw-done").click();
+                check("mode dock compact on a phone: curve preview ready",
+                    await waitFor(() => CC.spline && visible("preview-dock"), 5000));
+                const points = CC.spline && CC.spline.points;
+                check("mode dock compact on a phone: drag makes smooth handles",
+                    !!(points && points.length === 2 && points[1].hIn && points[1].hOut
+                        && points[1].hIn.clone().add(points[1].hOut)
+                            .distanceTo(points[1].a.clone().multiplyScalar(2)) < 1e-6));
+                check("mode dock compact on a phone: cut idle", await waitFor(idle, 60000));
+                check("mode dock compact on a phone: cutting engine ready",
+                    await waitFor(() => win.CutCore.isReady(), 60000));
+                $("cut-apply").click();
+                check("mode dock compact on a phone: curve cuts cube into two pieces",
+                    await waitFor(() => CC.pieces.length === 2, 60000), String(CC.pieces.length));
+            } finally {
+                frame.style.width = oldWidth; frame.style.height = oldHeight;
+                check("mode dock compact on a phone: frame restored",
+                    await waitFor(() => win.innerWidth === 1280 && win.innerHeight === 800, 3000));
+            }
             watchStatus();
             try { win.localStorage.removeItem("curvecut-hollow"); } catch (_) { /* ignore */ }
 

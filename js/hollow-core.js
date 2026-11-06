@@ -672,16 +672,6 @@
         return grown;
     }
 
-    // Edge key radix: exact in a double while both indices stay below 2^26
-    // (lo * 2^26 + hi < 2^52), far beyond any grid mesh the voxel cap allows.
-    const EDGE_VERTEX_BASE = 67108864;
-
-    function edgeKey(a, b) {
-        const lo = Math.min(a, b), hi = Math.max(a, b);
-        if (hi >= EDGE_VERTEX_BASE) throw new Error("grid mesh too large for edge tracking");
-        return lo * EDGE_VERTEX_BASE + hi;
-    }
-
     function marchGrid(grid, spec, control) {
         const [nx, ny, nz] = spec.dims, [ox, oy, oz] = spec.min, h = spec.h;
         const plane = nx * ny;
@@ -690,14 +680,6 @@
         let yBottom = new Int32Array(plane), yTop = new Int32Array(plane);
         const zEdges = new Int32Array(plane);
         xBottom.fill(-1); xTop.fill(-1); yBottom.fill(-1); yTop.fill(-1); zEdges.fill(-1);
-        const openEdges = new Map();
-        let misorientedEdges = 0;
-        const trackEdge = (a, b) => {
-            const key = edgeKey(a, b);
-            const direction = a < b ? 0 : 1, previous = openEdges.get(key);
-            if (previous === undefined) openEdges.set(key, direction);
-            else { if (previous === direction) misorientedEdges++; openEdges.delete(key); }
-        };
         const cx = [0, 1, 1, 0, 0, 1, 1, 0], cy = [0, 0, 1, 1, 0, 0, 1, 1];
         const cz = [0, 0, 0, 0, 1, 1, 1, 1];
         const edgeCorners = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6],
@@ -849,7 +831,6 @@
                             if (direction < 0) { const swap = b; b = c; c = swap; }
                             tv = growU32(tv, nt * 3 + 3);
                             tv[nt * 3] = a; tv[nt * 3 + 1] = b; tv[nt * 3 + 2] = c;
-                            trackEdge(a, b); trackEdge(b, c); trackEdge(c, a);
                             nt++;
                         }
                     }
@@ -859,35 +840,78 @@
             swap = yBottom; yBottom = yTop; yTop = swap; yTop.fill(-1);
             zEdges.fill(-1);
         }
-        const boundaryPairs = [];
-        for (const [key, direction] of openEdges) {
-            const lo = Math.floor(key / EDGE_VERTEX_BASE), hi = key - lo * EDGE_VERTEX_BASE;
-            boundaryPairs.push(direction === 0 ? lo : hi, direction === 0 ? hi : lo);
-        }
         return {
             vertProperties: vp.slice(0, nv * 3),
             triVerts: tv.slice(0, nt * 3),
             vertices: nv,
-            misorientedEdges,
-            boundaryPairs,
         };
+    }
+
+    /* Flat half-edge table for the orientation audit. Half-edges sit in buckets by their
+       lower vertex (start[v] .. start[v+1]-1), each bucket sorted by (higher vertex,
+       triangle*2 + direction), so walking the buckets visits them in (lo, hi, tri, dir)
+       order with plain 32-bit numbers. edges[2s] = higher vertex, edges[2s+1] =
+       triangle*2 + direction (0 when the triangle walks lo to hi, else 1).
+       For the smoothing step later: the direction bits are as they were before orientMesh
+       flipped any triangle (hi and triangle stay valid), and whether to build this once and
+       share it with the audit is still open. */
+    function buildEdgeTable(t, vertices, control) {
+        const nt = t.length / 3;
+        if (nt >= 2147483648) throw new Error("orientation table limit exceeded");
+        const start = new Uint32Array(vertices + 1), edges = new Uint32Array(6 * nt);
+        const outOfRange = () => new Error("orientation table: vertex index out of range");
+        for (let q = 0; q < t.length; q += 3) {
+            if ((q & 49151) === 0) control.check();
+            for (let k = 0; k < 3; k++) {
+                const a = t[q + k], b = t[q + (k + 1) % 3], lo = a < b ? a : b;
+                if (lo >= vertices || (a > b ? a : b) >= vertices) throw outOfRange();
+                start[lo]++;
+            }
+        }
+        for (let v = 0, sum = 0; v < vertices; v++) {
+            if ((v & 16383) === 0) control.check();
+            sum += start[v]; start[v] = sum;
+        }
+        start[vertices] = t.length;
+        for (let q = t.length - 3; q >= 0; q -= 3) {
+            if ((q & 49151) === 0) control.check();
+            for (let k = 2; k >= 0; k--) {
+                const a = t[q + k], b = t[q + (k + 1) % 3];
+                const slot = --start[a < b ? a : b];
+                edges[2 * slot] = a < b ? b : a;
+                edges[2 * slot + 1] = (q / 3) * 2 + (a < b ? 0 : 1);
+            }
+        }
+        for (let v = 0; v < vertices; v++) {
+            if ((v & 16383) === 0) control.check();
+            const from = start[v], to = start[v + 1], size = to - from;
+            if (size < 2) continue;
+            if (size <= 64) {
+                for (let i = from + 1; i < to; i++) {
+                    const hi = edges[2 * i], tag = edges[2 * i + 1];
+                    let j = i - 1;
+                    while (j >= from && (edges[2 * j] > hi || (edges[2 * j] === hi && edges[2 * j + 1] > tag))) {
+                        edges[2 * j + 2] = edges[2 * j]; edges[2 * j + 3] = edges[2 * j + 1];
+                        j--;
+                    }
+                    edges[2 * j + 2] = hi; edges[2 * j + 3] = tag;
+                }
+            } else {
+                const order = Array.from({ length: size }, (_, i) => from + i);
+                order.sort((x, y) => (edges[2 * x] - edges[2 * y]) || (edges[2 * x + 1] - edges[2 * y + 1]));
+                const copy = new Uint32Array(2 * size);
+                for (let i = 0; i < size; i++) {
+                    copy[2 * i] = edges[2 * order[i]]; copy[2 * i + 1] = edges[2 * order[i] + 1];
+                }
+                edges.set(copy, 2 * from);
+            }
+        }
+        return { start, edges };
     }
 
     function orientMesh(arrays, control) {
         const t = arrays.triVerts, nt = t.length / 3, nv = arrays.vertices;
-        if (nv > 2097151 || nt > 2097151) throw new Error("orientation pack limit exceeded");
-        const records = new BigUint64Array(t.length), vertexMask = (1n << 21n) - 1n;
-        let write = 0;
-        for (let q = 0; q < t.length; q += 3) {
-            if ((q & 16383) === 0) control.check();
-            for (const pair of [[t[q], t[q + 1]], [t[q + 1], t[q + 2]], [t[q + 2], t[q]]]) {
-                const lo = Math.min(pair[0], pair[1]), hi = Math.max(pair[0], pair[1]);
-                const direction = pair[0] < pair[1] ? 0n : 1n;
-                records[write++] = (BigInt(lo) << 43n) | (BigInt(hi) << 22n)
-                    | (BigInt(q / 3) << 1n) | direction;
-            }
-        }
-        records.sort();
+        const { start, edges } = buildEdgeTable(t, nv, control);
         const parent = new Int32Array(nt), rank = new Uint8Array(nt), parity = new Uint8Array(nt);
         for (let i = 0; i < nt; i++) parent[i] = i;
         const find = (value) => {
@@ -899,31 +923,32 @@
         };
         let conflicts = 0, overused = 0;
         const boundaryRecords = [];
-        for (let i = 0; i < records.length;) {
-            if ((i & 16383) === 0) control.check();
-            const key = records[i] >> 22n, start = i;
-            while (i < records.length && (records[i] >> 22n) === key) i++;
-            const count = i - start;
-            if (count === 1) {
-                const record = records[start];
-                boundaryRecords.push(Number(key >> 21n), Number(key & vertexMask),
-                    Number((record >> 1n) & 2097151n), Number(record & 1n));
-                continue;
-            }
-            if (count !== 2) { overused++; continue; }
-            const first = records[start], second = records[start + 1];
-            const a = Number((first >> 1n) & 2097151n), b = Number((second >> 1n) & 2097151n);
-            const relation = Number(first & 1n) ^ Number(second & 1n) ^ 1;
-            const rootA = find(a), parityA = parity[a], rootB = find(b), parityB = parity[b];
-            if (rootA === rootB) {
-                if ((parityA ^ parityB) !== relation) conflicts++;
-            } else if (rank[rootA] < rank[rootB]) {
-                parent[rootA] = rootB;
-                parity[rootA] = parityA ^ parityB ^ relation;
-            } else {
-                parent[rootB] = rootA;
-                parity[rootB] = parityA ^ parityB ^ relation;
-                if (rank[rootA] === rank[rootB]) rank[rootA]++;
+        for (let lo = 0; lo < nv; lo++) {
+            if ((lo & 16383) === 0) control.check();
+            const end = start[lo + 1];
+            for (let i = start[lo]; i < end;) {
+                const hi = edges[2 * i], first = i;
+                while (i < end && edges[2 * i] === hi) i++;
+                const count = i - first;
+                if (count === 1) {
+                    boundaryRecords.push(lo, hi, edges[2 * first + 1] >>> 1, edges[2 * first + 1] & 1);
+                    continue;
+                }
+                if (count !== 2) { overused++; continue; }
+                const tagA = edges[2 * first + 1], tagB = edges[2 * first + 3];
+                const a = tagA >>> 1, b = tagB >>> 1;
+                const relation = (tagA & 1) ^ (tagB & 1) ^ 1;
+                const rootA = find(a), parityA = parity[a], rootB = find(b), parityB = parity[b];
+                if (rootA === rootB) {
+                    if ((parityA ^ parityB) !== relation) conflicts++;
+                } else if (rank[rootA] < rank[rootB]) {
+                    parent[rootA] = rootB;
+                    parity[rootA] = parityA ^ parityB ^ relation;
+                } else {
+                    parent[rootB] = rootA;
+                    parity[rootB] = parityA ^ parityB ^ relation;
+                    if (rank[rootA] === rank[rootB]) rank[rootA]++;
+                }
             }
         }
         for (let triangle = 0; triangle < nt; triangle++) {
@@ -1002,16 +1027,8 @@
         }
     }
 
-    /* Full overused/conflict audit whenever orientMesh can pack the mesh
-       (≤ 2,097,151 vertices and triangles). Bigger meshes keep the old rule
-       (audit only when marching saw a misoriented edge), so a mesh that hollowed
-       before still hollows; lifting the pack limit belongs with finer lamp walls. */
+    // The full overused/conflict audit runs on every grid mesh.
     function auditGridMesh(meshArrays, control) {
-        const tooBig = meshArrays.vertices > 2097151 || meshArrays.triVerts.length / 3 > 2097151;
-        if (tooBig && !meshArrays.misorientedEdges) {
-            capDirectedBoundaries(meshArrays, meshArrays.boundaryPairs, control);
-            return;
-        }
         const oriented = orientMesh(meshArrays, control);
         if (oriented.overused || oriented.conflicts) {
             throw new Error(`grid mesh audit failed: overused=${oriented.overused}, conflicts=${oriented.conflicts}`);
@@ -1489,7 +1506,7 @@
         HollowCancelled,
         HollowGridTooLarge,
         bottomPlane,
-        _test: { marchGrid, orientMesh, auditGridMesh, edgeKey, gridSpec, columnSignPass,
-            exactBandPass, HOLE_SEGMENTS },
+        _test: { marchGrid, orientMesh, auditGridMesh, buildEdgeTable, gridSpec,
+            columnSignPass, exactBandPass, HOLE_SEGMENTS },
     };
 })();

@@ -821,8 +821,8 @@
             if (meshC.triVerts[q] !== clean[q] || meshC.triVerts[q + 1] !== clean[q + 1]
                 || meshC.triVerts[q + 2] !== clean[q + 2]) differ++;
         }
-        log(`T20c ${differ === 1 ? "stray triangle fixed back" : "whole surface turned"} (${differ} triangles differ)`);
-        check("T20c one flipped triangle is made consistent", errorC === "" && (differ === 1 || differ === nt - 1),
+        log(`T20c ${differ === 0 ? "stray triangle fixed back" : "whole surface turned"} (${differ} triangles differ from the clean torus)`);
+        check("T20c one flipped triangle is made consistent", errorC === "" && (differ === 0 || differ === nt - 1),
             `${errorC} differ=${differ}`);
         meshC.triVerts = null;
 

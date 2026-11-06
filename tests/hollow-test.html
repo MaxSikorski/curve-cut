@@ -177,7 +177,7 @@
             dispose(abovePlate);
             for (let i = 0; i < steps.length; i++) {
                 const x = -118 + 8 + 15 + i * 38;
-                const footprint = translated(wasm.Manifold.cube([30, 31, steps[i]], true), [x, 19.5, 0]);
+                const footprint = translated(wasm.Manifold.cube([30.2, 31, steps[i] + 0.2], true) /* 0.1 mm larger each side: no coplanar slivers */, [x, 19.5, 0]);
                 const next = labels.subtract(footprint);
                 dispose(labels); dispose(footprint); labels = next;
             }

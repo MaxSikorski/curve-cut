@@ -1194,7 +1194,7 @@
             let work = hollow;
             try {
                 faces.forEach((face, index) => {
-                    control.check();
+                    control.progress("open-faces", index / faces.length);
                     const n = index + 1;
                     const resolved = face === "bottom" ? bottomPlane(source) : face;
                     const label = face === "bottom" ? "Bottom" : `Face ${n}`;
@@ -1203,42 +1203,72 @@
                         openedAreaMm2: 0, opened: false,
                     };
                     facts.push(fact);
-                    const skip = () => warnings.push({
-                        code: "open-face-no-cavity",
-                        detail: `Open face ${n} (${label}) doesn't reach the hollow inside, so it stays closed.`,
-                    });
                     const temps = [];
                     const own = (value) => { temps.push(value); return value; };
                     try {
                         const into = { x: -resolved.normal.x, y: -resolved.normal.y, z: -resolved.normal.z };
                         const frame = frameFromAxis(resolved.point, into);
                         const above = own(own(inner.transform(frame.toLocal)).trimByPlane([0, 0, 1], 0));
-                        if (above.isEmpty()) { skip(); return; }
-                        const zc = above.boundingBox().min[2];
-                        if (zc > 2 * wall + 1) { skip(); return; }
+                        const parts = above.isEmpty() ? [] : above.decompose();
+                        parts.forEach(own);
+                        /* Each separate pocket gets its own floor height: only the layer just
+                           inside the plane is projected, never a whole cavity. */
+                        const reaching = parts
+                            .map((part) => ({ part, zc: part.boundingBox().min[2] }))
+                            .filter((entry) => entry.zc <= 2 * wall + 1);
+                        if (!reaching.length) {
+                            warnings.push({
+                                code: "open-face-no-cavity",
+                                detail: `Open face ${n} (${label}) doesn't reach the hollow inside, so it stays closed.`,
+                            });
+                            return;
+                        }
                         const band = Math.max(0.5 * wall, gridH || 0);
-                        const slab = own(above.trimByPlane([0, 0, -1], -(zc + band)));
-                        const footprint = own(slab.project());
-                        const area = crossSectionArea(footprint);
-                        if (!(area >= 1e-6)) { skip(); return; }
                         const margin = wall + 1;
-                        const tall = own(manifoldStatics().extrude(footprint, zc + band + margin));
-                        const prismLocal = own(tall.translate([0, 0, -margin]));
-                        const prism = own(prismLocal.transform(frame.toWorld));
-                        const next = work.subtract(prism);
-                        if (work !== hollow) dispose(work);
-                        work = next;
-                        const ring = own(own(source.transform(frame.toLocal)).slice(0.5));
-                        const inset = own(ring.offset(-0.5 * wall));
-                        const rim = own(footprint.subtract(inset));
-                        if (crossSectionArea(rim) > 1) {
+                        let ring = null, openedCount = 0, openedArea = 0, thinRim = false, thinSide = false;
+                        for (const { part, zc } of reaching) {
+                            control.check();
+                            const slab = own(part.trimByPlane([0, 0, -1], -(zc + band)));
+                            const footprint = own(slab.project());
+                            const area = crossSectionArea(footprint);
+                            if (!(area >= 1e-6)) continue;
+                            const tall = own(manifoldStatics().extrude(footprint, zc + band + margin));
+                            const prismLocal = own(tall.translate([0, 0, -margin]));
+                            const prism = own(prismLocal.transform(frame.toWorld));
+                            const next = work.subtract(prism);
+                            if (work !== hollow) dispose(work);
+                            work = next;
+                            openedCount++;
+                            openedArea += area;
+                            if (!ring) ring = own(own(source.transform(frame.toLocal)).slice(0.5));
+                            if (!ring.isEmpty()) {
+                                const inset = own(ring.offset(-0.5 * wall));
+                                if (crossSectionArea(own(footprint.subtract(inset))) > 1) thinRim = true;
+                            }
+                            const top = own(part.slice(zc + band));
+                            const reach = own(top.offset(0.25 * wall));
+                            if (crossSectionArea(own(footprint.subtract(reach))) > 1) thinSide = true;
+                        }
+                        if (thinRim) {
                             warnings.push({
                                 code: "open-face-thin-rim",
                                 detail: `Open face ${n} (${label}) leaves a rim thinner than the wall near its edge.`,
                             });
                         }
-                        fact.openedAreaMm2 = area;
-                        fact.opened = true;
+                        if (thinSide) {
+                            warnings.push({
+                                code: "open-face-thin-side",
+                                detail: `Face ${n}: the opening thins the side wall near this face; check the section view.`,
+                            });
+                        }
+                        if (openedCount < reaching.length) {
+                            warnings.push({
+                                code: "open-face-partial",
+                                detail: `Face ${n}: one hollow pocket near this face could not be opened; it stays sealed.`,
+                            });
+                        }
+                        fact.openedAreaMm2 = openedArea;
+                        fact.opened = openedCount === reaching.length;
                     } finally {
                         for (const temp of temps) dispose(temp);
                     }
@@ -1256,10 +1286,10 @@
     function applyHoles(hollow, holes, control) {
         return control.stage("holes", () => {
             const Manifold = manifoldStatics();
-            const cylinders = [];
+            const cylinders = [], warnings = [];
             let merged = null, drilled = null;
             try {
-                for (const hole of holes) {
+                holes.forEach((hole, index) => {
                     const r = hole.diameterMm / 2, lead = Math.max(1, r);
                     const origin = {
                         x: hole.point.x - hole.direction.x * lead,
@@ -1267,14 +1297,27 @@
                         z: hole.point.z - hole.direction.z * lead,
                     };
                     const raw = Manifold.cylinder(hole.depthMm + lead, r, r, HOLE_SEGMENTS, false);
+                    let cylinder = null, overlap = null;
                     try {
-                        cylinders.push(raw.transform(frameFromAxis(origin, hole.direction).toWorld));
+                        cylinder = raw.transform(frameFromAxis(origin, hole.direction).toWorld);
+                        overlap = hollow.intersect(cylinder);
+                        if (overlap.volume() > 1e-6) {
+                            cylinders.push(cylinder);
+                            cylinder = null;
+                        } else {
+                            warnings.push({
+                                code: "hole-missed",
+                                detail: `Hole ${index + 1} doesn't touch the model; nothing was drilled.`,
+                            });
+                        }
                     } finally {
-                        dispose(raw);
+                        dispose(overlap); dispose(cylinder); dispose(raw);
                     }
-                }
+                });
+                const count = cylinders.length;
+                if (!count) return { hollow, count, warnings };
                 control.check();
-                if (cylinders.length === 1) {
+                if (count === 1) {
                     merged = cylinders.pop();
                 } else {
                     try {
@@ -1289,7 +1332,7 @@
                     }
                 }
                 drilled = hollow.subtract(merged);
-                return { hollow: drilled };
+                return { hollow: drilled, count, warnings };
             } catch (error) {
                 dispose(drilled);
                 throw error;
@@ -1360,7 +1403,8 @@
                 const before = current.volume();
                 const stepped = applyHoles(current, holes, control);
                 if (stepped.hollow !== current) { dispose(current); current = stepped.hollow; }
-                holesStat = { count: holes.length, removedMm3: before - current.volume() };
+                warnings.push(...stepped.warnings);
+                holesStat = { count: stepped.count, removedMm3: before - current.volume() };
             }
             control.check();
             const volumeAfterMm3 = current.volume();

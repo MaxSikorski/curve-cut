@@ -3,7 +3,8 @@
 
 Covers the analytic cube, hybrid selector and D2 tripwire, sampled-wall
 warnings, multi-cavity preservation, cancellation cleanup, preview estimate, and
-open faces plus drilled holes (watertight, volumes, neck guard, validation, cancel).
+open faces plus drilled holes (watertight, volumes, neck guard, validation, cancel),
+and the grid mesh audit on large meshes (raw goldens, 2.2 M-triangle closed mesh).
 
 Runs in real time through tools/browser.py (Playwright's headless Chromium).
 SKIPs loudly (exit 0) if that browser is not installed.

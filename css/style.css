@@ -517,10 +517,49 @@ p { line-height: 1.6; color: inherit; opacity: 0.85; }
     text-overflow: ellipsis;
 }
 
+.toast {
+    width: max-content;
+    max-width: min(560px, 80vw);
+}
+.toast .stats-name {
+    white-space: normal;
+    overflow: visible;
+    text-align: center;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+}
+
 .stats-detail {
     font-size: 0.75rem;
     color: var(--text-muted);
     letter-spacing: 0.02em;
+}
+
+.units-trigger {
+    position: relative;
+    margin-left: 6px;
+    padding: 0;
+    border: 0;
+    border-bottom: 1px solid currentColor;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+.units-trigger::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(44px, 100%);
+    height: 44px;
+    transform: translate(-50%, -50%);
+}
+.units-trigger:hover:not(:disabled) { color: var(--text-color); }
+.units-trigger:disabled { cursor: default; opacity: 0.35; }
+.units-trigger.units-nudge:not(:disabled) {
+    color: var(--text-color);
+    border-bottom-width: 2px;
 }
 
 /* ---------- Cut mode picker + parameter panel ---------- */
@@ -557,6 +596,23 @@ p { line-height: 1.6; color: inherit; opacity: 0.85; }
     opacity: 0;
     visibility: hidden;
 }
+
+/* Collapse/expand chevron (feature request #15) — sits centered on the
+   panel's top edge; js/collapse.js drives the y-tween and rotation class. */
+.panel-collapse-btn {
+    position: absolute;
+    top: -14px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 28px;
+    height: 28px;
+    z-index: 1;
+}
+/* .icon-btn's :active scale would clobber the centering translate (one
+   transform property) — restate both together for the press state */
+.panel-collapse-btn:active:not(:disabled) { transform: translateX(-50%) scale(0.95); }
+.panel-collapse-btn svg { transition: transform 0.4s ease; }
+.panel-collapse-btn.collapsed svg { transform: rotate(180deg); }
 
 .sc-row {
     display: flex;
@@ -654,6 +710,24 @@ p { line-height: 1.6; color: inherit; opacity: 0.85; }
 }
 .bp-x { font-size: 0.75rem; color: var(--text-muted); }
 .bp-conn-shape { flex: 0 0 auto !important; width: 104px; }
+.bp-hollow-hint {
+    flex: 1;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+.bp-hollow-teaser {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+.bp-hollow-row .view-btn { flex: 0 0 auto; }
+.bp-hollow-status {
+    text-align: left;
+    padding-left: 62px;
+    color: var(--text-color);
+    opacity: 0.85;
+}
+.bp-hollow-warning-hard { font-weight: 700; }
 
 .nav-actions { display: flex; gap: 4px; align-items: center; }
 
@@ -741,6 +815,50 @@ body.theme-anim * {
 }
 
 .about-modal { max-width: 520px; }
+.units-modal { max-width: 540px; }
+.units-modal .modal-title { margin-bottom: 22px; }
+.units-modal .sc-row { margin-top: 12px; }
+.units-modal .sc-row > label { width: 76px; }
+.units-detected {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 18px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+.units-detected strong { color: var(--text-color); font-weight: 500; }
+.units-segments {
+    display: flex;
+    padding: 2px;
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+}
+.units-segments button {
+    min-width: 58px;
+    padding: 7px 12px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 500;
+    line-height: 1;
+    cursor: pointer;
+}
+.units-segments button.on {
+    background: var(--btn-bg);
+    color: var(--btn-text);
+}
+.units-calibration { padding-top: 6px; flex-wrap: wrap; }
+.units-calibration select { flex: 0 0 54px; }
+.units-calibration .units-should {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+.units-calibration .view-btn { margin-left: auto; }
 .close-modal {
     position: absolute;
     top: 18px;
@@ -771,6 +889,20 @@ body.theme-anim * {
     padding: 11px 22px;
 }
 .about-actions svg { opacity: 0.5; }
+.about-legal {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--divider);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+.about-legal a {
+    color: inherit;
+    text-decoration-color: currentColor;
+    text-underline-offset: 2px;
+}
+.about-legal a:hover { color: var(--text-color); }
 
 .fmt-toggle {
     display: flex;
@@ -866,18 +998,34 @@ body.theme-anim * {
     flex-direction: column;
     gap: 8px;
     align-items: center;
-    padding: 12px 22px;
+    width: min(320px, calc(100vw - 32px));
+    min-height: 76px;
+    padding: 12px 18px;
     border-radius: 18px;
     z-index: 170;
-    min-width: 220px;
     opacity: 0;
     visibility: hidden;
+    pointer-events: none;
+    contain: layout paint;
 }
 
 .progress-label {
+    width: 100%;
     font-size: 0.8rem;
     font-weight: 500;
     letter-spacing: 0.02em;
+    line-height: 1.2;
+    overflow: hidden;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.progress-eta {
+    min-height: 1em;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    line-height: 1;
 }
 
 .progress-track {
@@ -894,7 +1042,7 @@ body.theme-anim * {
     width: 0%;
     border-radius: 2px;
     background: var(--text-color);
-    transition: width 0.3s ease;
+    transition: width 0.25s ease-out;
 }
 
 /* indeterminate: a sliding sliver while the engine crunches */
@@ -903,11 +1051,11 @@ body.theme-anim * {
     animation: progress-slide 1.1s ease-in-out infinite;
 }
 @keyframes progress-slide {
-    0% { margin-left: -35%; }
-    100% { margin-left: 100%; }
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(285%); }
 }
 
-/* ---------- Modal (simplify offer) ---------- */
+/* ---------- Modal ---------- */
 
 .modal-overlay {
     position: fixed;
@@ -954,9 +1102,16 @@ body.theme-anim * {
     flex-wrap: wrap;
 }
 
+.nonwatertight-modal { max-width: 500px; }
+.nonwatertight-actions .btn { white-space: nowrap; }
+
 @media (max-width: 480px) {
     .modal { padding: 28px; }
     .modal-actions { justify-content: stretch; flex-direction: column-reverse; }
+    .nonwatertight-actions .btn { width: 100%; }
+    .units-modal .sc-row { align-items: flex-start; }
+    .units-modal .sc-row > label { width: 68px; padding-top: 8px; }
+    .units-calibration .units-should { display: none; }
 }
 
 /* ---------- Mobile ---------- */
@@ -982,4 +1137,75 @@ body.theme-anim * {
 
 @media (max-width: 380px) {
     .hero-title { font-size: 2rem; }
+}
+
+/* ---------- Accessibility foundation (v2.0.2 roadmap item 3) ---------- */
+
+/* Visually hidden but still readable by screen readers — used for the
+   toast aria-live region (js/app.js). */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* 44px minimum touch target (WCAG 2.5.5) via an invisible ::after hit-box
+   centered on each button — the visible button keeps its original size, so
+   nothing here changes the design at rest. .mode-btn/.conn-shape inherit
+   the .view-btn rule; tour Back/Next do too (they're .view-btn already).
+   .icon-btn (undo/redo) is already 44x44 natively and skipped here —
+   .panel-collapse-btn and #tour-close are already position:absolute (their
+   own rules, earlier in this file) so they don't need position added, just
+   the ::after; adding "position: relative" to .icon-btn here would flip
+   .panel-collapse-btn's inherited position:absolute (equal specificity,
+   later source) and break the chevron's placement — left out on purpose. */
+.view-btn, .piece-icon, .theme-toggle {
+    position: relative;
+}
+.view-btn::after, .piece-icon::after, .theme-toggle::after,
+.panel-collapse-btn::after, #tour-close::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(44px, 100%);
+    height: max(44px, 100%);
+    transform: translate(-50%, -50%);
+}
+/* the two header icons sit 4px apart — a full-width 44px box would cover
+   the neighbor's visible pixels (clicking the info icon's edge would flip
+   the theme). Grow sideways only to the gap midpoint; vertical keeps 44. */
+.nav-actions .theme-toggle::after {
+    width: calc(100% + 4px);
+}
+
+/* prefers-reduced-motion: shorten CSS transitions/animations to effectively
+   instant. GSAP tweens are handled separately via CC.a11y.dur() in the JS
+   modules — duration 0 rather than skipping, so onComplete callbacks the
+   app relies on still fire. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        transition-duration: 0.01ms !important;
+        transition-delay: 0ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+    }
+    /* higher-specificity than the universal rule above — needs restating */
+    body.theme-anim, body.theme-anim * {
+        transition-duration: 0.01ms !important;
+    }
+
+    .progress-track.indeterminate .progress-fill {
+        width: 100%;
+        transform: translateX(0);
+        animation: none !important;
+        opacity: 0.45;
+    }
 }

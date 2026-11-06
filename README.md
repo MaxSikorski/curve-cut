@@ -5,6 +5,8 @@ Then scale them way past your build plate and print BIG.
 
 **Try it: [maxsikorski.github.io/curve-cut](https://maxsikorski.github.io/curve-cut/)**
 
+**Beta: [https://curve-cut.vercel.app/](https://curve-cut.vercel.app/)**
+
 Every slicer can split a model with a straight plane. Curve Cut lets you draw the cut
 yourself, like an S-curve that follows the natural seam of a model instead of slicing
 straight through the detail. Each cut produces watertight, print-ready pieces, and you
@@ -56,7 +58,7 @@ Hershey fonts, and the rest is plain HTML, CSS, and JavaScript with no build ste
 
 ## License
 
-[AGPL-3.0](LICENSE). Free to use, study, share, and modify — and if you build
+[AGPL-3.0-only](LICENSE). Free to use, study, share, and modify — and if you build
 something on top of it (including a hosted service), your version stays open too.
 Bring it to your print club. Bundled libraries keep their own licenses — see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

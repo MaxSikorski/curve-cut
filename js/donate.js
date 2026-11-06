@@ -41,19 +41,22 @@
     const freeBtn = modal.querySelector("#donate-free");
     freeBtn.href = CC.about.donateUrl;
 
+    const trap = CC.a11y.makeFocusTrap(modal);
     let open = false;
     function show() {
         if (open) return;
         open = true;
-        gsap.to(overlay, { autoAlpha: 1, duration: 0.3, ease: "power2.out" });
+        trap.activate();
+        gsap.to(overlay, { autoAlpha: 1, duration: CC.a11y.dur(0.3), ease: "power2.out" });
         gsap.fromTo(modal, { scale: 0.95 },
-            { autoAlpha: 1, scale: 1, duration: 0.4, ease: "power4.out" });
+            { autoAlpha: 1, scale: 1, duration: CC.a11y.dur(0.4), ease: "power4.out" });
     }
     function hide() {
         if (!open) return;
         open = false;
-        gsap.to(overlay, { autoAlpha: 0, duration: 0.3, ease: "power2.out" });
-        gsap.to(modal, { autoAlpha: 0, scale: 0.95, duration: 0.3, ease: "power2.out" });
+        trap.deactivate();
+        gsap.to(overlay, { autoAlpha: 0, duration: CC.a11y.dur(0.3), ease: "power2.out" });
+        gsap.to(modal, { autoAlpha: 0, scale: 0.95, duration: CC.a11y.dur(0.3), ease: "power2.out" });
     }
 
     freeBtn.addEventListener("click", () => { // the link opens itself; we just say thanks

@@ -17,6 +17,7 @@
     const drawBtn = document.getElementById("draw-btn");
     const modeDock = document.getElementById("mode-dock");
     const panel = document.getElementById("simplecut-panel");
+    const panelCollapse = CC.makeCollapsible(panel); // pop-down chevron (feature #15)
     const viewDock = document.getElementById("view-dock");
     const actionDock = document.getElementById("action-dock");
     const applyBtn = document.getElementById("sc-apply");
@@ -39,6 +40,7 @@
     const AXIS_COLORS = { x: 0x7db98a, y: 0xd47a72, z: 0x6f95d4 };
 
     const connPanel = document.getElementById("connector-panel");
+    const connPanelCollapse = CC.makeCollapsible(connPanel); // pop-down chevron (feature #15)
     const connBtn = document.getElementById("sc-connectors");
 
     let mode = null;          // null | "curve" | "planar" | "dovetail"
@@ -259,13 +261,32 @@
     let connPreviewMeshes = [];
     let connHiddenPieces = [];
 
-    function buildConnPreview() {
+    async function buildConnPreview() {
+        const op = CC.ops.begin("cut-preview");
+        if (!op) {
+            CC.toast("Another operation is still running — one moment.");
+            return false;
+        }
         disposeConnPreview();
-        const cutter = CutCore.buildPlanarCutter(planePoint, planeBasis().n, bounds);
         try {
-            for (const piece of CC.pieces) {
-                if (!piece.visible) continue;
-                const r = CutCore.cutWithCutter(piece.geometry, cutter);
+            const visible = CC.pieces.filter((piece) => piece.visible);
+            if (!visible.length) return true;
+            const point = planePoint.clone();
+            const normal = planeBasis().n;
+            const box = bounds.clone();
+            const plan = {
+                worker: {
+                    type: "planar", point: CC.cutFlow.pointSpec(point),
+                    normal: CC.cutFlow.pointSpec(normal),
+                    bounds: CC.cutFlow.boundsSpec(box), gap: 0,
+                },
+                main: () => CutCore.buildPlanarCutter(point, normal, box),
+            };
+            const results = await CC.cutFlow.cutBatch(visible, plan, null, {}, op);
+            if (!results) return false;
+            for (let i = 0; i < visible.length; i++) {
+                const piece = visible[i];
+                const r = results[i];
                 const male = connFlipped ? r.outside : r.inside;
                 const other = connFlipped ? r.inside : r.outside;
                 if (other) other.dispose();
@@ -279,8 +300,12 @@
                 piece.visible = false;
                 connHiddenPieces.push(piece);
             }
+            return true;
+        } catch (error) {
+            if (error && error.name === "ComputeCancelled" && !op.alive()) return false;
+            throw error;
         } finally {
-            cutter.delete();
+            CC.ops.end(op);
         }
     }
 
@@ -346,7 +371,13 @@
         CC.progress.show("Preparing the cut preview…");
         await nextFrame();
         try {
-            buildConnPreview();
+            const built = await buildConnPreview();
+            if (!built) {
+                connMode = false;
+                buildGizmo();
+                CC.progress.hide();
+                return;
+            }
         } catch (err) {
             console.error(err);
             CC.toast("Couldn't preview the cut — is the model watertight?");
@@ -357,6 +388,7 @@
         }
         CC.progress.hide();
         gsap.to(panel, { autoAlpha: 0, y: 10, duration: 0.3, ease: "power2.out" });
+        connPanelCollapse.reset(); // connector panel always opens expanded
         gsap.fromTo(connPanel, { y: 16 },
             { autoAlpha: 1, y: 0, duration: 0.6, ease: "power4.out", delay: 0.1 });
     }
@@ -368,6 +400,7 @@
         buildGizmo();
         rebuildPreview(); // restore the plane sheet + half tints
         gsap.to(connPanel, { autoAlpha: 0, y: 10, duration: 0.3, ease: "power2.out" });
+        panelCollapse.reset(); // returning to the simple-cut panel always expanded
         gsap.fromTo(panel, { y: 16 },
             { autoAlpha: 1, y: 0, duration: 0.6, ease: "power4.out", delay: 0.1 });
     }
@@ -799,6 +832,10 @@
 
     function enterFlow() {
         if (!CC.getModel()) return;
+        if (CC.ops.busy()) {
+            CC.toast("Another operation is still running — one moment.");
+            return;
+        }
         if (!CC.pieces.some((p) => p.visible)) {
             CC.toast("Every piece is hidden — show one to cut it.");
             return;
@@ -837,6 +874,11 @@
 
     function setMode(next) {
         if (next === mode) return;
+        if (CC.ops.busy()) {
+            // switching modes tears down the state a running cut depends on
+            CC.toast("Another operation is still running — one moment.");
+            return;
+        }
 
         // leave the old mode without touching the main docks
         if (mode === "curve") CC.pen.exit(false, false);
@@ -844,7 +886,9 @@
         mode = next;
 
         for (const btn of modeDock.querySelectorAll(".mode-btn")) {
-            btn.classList.toggle("active", btn.dataset.mode === next);
+            const isActive = btn.dataset.mode === next;
+            btn.classList.toggle("active", isActive);
+            btn.setAttribute("aria-pressed", isActive ? "true" : "false");
         }
 
         if (next === "curve") {
@@ -886,6 +930,7 @@
         setConnField("rot", 0, 0, 120, 1);
 
         panel.classList.toggle("planar-mode", next === "planar");
+        panelCollapse.reset(); // switching into planar/dovetail always starts expanded
         gsap.fromTo(panel, { y: 16 },
             { autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out" });
         buildGizmo();
@@ -894,7 +939,7 @@
 
     // --------------------------------------------------------------- apply
 
-    function applySimpleCut() {
+    function applySimpleCut(options = {}) {
         const keepUpper = keepUpperBox.checked;
         const keepLower = keepLowerBox.checked;
         if (invalid) return;
@@ -925,26 +970,50 @@
             const male = connFlipped ? "outside" : "inside";
             const cdTol = parseFloat(connDepthTol.value) || 0;
             const csTol = parseFloat(connSizeTol.value) || 0;
+            const base = list.map((pos) => ({
+                pos: CC.cutFlow.pointSpec(pos), normal: CC.cutFlow.pointSpec(dir),
+                shape: cp.shape, size: cp.size, depth: cp.depth, rotDeg: cp.rot,
+            }));
             makeConnectors = () => ({
-                pegs: list.map((pos) => CutCore.buildConnectorSolid(
-                    { pos, normal: dir, shape: cp.shape, size: cp.size, depth: cp.depth, rotDeg: cp.rot })),
-                sockets: list.map((pos) => CutCore.buildConnectorSolid(
-                    { pos, normal: dir, shape: cp.shape, size: cp.size, depth: cp.depth, rotDeg: cp.rot },
-                    { r: csTol / 2, d: cdTol })),
-                maleSide: male,
+                worker: {
+                    pegs: base,
+                    sockets: base.map((entry) => ({
+                        ...entry, grow: { r: csTol / 2, d: cdTol },
+                    })),
+                    maleSide: male,
+                },
+                main: () => ({
+                    pegs: list.map((pos) => CutCore.buildConnectorSolid(
+                        { pos, normal: dir, shape: cp.shape, size: cp.size,
+                            depth: cp.depth, rotDeg: cp.rot })),
+                    sockets: list.map((pos) => CutCore.buildConnectorSolid(
+                        { pos, normal: dir, shape: cp.shape, size: cp.size,
+                            depth: cp.depth, rotDeg: cp.rot },
+                        { r: csTol / 2, d: cdTol })),
+                    maleSide: male,
+                }),
             });
         }
 
         const makeCutter = () => {
             if (modeAtApply === "planar") {
-                const exact = CutCore.buildPlanarCutter(point, normal, box);
                 const gap = Math.min(Math.max(p.clearance || 0, 0), 0.5);
-                if (!gap) return exact;
-                // upper piece is cut `gap` higher -> assembled gap = `gap`
                 return {
-                    inside: exact,
-                    outside: CutCore.buildPlanarCutter(
-                        point.clone().addScaledVector(normal, gap), normal, box),
+                    worker: {
+                        type: "planar", point: CC.cutFlow.pointSpec(point),
+                        normal: CC.cutFlow.pointSpec(normal),
+                        bounds: CC.cutFlow.boundsSpec(box), gap,
+                    },
+                    main: () => {
+                        const exact = CutCore.buildPlanarCutter(point, normal, box);
+                        if (!gap) return exact;
+                        // upper piece is cut `gap` higher -> assembled gap = `gap`
+                        return {
+                            inside: exact,
+                            outside: CutCore.buildPlanarCutter(
+                                point.clone().addScaledVector(normal, gap), normal, box),
+                        };
+                    },
                 };
             }
             const dt = {
@@ -953,22 +1022,24 @@
                 cx: tooth.x, cz: tooth.z,
             };
             return {
-                inside: CutCore.buildDovetailCutter(dt, box),                    // socket, full size
-                outside: CutCore.buildDovetailCutter(dt, box, { w: wTol, d: dTol }), // tongue, shrunk
+                worker: {
+                    type: "dovetail", params: dt, bounds: CC.cutFlow.boundsSpec(box),
+                    shrinkOutside: { w: wTol, d: dTol },
+                },
+                main: () => ({
+                    inside: CutCore.buildDovetailCutter(dt, box),
+                    outside: CutCore.buildDovetailCutter(dt, box, { w: wTol, d: dTol }),
+                }),
             };
         };
 
         // cutter's inside = below the surface = the LOWER piece
         CC.cutFlow.untint();
-        CC.cutFlow.applyCutterFlow(makeCutter, { inside: keepLower, outside: keepUpper }, makeConnectors)
+        CC.cutFlow.applyCutterFlow(makeCutter, { inside: keepLower, outside: keepUpper }, makeConnectors, options)
             .then((done) => { if (done) exitFlow(true); })
             .catch((err) => {
-                if (err.message === "not-watertight") {
-                    CC.toast("This model isn't watertight, so it can't be cut cleanly. A repair tool is planned.");
-                } else {
-                    console.error(err);
-                    CC.toast("The cut failed — see the console for details.");
-                }
+                CC.cutFlow.handleCutError(err, options,
+                    (retryOptions) => applySimpleCut(retryOptions));
             })
             .finally(() => {
                 CC.progress.hide();
@@ -1017,18 +1088,18 @@
         CC.progress.show("Flipping the cut preview…");
         await nextFrame();
         try {
-            buildConnPreview();
+            if (await buildConnPreview()) rebuildMarkers();
         } catch (err) {
             console.error(err);
         }
         CC.progress.hide();
-        rebuildMarkers();
     });
     for (const btn of connPanel.querySelectorAll(".conn-shape")) {
         btn.addEventListener("click", () => {
             connParams.shape = btn.dataset.shape;
             for (const b of connPanel.querySelectorAll(".conn-shape")) {
                 b.classList.toggle("active", b === btn);
+                b.setAttribute("aria-pressed", String(b === btn));
             }
             rebuildMarkers();
         });
@@ -1046,7 +1117,10 @@
         slider.addEventListener("input", onChange(slider));
     }
 
-    document.getElementById("sc-cancel").addEventListener("click", () => exitFlow(true));
+    document.getElementById("sc-cancel").addEventListener("click", () => {
+        CC.cutFlow.cancel();
+        exitFlow(true);
+    });
     applyBtn.addEventListener("click", applySimpleCut);
 
     // pen-side exits (Cancel / Done / Esc) also close the mode picker

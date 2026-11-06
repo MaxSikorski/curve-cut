@@ -58,9 +58,16 @@
     function demoApplyCut() {
         if (!demo.previewOpen || !CC.cutFlow.isEngineReady()) return;
         click("cut-apply");
-        demo.previewOpen = false;
-        demo.cutApplied = true;
+        // the boolean cut runs async — demo.previewOpen/cutApplied flip only
+        // once curvecut:pieces-changed confirms it actually landed (see
+        // demoCutLanded, wired below as this step's waitFor + end()'s guard),
+        // never optimistically here
     }
+
+    // the real completion for demoApplyCut — called once curvecut:pieces-changed
+    // confirms the cut committed, whether the tour is still stepping through
+    // it (onWaitDone) or ended mid-flight (end()'s deferred cleanup)
+    function demoCutLanded() { demo.previewOpen = false; demo.cutApplied = true; }
 
     function demoBigPrint() {
         // put the model back together first — Big Print wants the whole model
@@ -82,7 +89,12 @@
     function undoDemo() {
         try {
             if (demo.previewOpen) { click("cut-discard"); demo.previewOpen = false; }
-            if (demo.bigPrintOpen) { CC.bigPrint.exit(); demo.bigPrintOpen = false; }
+            // never exit Big Print mid-export — that's a running zip stream,
+            // not UI we can just tear down; leave it be and let it finish
+            if (demo.bigPrintOpen && CC.ops.busyName() !== "bigprint") {
+                CC.bigPrint.exit();
+                demo.bigPrintOpen = false;
+            }
             if (demo.cutApplied) { click("undo-btn"); demo.cutApplied = false; }
         } catch (err) { console.warn("tour cleanup:", err); }
     }
@@ -96,6 +108,7 @@
                 + "install. Hit Start now and we'll tour on the demo cube — or drop "
                 + "your own STL, OBJ, or 3MF anywhere and it continues on that instead.",
             waitFor: "curvecut:model-loaded",
+            pending: () => !CC.getModel(), // no model on hand yet
             demoOffer: true,
         },
         {
@@ -126,6 +139,11 @@
                 + "Gap field leaves clearance so printed parts actually fit together — "
                 + "and ⌘Z undoes any cut.",
             action: demoApplyCut,
+            // the boolean cut is async — don't advance (or let the tour end)
+            // until the real commit lands, or a fast Next leaves the preview
+            // dock stranded mid-cut (the bug this step exists to prevent)
+            waitFor: "curvecut:pieces-changed",
+            onWaitDone: demoCutLanded,
         },
         {
             title: "Your pieces",
@@ -155,6 +173,9 @@
     const card = document.createElement("div");
     card.id = "tour-card";
     card.className = "glass";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    card.setAttribute("aria-labelledby", "tour-title");
     card.innerHTML = `
         <button id="tour-close" aria-label="Skip the tour">&times;</button>
         <div class="tour-label" id="tour-label"></div>
@@ -185,9 +206,12 @@
         always: card.querySelector("#tour-always"),
     };
 
+    const trap = CC.a11y.makeFocusTrap(card);
+
     let active = false;
     let step = -1;
     let waitListener = null;
+    let opEndListener = null; // failure unlock for op-gated waits (once)
     let dragged = false;      // user moved the card — respect it this step
     const actionsDone = new Set(); // demo actions run once, forward only
 
@@ -275,25 +299,57 @@
         els.label.textContent = `Step ${step + 1} of ${STEPS.length}`;
         els.title.textContent = s.title;
         els.text.textContent = s.text;
-        els.back.style.visibility = step === 0 ? "hidden" : "visible";
         els.alwaysRow.style.display = s.last ? "flex" : "none"; // .sc-check is display:flex
         if (s.last) els.always.checked = store() === "always";
 
-        // waiting steps advance themselves; a loaded model turns them normal
+        // waiting steps advance themselves once the real thing they're
+        // waiting on lands; default gate is "some structural op is running"
+        // (a step's own action started it), model-loaded overrides with its
+        // own check since a model can already be on hand before we ask
         if (waitListener) {
             window.removeEventListener(waitListener.event, waitListener.fn);
             waitListener = null;
         }
-        const waiting = s.waitFor && !CC.getModel();
+        if (opEndListener) {
+            window.removeEventListener("curvecut:op-ended", opEndListener);
+            opEndListener = null;
+        }
+        const waiting = s.waitFor && (s.pending ? s.pending() : CC.ops.busy());
         // a waiting step with the demo on hand isn't stuck — "Start now" loads it
         const canDemo = waiting && s.demoOffer && !!window.DEMO_MODEL_B64;
         els.next.textContent = s.last ? "Done"
             : canDemo ? "Start now" : waiting ? "Waiting…" : "Next";
         els.next.disabled = !!waiting && !canDemo;
+        // back is locked too — leaving mid-wait would drop the listener that
+        // flips demo state when the real completion lands (Max #2)
+        els.back.style.visibility = step === 0 ? "hidden" : "visible";
+        els.back.disabled = !!waiting;
         if (waiting) {
-            const fn = () => setTimeout(() => { if (active && STEPS[step] === s) show(step + 1); }, 700);
+            const fn = () => {
+                // flags flip the moment the real thing lands — the delayed
+                // advance below is presentation, not state (verifier F3)
+                if (s.onWaitDone) s.onWaitDone();
+                setTimeout(() => {
+                    if (active && STEPS[step] === s) show(step + 1);
+                }, 700);
+            };
             window.addEventListener(s.waitFor, fn, { once: true });
             waitListener = { event: s.waitFor, fn };
+            // an op-gated wait can also FAIL — no completion event fires
+            // then, only op-ended from its finally. Unlock the step so the
+            // tour never wedges on "Waiting…" (verifier F1)
+            if (!s.pending) {
+                const rev0 = CC.ops.revision();
+                const failFn = () => {
+                    if (!(active && STEPS[step] === s)) return;
+                    if (CC.ops.revision() !== rev0) return; // committed — fn owns it
+                    window.removeEventListener(s.waitFor, fn);
+                    waitListener = null;
+                    show(step); // waiting recomputes false -> unlocked
+                };
+                window.addEventListener("curvecut:op-ended", failFn, { once: true });
+                opEndListener = failFn;
+            }
         }
 
         els.dots.innerHTML = STEPS.map((_, d) =>
@@ -309,27 +365,55 @@
         CC.about && CC.about.hide();
         active = true;
         actionsDone.clear();
+        // fresh bookkeeping per run — leftovers from an aborted earlier tour
+        // must not make undoDemo touch things THIS run never opened (F4)
+        demo.previewOpen = demo.cutApplied = demo.bigPrintOpen = false;
         veil.style.display = "block";
         card.style.display = "block";
         gsap.fromTo([veil, card], { opacity: 0 },
-            { opacity: 1, duration: 0.4, ease: "power2.out" });
+            { opacity: 1, duration: CC.a11y.dur(0.4), ease: "power2.out" });
         show(0);
+        trap.activate();
     }
 
     function end() {
         if (!active) return;
         active = false;
+        trap.deactivate();
         if (waitListener) {
             window.removeEventListener(waitListener.event, waitListener.fn);
             waitListener = null;
         }
+        if (opEndListener) {
+            window.removeEventListener("curvecut:op-ended", opEndListener);
+            opEndListener = null;
+        }
+        gsap.to([veil, card], {
+            opacity: 0, duration: CC.a11y.dur(0.3), ease: "power2.out",
+            onComplete: () => { veil.style.display = "none"; card.style.display = "none"; },
+        });
+        // our own demo cut may still be landing (Escape/Done can fire while
+        // it's in flight, unlike Next which the wait above already locks) —
+        // discarding/undoing under it would race the commit and strand the
+        // preview dock. op-ended fires from the op's finally on success AND
+        // failure, so this listener can never go stale (verifier F1/F2);
+        // a revision bump says it actually committed and must be undone
+        if (CC.ops.busy() && CC.ops.busyName() === "cut") {
+            const rev0 = CC.ops.revision();
+            window.addEventListener("curvecut:op-ended", () => {
+                if (CC.ops.revision() !== rev0) demoCutLanded();
+                finishEnd();
+            }, { once: true });
+            return;
+        }
+        finishEnd();
+    }
+
+    function finishEnd() {
+        if (active) return; // a fresh tour started before the old cut landed
         undoDemo(); // the tour leaves the model exactly as it found it
         if (CC.getModel()) CC.flyHome(); // ...and framed, not stranded far out (Max)
         try { localStorage.setItem(STORE_KEY, els.always.checked ? "always" : "done"); } catch (_) {}
-        gsap.to([veil, card], {
-            opacity: 0, duration: 0.3, ease: "power2.out",
-            onComplete: () => { veil.style.display = "none"; card.style.display = "none"; },
-        });
     }
 
     // ---------------------------------------------- demo model (Max #1)

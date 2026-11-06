@@ -532,8 +532,8 @@
         }
         compareAll("flat grid sheet", geometryFromArrays(gridPositions, gridTriangles));
 
-        for (const name of ["3DBenchy.stl", "Jesus-modified-hollow.stl",
-            "Jesus-solid-platform_fixed.stl", "V8-Block.stl"]) {
+        for (const name of ["3DBenchy.stl", "large-figure-hollow.stl",
+            "large-figure-solid.stl", "V8-Block.stl"]) {
             let buffer;
             try {
                 const response = await fetch(`../test-assets/${name}`);
@@ -664,22 +664,22 @@
 
         let fixtureBuffer;
         try {
-            fixtureBuffer = await (await fetch("../test-assets/Jesus-modified-hollow.stl")).arrayBuffer();
+            fixtureBuffer = await (await fetch("../test-assets/large-figure-hollow.stl")).arrayBuffer();
         } catch (error) {
-            log("SKIP: Jesus-modified-hollow.stl not present — fixture acceptance skipped.");
+            log("SKIP: large-figure-hollow.stl not present — fixture acceptance skipped.");
         }
         if (fixtureBuffer) {
             const t0 = performance.now();
             const fixture = new THREE.STLLoader().parse(fixtureBuffer);
             const fixtureRepair = CutCore.repairGeometry(fixture);
-            check("Jesus hollow fixture caps two loops", !!fixtureRepair
+            check("large-figure hollow fixture caps two loops", !!fixtureRepair
                 && fixtureRepair.method === "cap" && fixtureRepair.loops === 2,
                 fixtureRepair && `${fixtureRepair.method}/${fixtureRepair.loops}`);
             if (fixtureRepair) {
                 const repairedFixture = geometryFromResult(fixtureRepair);
-                check("Jesus hollow fixture is watertight", accepted(repairedFixture));
+                check("large-figure hollow fixture is watertight", accepted(repairedFixture));
             }
-            log(`Jesus fixture repair ${(performance.now() - t0) / 1000 | 0}s`);
+            log(`large-figure fixture repair ${(performance.now() - t0) / 1000 | 0}s`);
         }
 
         document.title = failures.length ? `FAIL: ${failures.join("; ")}` : "PASS";

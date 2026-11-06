@@ -16,7 +16,7 @@
     const CANCEL_GRACE_MS = 250;
     const WORKER_URL_REVOKE_FALLBACK_MS = 5000;
     const GEOMETRY_COPY_CHUNK = 16384;
-    // The 512k statue measured 243,335,168 B after repair plus a live prime;
+    // The 512k-triangle test model measured 243,335,168 B after repair plus a live prime;
     // 256 MiB leaves 25,100,288 B (about 10%) for post-prime growth.
     const WASM_RECYCLE_THRESHOLD_BYTES = 256 * 1024 * 1024;
 

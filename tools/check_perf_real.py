@@ -3,7 +3,7 @@
 
 Opens index.html#perfreal (see js/perf-real-hook.js) in real-time headless
 Chromium (tools/browser.py, Playwright) and drives
-test-assets/Jesus-modified-hollow.stl through the real
+test-assets/large-figure-hollow.stl through the real
 file input, simplify-decline, auto-repair, Big Print hollow-input, and curve
 cut paths. The fixture is local-only and is never copied into this script.
 
@@ -32,7 +32,7 @@ import sys
 
 from browser import GPU_ARGS, ROOT, ensure_playwright, page_url, run_page, skip_or_fail
 
-FIXTURE = ROOT / "test-assets" / "Jesus-modified-hollow.stl"
+FIXTURE = ROOT / "test-assets" / "large-figure-hollow.stl"
 REAL_TIME_LIMIT_S = 600
 HARNESS_FAILURE = "harness did not complete — this is a defect, not a budget breach"
 
@@ -81,7 +81,7 @@ def budget_breaches(values):
 
 
 def print_measurements(values):
-    print("PERFREAL stage measurements (512k statue, real-time Playwright)")
+    print("PERFREAL stage measurements (512k-triangle test model, real-time Playwright)")
     print(f"  load (parse + weld + scene)             {values['load']:>7} ms")
     print(f"  auto-repair (decline -> holes capped)    {values['repair']:>7} ms")
     print(f"  long task worst outside CC.ops           {values['ltout']:>7} ms")
@@ -95,7 +95,7 @@ def print_measurements(values):
 
 def main() -> int:
     if not FIXTURE.exists():
-        print("SKIPPED: test-assets/Jesus-modified-hollow.stl missing (local-only fixture).")
+        print("SKIPPED: test-assets/large-figure-hollow.stl missing (local-only fixture).")
         return 0
 
     ensure_playwright()

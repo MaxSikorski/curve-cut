@@ -3,10 +3,10 @@
 
 Covers boundary-loop detection, convex and non-convex caps, cavity
 preservation, weld-vs-cap precedence, old-vs-new weld/loop/repair equivalence,
-and the optional Jesus hollow fixture.
+and the optional large-figure hollow fixture.
 
 Runs in real time through tools/browser.py (Playwright's headless Chromium).
-SKIPS loudly (exit 0) if that browser is not installed. The local Jesus
+SKIPS loudly (exit 0) if that browser is not installed. The local large-figure
 fixture may also be skipped by the page without failing the suite.
 
 Run: uv run --no-project python tools/check_repair.py

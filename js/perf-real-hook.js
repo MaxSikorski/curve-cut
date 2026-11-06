@@ -1,6 +1,6 @@
 /* Curve Cut — real-model performance harness (v2.1p perf lane)
    Runs ONLY when the page is opened as index.html#perfreal (real-time CDP via
-   tools/check_perf_real.py). Loads the local 512k statue through the file
+   tools/check_perf_real.py). Loads the local 512k-triangle test model through the file
    input, declines simplification, times auto-repair, measures hollow's two
    UI beats, applies a curve cut, and records the post-GC JS heap slice.
 
@@ -20,7 +20,7 @@
     if (window.location.hash !== "#perfreal" || !isDev) return;
     const CC = window.CurveCut;
 
-    const FIXTURE = "test-assets/Jesus-modified-hollow.stl";
+    const FIXTURE = "test-assets/large-figure-hollow.stl";
     const WAIT_MS = 300000;
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const once = (event) => new Promise((resolve) =>
@@ -93,7 +93,7 @@
         const loaded = waitForEvent("curvecut:pieces-changed", "model load");
         const response = await fetch(new URL(FIXTURE, location.href).href);
         const buffer = await response.arrayBuffer();
-        const file = new File([buffer], "Jesus-modified-hollow.stl");
+        const file = new File([buffer], "large-figure-hollow.stl");
         const transfer = new DataTransfer();
         transfer.items.add(file);
         const input = document.getElementById("file-input");

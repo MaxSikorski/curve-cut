@@ -97,6 +97,28 @@
             absurdCount === 27000000 && absurdCount > 4096 && absurdMs < 1000,
             `${absurdCount} in ${absurdMs.toFixed(2)}ms`);
         check("usable cell is bed minus margin both sides", grid500.usable.x === 246);
+        // pegs reserve (Max, 2026-11-05): SV08 Max 500³, margin 5, peg depth 9.6
+        const sv = { size: { x: 600, y: 2000, z: 400 }, bed: { w: 500, d: 500, h: 500 }, margin: 5 };
+        const gNo = B.computeGrid(sv);
+        const gPeg = B.computeGrid({ ...sv, reserve: 9.6 });
+        check("reserve: room stays bed minus margin", gPeg.room.y === 490 && gPeg.reserve === 9.6);
+        check("reserve: cut axes shrink by peg depth",
+            Math.abs(gPeg.usable.y - 480.4) < 1e-9 && Math.abs(gPeg.usable.x - 480.4) < 1e-9,
+            JSON.stringify(gPeg.usable));
+        check("reserve: an uncut axis keeps the full room (no seams, no pegs)",
+            gPeg.cuts.z.length === 0 && gPeg.usable.z === 490, JSON.stringify(gPeg.usable));
+        const segOk = (g, axis, total) => {
+            const b = [0, ...g.cuts[axis], total];
+            return b.slice(1).every((v, i) => v - b[i] + 9.6 <= g.room[axis] + 1e-9);
+        };
+        check("reserve: every cell plus its pegs fits the room",
+            segOk(gPeg, "y", 2000) && segOk(gPeg, "x", 600));
+        check("without reserve a full cell plus pegs overshoots (the old bug)",
+            !segOk(gNo, "y", 2000) && gNo.usable.y === 490);
+        check("reserve 0 changes nothing",
+            JSON.stringify(B.computeGrid({ ...sv, reserve: 0 }).cuts) === JSON.stringify(gNo.cuts));
+        check("reserve bigger than the room returns null",
+            B.computeGrid({ ...sv, reserve: 490 }) === null);
         check("margin bigger than the bed returns null",
             B.computeGrid({ size: { x: 10, y: 10, z: 10 }, bed: { w: 20, d: 20, h: 20 }, margin: 10 }) === null);
 

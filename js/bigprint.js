@@ -1115,12 +1115,25 @@
                 h: parseFloat(bedH.value) || 0,
             },
             margin: Math.max(parseFloat(marginInput.value) || 0, 0),
+            reserve: pegReach(),
             nudge: {
                 x: parseFloat(nudgeX.value) || 0,
                 y: parseFloat(nudgeY.value) || 0,
                 z: parseFloat(nudgeZ.value) || 0,
             },
         };
+    }
+
+    /* How far a connector peg stands past its part's face (0 with connectors
+       off). Same formula as the export's conn.depth; computeGrid shrinks cut
+       axes by it so a part plus its pegs stays inside bed minus margin. */
+    function connDepth(sizeValue) {
+        return Math.max((parseFloat(sizeValue) || 4) * 0.8, 2);
+    }
+    function pegReach() {
+        const box = document.getElementById("bp-connectors");
+        const size = document.getElementById("bp-conn-size");
+        return box && box.checked && size ? connDepth(size.value) : 0;
     }
 
     function updateConnNote() {
@@ -1150,7 +1163,9 @@
 
         if (!grid) {
             status.classList.remove("warning");
-            status.textContent = "The margin eats the whole bed — shrink one of them.";
+            status.textContent = p.reserve > 0
+                ? "The margin and connector pegs eat the whole bed — shrink the margin or the connector size."
+                : "The margin eats the whole bed — shrink one of them.";
             exportBtn.disabled = true;
             return;
         }
@@ -1272,12 +1287,15 @@
         panelCollapse.reset(); // Big Print re-entry always starts expanded
         gsap.fromTo(panel, { y: 16 },
             { autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out" });
-        refresh();
-
-        // dowel-ish connector default, proportional to the printable cell
-        const u = grid ? Math.min(grid.usable.x, grid.usable.y, grid.usable.z) : 200;
+        // dowel-ish connector default, proportional to the printable room
+        // (bed minus margin, before pegs reserve their share), set before the
+        // first refresh because the peg depth shrinks the grid cells
+        const p0 = params();
+        const room = Math.min(p0.bed.w, p0.bed.d, p0.bed.h) - 2 * p0.margin;
+        const u = room > 0 ? room : 200;
         document.getElementById("bp-conn-size").value =
             Math.round(Math.min(Math.max(u * 0.05, 4), 12));
+        refresh();
     }
 
     function recordBakedScale(piece, keptScale) {
@@ -1542,7 +1560,9 @@
     const connTol = document.getElementById("bp-conn-tol");
     const engraveBox = document.getElementById("bp-engrave");
     const cancelBtn = document.getElementById("bp-cancel");
-    connBox.addEventListener("change", updateConnNote);
+    // connectors change the cell size (pegs reserve room), so re-grid
+    connBox.addEventListener("change", () => { refresh(); updateConnNote(); });
+    connSize.addEventListener("input", refresh);
     engraveBox.addEventListener("change", updateConnNote);
 
     let running = false;
@@ -1784,7 +1804,9 @@
     async function cutAndExport() {
         if (running) return;
         const p = params();
-        const g = grid;
+        // recompute: refresh() is frozen in Exploded view, so the cached grid
+        // can predate a bed/margin/nudge/connector edit made there
+        const g = Core.computeGrid(p);
         if (!g) return;
         const totalCells = Core.cellCount(g);
         if (totalCells > HARD_CELL_COUNT) {
@@ -1867,7 +1889,7 @@
             const gap = Math.min(Math.max(parseFloat(gapInput.value) || 0, 0), 0.5);
             const conn = connBox.checked ? {
                 size: Math.max(parseFloat(connSize.value) || 4, 2),
-                depth: Math.max((parseFloat(connSize.value) || 4) * 0.8, 2),
+                depth: connDepth(connSize.value),
                 shape: connShape.value,
                 tolR: Math.max(parseFloat(connTol.value) || 0, 0),
                 tolD: Math.max(parseFloat(connTol.value) || 0, 0),

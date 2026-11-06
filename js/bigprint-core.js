@@ -45,21 +45,32 @@ window.BigPrintCore = (() => {
     }
 
     /* Full grid for a scaled model: sizes in mm (scene axes), bed in printer
-       coordinates, margin off every bed dimension, per-axis nudges. */
-    function computeGrid({ size, bed, margin = 5, nudge = { x: 0, y: 0, z: 0 } }) {
-        const usable = {
+       coordinates, margin off every bed dimension, per-axis nudges.
+       `reserve` (mm) = how far a connector peg stands past a cell face. On an
+       axis that gets cut (so it gets seams, so it gets pegs) the cell shrinks
+       by `reserve`, so a part plus its pegs still fits the bed minus margin.
+       `room` = bed minus margin; `usable` = the cell size the cuts use. */
+    function computeGrid({ size, bed, margin = 5, nudge = { x: 0, y: 0, z: 0 }, reserve = 0 }) {
+        const room = {
             x: bed.w - 2 * margin,
             z: bed.d - 2 * margin,
             y: bed.h - 2 * margin,
         };
-        if (usable.x <= 0 || usable.y <= 0 || usable.z <= 0) return null;
-        const cuts = {
-            x: axisCuts(size.x, usable.x, nudge.x || 0),
-            y: axisCuts(size.y, usable.y, nudge.y || 0),
-            z: axisCuts(size.z, usable.z, nudge.z || 0),
-        };
+        if (room.x <= 0 || room.y <= 0 || room.z <= 0) return null;
+        const r = reserve > 0 ? reserve : 0;
+        const usable = {}, cuts = {};
+        for (const axis of ["x", "y", "z"]) {
+            const n = nudge[axis] || 0;
+            usable[axis] = room[axis];
+            cuts[axis] = axisCuts(size[axis], room[axis], n);
+            if (cuts[axis].length && r > 0) {
+                usable[axis] = room[axis] - r;
+                if (usable[axis] <= 0) return null;
+                cuts[axis] = axisCuts(size[axis], usable[axis], n);
+            }
+        }
         const counts = { x: cuts.x.length + 1, y: cuts.y.length + 1, z: cuts.z.length + 1 };
-        return { usable, cuts, counts, total: counts.x * counts.y * counts.z };
+        return { room, usable, reserve: r, cuts, counts, total: counts.x * counts.y * counts.z };
     }
 
     /* 0 → A, 25 → Z, 26 → AA (spreadsheet style). */

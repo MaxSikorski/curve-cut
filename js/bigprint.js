@@ -1748,53 +1748,127 @@
         };
     }
 
-    /* Assembly map: one top-view grid per layer, spreadsheet-style labels,
-       print-friendly black-on-white. Returns PNG bytes. */
-    async function renderAssemblyMap(g, occupied, s) {
-        const cell = Math.max(26, Math.min(64, Math.floor(560 / Math.max(g.counts.x, g.counts.z))));
-        const pad = 34, header = 26, footer = 74;
-        const gw = g.counts.x * cell, gh = g.counts.z * cell;
+    /* Front-silhouette painter for the assembly map: an offscreen orthographic
+       render of the scaled model, clipped to one row's depth band, aimed from
+       the front (+Z) at one cell's X/Y window. Null when WebGL is unavailable
+       — the map is then drawn without silhouettes. Call dispose() when done. */
+    function createSilhouettePainter(mesh, size, cellPx) {
+        let renderer = null, material = null, shape = null;
+        const dispose = () => {
+            if (material) material.dispose();
+            if (renderer) renderer.dispose();
+        };
+        try {
+            renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true });
+            renderer.setPixelRatio(1);
+            renderer.setSize(cellPx, cellPx, false);
+            renderer.setClearColor(0xffffff, 0);
+            renderer.localClippingEnabled = true;
+            const planes = [new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)];
+            material = new THREE.MeshBasicMaterial({ color: 0xc8c8c8, side: THREE.DoubleSide, clippingPlanes: planes });
+            // same frame as refresh(): centred on X/Z, floor at Y=0
+            shape = new THREE.Mesh(mesh.geometry, material);
+            shape.scale.copy(mesh.scale);
+            shape.quaternion.copy(mesh.quaternion);
+            shape.updateMatrixWorld(true);
+            const box = new THREE.Box3().setFromObject(shape);
+            shape.position.set(-(box.min.x + box.max.x) / 2, -box.min.y, -(box.min.z + box.max.z) / 2);
+            shape.updateMatrixWorld(true);
+            const scene = new THREE.Scene();
+            scene.add(shape);
+            const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, size.z + 4);
+            camera.position.set(0, 0, size.z / 2 + 2); // looks down −Z
+            return {
+                dispose,
+                // draws the slice z0..z1 of the window x0..x1 × y0..y1 (mm) into ctx at (dx, dy)
+                paint(ctx, dx, dy, x0, x1, y0, y1, z0, z1) {
+                    planes[0].constant = -z0; // keep z ≥ z0
+                    planes[1].constant = z1;  // keep z ≤ z1
+                    camera.left = x0; camera.right = x1; camera.bottom = y0; camera.top = y1;
+                    camera.updateProjectionMatrix();
+                    renderer.render(scene, camera);
+                    ctx.drawImage(renderer.domElement, dx, dy, cellPx, cellPx);
+                },
+            };
+        } catch (err) {
+            console.warn("assembly map silhouettes skipped:", err);
+            dispose();
+            return null;
+        }
+    }
+
+    /* Assembly map: the model seen from the front, one panel per depth row
+       (front row first), layers stacked bottom-up, spreadsheet-style IDs on
+       the occupied cells, print-friendly. Returns PNG bytes. */
+    async function renderAssemblyMap(g, occupied, s, mesh) {
+        const cols = g.counts.x, layers = g.counts.y, rows = g.counts.z;
+        const footerLines = [
+            `${s.name} — ×${s.scale}  ·  ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm  ·  ${occupied.size} parts`,
+            `Front view: columns = letters (left→right), layers bottom-up; one panel per row (front row first)`,
+            `Printer ${s.printer}, margin ${s.margin} mm · gap ${s.gap} mm · connectors ${s.connectors}`,
+        ];
         const canvas = document.createElement("canvas");
-        canvas.width = gw + pad * 2;
-        canvas.height = (header + gh + 18) * g.counts.y + footer + pad;
+        const mctx = canvas.getContext("2d"); // measuring only; resizing the canvas resets it
+        const footerFont = "12px Inter, sans-serif";
+        mctx.font = footerFont;
+        const measure = (t) => mctx.measureText(t).width;
+        const cellPx = Core.assemblyCellPx(cols, layers, rows, footerLines.length);
+        const lay = Core.assemblyMapLayout({ cols, layers, rows, cellPx, footerLines, measure });
+        canvas.width = lay.width;
+        canvas.height = lay.height;
         const ctx = canvas.getContext("2d");
         if (!ctx) throw new Error(`assembly map canvas refused (${canvas.width}×${canvas.height} px — over the browser limit?)`);
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.textBaseline = "middle";
 
-        let y = pad / 2;
-        for (let li = 0; li < g.counts.y; li++) {
-            ctx.fillStyle = "#000";
-            ctx.font = "bold 15px Inter, sans-serif";
-            ctx.textAlign = "left";
-            ctx.fillText(g.counts.y > 1 ? `Layer ${li + 1}${li ? ` (-L${li + 1})` : ""}` : "Top view", pad, y + header / 2);
-            ctx.textAlign = "center";
-            y += header;
-            for (let ri = 0; ri < g.counts.z; ri++) {
-                for (let ci = 0; ci < g.counts.x; ci++) {
-                    const x = pad + ci * cell, yy = y + ri * cell;
-                    const id = Core.partId(ci, ri, li, g.counts.y);
-                    const has = occupied.has(id);
-                    ctx.fillStyle = has ? "#f2f2f2" : "#ffffff";
-                    ctx.fillRect(x, yy, cell, cell);
-                    ctx.strokeStyle = "#999";
-                    ctx.strokeRect(x + 0.5, yy + 0.5, cell, cell);
-                    if (has) {
+        const edges = (axis, len) => [0, ...g.cuts[axis], len];
+        const bx = edges("x", s.size.x), by = edges("y", s.size.y), bz = edges("z", s.size.z);
+        const painter = createSilhouettePainter(mesh, s.size, cellPx);
+        try {
+            for (const panel of lay.panels) {
+                const ri = panel.row - 1;
+                ctx.fillStyle = "#000";
+                ctx.font = "bold 15px Inter, sans-serif";
+                ctx.textAlign = "left";
+                ctx.fillText(Core.assemblyPanelTitle(panel.row, rows), panel.x, panel.y - 13);
+                for (let li = 0; li < layers; li++) {
+                    for (let ci = 0; ci < cols; ci++) {
+                        const r = Core.assemblyCellRect(panel, cellPx, layers, ci, li);
+                        if (painter && occupied.has(Core.partId(ci, ri, li, layers))) {
+                            painter.paint(ctx, r.x, r.y, bx[ci] - s.size.x / 2, bx[ci + 1] - s.size.x / 2,
+                                by[li], by[li + 1], bz[ri] - s.size.z / 2, bz[ri + 1] - s.size.z / 2);
+                        }
+                    }
+                }
+                ctx.strokeStyle = "#999";
+                ctx.lineWidth = 1;
+                ctx.textAlign = "center";
+                for (let li = 0; li < layers; li++) {
+                    for (let ci = 0; ci < cols; ci++) {
+                        const r = Core.assemblyCellRect(panel, cellPx, layers, ci, li);
+                        ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+                        const id = Core.partId(ci, ri, li, layers);
+                        if (!occupied.has(id)) continue;
+                        ctx.font = `bold ${Math.max(10, cellPx * 0.3)}px Inter, sans-serif`;
+                        ctx.lineJoin = "round";
+                        ctx.lineWidth = 3;
+                        ctx.strokeStyle = "#fff";
+                        ctx.strokeText(id, r.x + r.w / 2, r.y + r.h / 2);
                         ctx.fillStyle = "#000";
-                        ctx.font = `${Math.max(10, cell * 0.3)}px Inter, sans-serif`;
-                        ctx.fillText(id, x + cell / 2, yy + cell / 2);
+                        ctx.fillText(id, r.x + r.w / 2, r.y + r.h / 2);
+                        ctx.strokeStyle = "#999";
+                        ctx.lineWidth = 1;
                     }
                 }
             }
-            y += gh + 18;
+        } finally {
+            if (painter) painter.dispose();
         }
         ctx.fillStyle = "#000";
         ctx.textAlign = "left";
-        ctx.font = "12px Inter, sans-serif";
-        ctx.fillText(`${s.name} — ×${s.scale}  ·  ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm  ·  ${occupied.size} parts`, pad, y + 14);
-        ctx.fillText(`Columns = letters (left→right) · rows = numbers (back→front) · layers bottom-up`, pad, y + 32);
-        ctx.fillText(`Printer ${s.printer}, margin ${s.margin} mm · gap ${s.gap} mm · connectors ${s.connectors}`, pad, y + 50);
+        ctx.font = footerFont;
+        footerLines.forEach((t, i) => ctx.fillText(t, lay.panels[0].x, lay.footerY + i * 18 + 9));
 
         const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
         if (!blob) throw new Error("assembly map PNG encode returned null");
@@ -1997,7 +2071,7 @@
             }
             CC.progress.update("Drawing the assembly map…", 1);
             try {
-                writer.add("assembly-map.png", await renderAssemblyMap(g, occupied, settings));
+                writer.add("assembly-map.png", await renderAssemblyMap(g, occupied, settings, model));
             } catch (mapErr) { // the parts matter more than the map — ship without it
                 console.warn("assembly map skipped:", mapErr);
                 CC.toast("The assembly map couldn't be rendered — the zip ships without it.");

@@ -583,6 +583,46 @@
                 hollow: { wallMm: 6, savedPct: 50, engineUsed: "grid", fellBack: false } });
             check("M1 manifest: no blocks line when no blocks were made",
                 !m1b.includes("Hollow parts:"));
+            // the connectors text never touches the ID column
+            const m1line = m1.split("\n").find((l) => l.startsWith("B1 "));
+            check("M2 manifest: thin-seam connectors text is followed by 2+ spaces before the ID column",
+                !!m1line && /seam too thin {2,}no \(no room/.test(m1line));
+            const m1head = m1.split("\n").find((l) => l.startsWith("ID ") && l.includes("engraved ID"));
+            check("M2 manifest: header pads connectors to the same width",
+                !!m1head && !!m1line && m1head.indexOf("engraved ID") === m1line.indexOf("no (no room"));
+        }
+
+        // L1 — assembly map front-view layout
+        {
+            const lay = typeof B.assemblyMapLayout === "function" ? B.assemblyMapLayout : null;
+            const measure = (t) => t.length * 7; // stand-in for ctx.measureText
+            const pad = 34, lineH = 18;
+            const one = lay && lay({ cols: 1, layers: 4, rows: 1, cellPx: 40,
+                footerLines: ["x".repeat(57), "short"], measure }); // 57 chars = 399 px
+            check("L1 layout: width fits a 400 px footer line plus padding",
+                !!one && one.width >= 399 + 2 * pad);
+            check("L1 layout: footer lines sit fully inside the height",
+                !!one && one.footerY + 2 * lineH <= one.height);
+            const three = lay && lay({ cols: 2, layers: 3, rows: 3, cellPx: 40,
+                footerLines: ["a"], measure });
+            check("L1 layout: one panel per row, front row (row 3) first with the smallest y",
+                !!three && three.panels.length === 3 && three.panels[0].row === 3
+                && three.panels[1].row === 2 && three.panels[2].row === 1
+                && three.panels[0].y < three.panels[1].y && three.panels[1].y < three.panels[2].y);
+            const cr = (c, l) => B.assemblyCellRect(three.panels[0], 40, 3, c, l);
+            check("L1 layout: layer 1 is the bottom of a panel, higher layers above",
+                !!three && cr(0, 0).y > cr(0, 1).y && cr(0, 1).y > cr(0, 2).y
+                && cr(1, 0).x > cr(0, 0).x && cr(0, 0).y + 40 === three.panels[0].y + three.panels[0].h);
+            check("L1 layout: panel titles",
+                B.assemblyPanelTitle(1, 1) === "Front view"
+                && B.assemblyPanelTitle(3, 3) === "Row 3 — front"
+                && B.assemblyPanelTitle(2, 3) === "Row 2"
+                && B.assemblyPanelTitle(1, 3) === "Row 1 — back");
+            const px = B.assemblyCellPx ? B.assemblyCellPx(3, 5, 4, 5) : 0;
+            check("L1 layout: cellPx keeps panels ≤ 600 px wide and the canvas ≤ 4096 px tall (floor 22)",
+                px >= 22 && px * 3 <= 600
+                && lay({ cols: 3, layers: 5, rows: 4, cellPx: px, footerLines: ["a", "b", "c", "d", "e"], measure }).height <= 4096
+                && B.assemblyCellPx(40, 1, 1, 5) === 22);
         }
 
         // H9 — seamPlanes uses the same arithmetic as gridCells

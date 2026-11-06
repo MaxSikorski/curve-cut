@@ -307,16 +307,57 @@ window.BigPrintCore = (() => {
         L.push(`Print each part file listed below; assemble layer by layer using assembly-map.png.`);
         L.push("");
         const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-        L.push("ID        file                 triangles  " + "connectors".padEnd(26) + "engraved ID");
+        const rowConn = (r) => r.pegs === undefined ? "-"
+            : `${plural(r.pegs, "peg")}, ${plural(r.sockets || 0, "socket")}`
+                + (r.thinSeams ? `, ${plural(r.thinSeams, "seam")} too thin` : "");
+        const connW = Math.max(26, ...rows.map((r) => rowConn(r).length + 2));
+        L.push("ID        file                 triangles  " + "connectors".padEnd(connW) + "engraved ID");
         for (const r of rows) {
-            const conn = r.pegs === undefined ? "-"
-                : `${plural(r.pegs, "peg")}, ${plural(r.sockets || 0, "socket")}`
-                    + (r.thinSeams ? `, ${plural(r.thinSeams, "seam")} too thin` : "");
+            const conn = rowConn(r);
             const id = r.engraved ? (r.onPad ? "yes (on a pad)" : "yes")
                 : (r.noPadRoom ? "no (no room for a label pad)" : "no (face too small)");
-            L.push(`${r.id.padEnd(10)}${r.file.padEnd(21)}${String(r.tris).padEnd(11)}${conn.padEnd(26)}${id}`);
+            L.push(`${r.id.padEnd(10)}${r.file.padEnd(21)}${String(r.tris).padEnd(11)}${conn.padEnd(connW)}${id}`);
         }
         return L.join("\n");
+    }
+
+    /* Assembly map (front view): one panel per depth row, front row first,
+       each cols × layers cells with layer 1 at the bottom. Pure geometry, no
+       DOM: the caller passes `measure(text)` → px width (ctx.measureText). */
+    const MAP_MAX_PANEL_W = 600, MAP_MAX_H = 4096, MAP_MIN_CELL = 22;
+
+    function assemblyPanelTitle(row, rows) {
+        if (rows === 1) return "Front view";
+        return row === rows ? `Row ${row} — front` : row === 1 ? "Row 1 — back" : `Row ${row}`;
+    }
+
+    function assemblyCellPx(cols, layers, rows, footerCount, { pad = 34, header = 26, gapPx = 18, lineH = 18 } = {}) {
+        const fixed = pad / 2 + rows * (header + gapPx) + footerCount * lineH + pad;
+        for (let c = Math.min(64, Math.floor(MAP_MAX_PANEL_W / cols)); c > MAP_MIN_CELL; c--) {
+            if (fixed + rows * layers * c <= MAP_MAX_H) return c;
+        }
+        return MAP_MIN_CELL;
+    }
+
+    function assemblyMapLayout({ cols, layers, rows, cellPx, footerLines, measure,
+            pad = 34, header = 26, gapPx = 18, lineH = 18 }) {
+        const panelW = cols * cellPx, panelH = layers * cellPx;
+        let inner = panelW;
+        for (const t of footerLines) inner = Math.max(inner, measure(t));
+        for (let r = 1; r <= rows; r++) inner = Math.max(inner, measure(assemblyPanelTitle(r, rows)));
+        const panels = [];
+        let y = pad / 2;
+        for (let row = rows; row >= 1; row--) { // rows number back→front, so the front row is the highest
+            panels.push({ row, x: pad, y: y + header, w: panelW, h: panelH });
+            y += header + panelH + gapPx;
+        }
+        return { width: Math.ceil(inner) + 2 * pad, height: Math.ceil(y + footerLines.length * lineH + pad),
+            panels, footerY: y };
+    }
+
+    /* Rect of one cell inside a panel: layer 0 sits at the panel's bottom. */
+    function assemblyCellRect(panel, cellPx, layers, col, layer) {
+        return { x: panel.x + col * cellPx, y: panel.y + (layers - 1 - layer) * cellPx, w: cellPx, h: cellPx };
     }
 
     /* Exploded-view placement: parts drift away from the model's center by
@@ -384,7 +425,8 @@ window.BigPrintCore = (() => {
     }
 
     return { PRINTERS, axisCuts, computeGrid, cellCount, gridCells, seamOf, seamGridPositions, seamPlanes,
-        serializeSTL, serialize3MF, buildManifest, explodedPosition, proxyTargetFor, explodeNoteText,
+        serializeSTL, serialize3MF, buildManifest, assemblyMapLayout, assemblyCellRect, assemblyCellPx,
+        assemblyPanelTitle, explodedPosition, proxyTargetFor, explodeNoteText,
         colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,
         partStory, hollowSavingsStory };
 })();

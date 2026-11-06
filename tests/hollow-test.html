@@ -37,6 +37,16 @@
             }
             return H._test.orientMesh(H._test.marchGrid(grid, spec, control), control);
         };
+        const soup = { vertices: 6, triVerts: new Uint32Array([
+            0, 1, 2, 1, 0, 3, 0, 1, 4, 1, 0, 5,
+        ]), misorientedEdges: 0 };
+        let auditError = "";
+        try { H._test.auditGridMesh(soup, control); } catch (error) { auditError = error.message; }
+        check("grid audit rejects four uses with zero misorientation",
+            auditError === "grid mesh audit failed: overused=1, conflicts=0", auditError);
+        // With 10 grid nodes the old lo * 10 + hi gives 12 for both edges.
+        check("grid edge keys distinguish vertices beyond node count",
+            H._test.edgeKey(0, 12) !== H._test.edgeKey(1, 2));
         const clean = (result) => result.overused === 0 && result.conflicts === 0;
         const fixedResult = audit(fixed);
         check("grid fan fixed checkerboard", clean(fixedResult),

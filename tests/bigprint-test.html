@@ -629,6 +629,16 @@
                 sc > 0 && big.panels[0].w <= 600 && big.height <= 4096);
             check("L1 layout: smallest cell side never under 22 px (canvas may grow)",
                 B.assemblyScale([100, 1], [50], 1, 5) * 1 >= 22);
+            const tallSc = B.assemblyScale([30], [30, 30, 30], 1, 5);
+            check("L1 layout: a 3:1 tall model's panel is at most 1000 px high",
+                lay({ colMm: [30], layerMm: [30, 30, 30], rows: 1, pxPerMm: tallSc,
+                    footerLines: ["a"], measure }).panels[0].h <= 1000);
+            const wAt = (px) => px * 3.6; // 6-char label
+            const f1 = B.assemblyLabelPx(60, 100, wAt), f2 = B.assemblyLabelPx(400, 400, wAt),
+                f3 = B.assemblyLabelPx(12, 12, wAt);
+            check("L1 label: fits 85% of a narrow cell; capped at 28 px; floor 10 px",
+                f1 >= 10 && wAt(f1) <= 60 * 0.85 + 1e-6 && f1 < 60 * 0.28
+                && f2 === 28 && f3 === 10);
         }
 
         // H9 — seamPlanes uses the same arithmetic as gridCells

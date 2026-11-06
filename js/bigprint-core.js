@@ -327,20 +327,31 @@ window.BigPrintCore = (() => {
        positions, layer 1 at the bottom. Pure geometry, no DOM: the caller
        passes `measure(text)` → px width (ctx.measureText). colMm / layerMm are
        the mm extents of each column (left→right) and layer (bottom-up). */
-    const MAP_MAX_PANEL_W = 600, MAP_MAX_H = 4096, MAP_MIN_CELL = 22;
+    const MAP_MAX_PANEL_W = 600, MAP_MAX_PANEL_H = 1000, MAP_MAX_H = 4096, MAP_MIN_CELL = 22;
 
     function assemblyPanelTitle(row, rows) {
         if (rows === 1) return "Front view";
         return row === rows ? `Row ${row} — front` : row === 1 ? "Row 1 — back" : `Row ${row}`;
     }
 
-    /* px per mm: widest panel ≤ 600 px and canvas ≤ 4096 px tall, but the
+    /* px per mm: widest panel ≤ 600 px, tallest ≤ 1000 px, canvas ≤ 4096 px tall,
+       but the
        smallest cell side is never under 22 px (then the canvas just grows). */
     function assemblyScale(colMm, layerMm, rows, footerCount, { pad = 34, header = 26, gapPx = 18, lineH = 18 } = {}) {
         const sum = (a) => a.reduce((t, v) => t + v, 0);
         const fixed = pad / 2 + rows * (header + gapPx) + footerCount * lineH + pad;
-        const s = Math.min(MAP_MAX_PANEL_W / sum(colMm), (MAP_MAX_H - fixed) / (rows * sum(layerMm)));
+        const s = Math.min(MAP_MAX_PANEL_W / sum(colMm), MAP_MAX_PANEL_H / sum(layerMm),
+            (MAP_MAX_H - fixed) / (rows * sum(layerMm)));
         return Math.max(s, MAP_MIN_CELL / Math.min(...colMm, ...layerMm));
+    }
+
+    /* ID label size for one cell: 28% of the short side, at most 28 px, then
+       shrunk so the text fits 85% of the cell width; never under 10 px.
+       widthAt(px) → text width at that font size. */
+    function assemblyLabelPx(w, h, widthAt) {
+        const px = Math.max(10, Math.min(Math.min(w, h) * 0.28, 28));
+        const tw = widthAt(px);
+        return tw > w * 0.85 ? Math.max(10, px * (w * 0.85) / tw) : px;
     }
 
     function assemblyMapLayout({ colMm, layerMm, rows, pxPerMm, footerLines, measure,
@@ -438,7 +449,7 @@ window.BigPrintCore = (() => {
     }
 
     return { PRINTERS, axisCuts, computeGrid, cellCount, gridCells, seamOf, seamGridPositions, seamPlanes,
-        serializeSTL, serialize3MF, buildManifest, assemblyMapLayout, assemblyCellRect, assemblyScale,
+        serializeSTL, serialize3MF, buildManifest, assemblyMapLayout, assemblyCellRect, assemblyScale, assemblyLabelPx,
         assemblyPanelTitle, explodedPosition, proxyTargetFor, explodeNoteText,
         colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,
         partStory, hollowSavingsStory };

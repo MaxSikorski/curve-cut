@@ -1844,7 +1844,8 @@
                         ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
                         const id = Core.partId(ci, ri, li, layers);
                         if (!occupied.has(id)) continue;
-                        ctx.font = `bold ${Math.max(10, Math.min(r.w, r.h) * 0.3)}px Inter, sans-serif`;
+                        const fpx = Core.assemblyLabelPx(r.w, r.h, (px) => { ctx.font = `bold ${px}px Inter, sans-serif`; return ctx.measureText(id).width; });
+                        ctx.font = `bold ${fpx}px Inter, sans-serif`;
                         ctx.lineJoin = "round";
                         ctx.lineWidth = 3;
                         ctx.strokeStyle = "#fff";

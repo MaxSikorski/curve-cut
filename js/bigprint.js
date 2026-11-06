@@ -1750,10 +1750,11 @@
 
     /* Front-silhouette painter for the assembly map: an offscreen orthographic
        render of the scaled model, clipped to one row's depth band, aimed from
-       the front (+Z) at one cell's X/Y window. Null when WebGL is unavailable
-       — the map is then drawn without silhouettes. Call dispose() when done. */
-    function createSilhouettePainter(mesh, size, cellPx) {
-        let renderer = null, material = null, shape = null;
+       the front (+Z) and framing the model's full X width × Y height. Null when
+       WebGL is unavailable — the map is then drawn without silhouettes. Call
+       dispose() when done. */
+    function createSilhouettePainter(mesh, size) {
+        let renderer = null, material = null;
         const dispose = () => {
             if (material) material.dispose();
             if (renderer) renderer.dispose();
@@ -1761,13 +1762,12 @@
         try {
             renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true });
             renderer.setPixelRatio(1);
-            renderer.setSize(cellPx, cellPx, false);
             renderer.setClearColor(0xffffff, 0);
             renderer.localClippingEnabled = true;
             const planes = [new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)];
             material = new THREE.MeshBasicMaterial({ color: 0xc8c8c8, side: THREE.DoubleSide, clippingPlanes: planes });
             // same frame as refresh(): centred on X/Z, floor at Y=0
-            shape = new THREE.Mesh(mesh.geometry, material);
+            const shape = new THREE.Mesh(mesh.geometry, material);
             shape.scale.copy(mesh.scale);
             shape.quaternion.copy(mesh.quaternion);
             shape.updateMatrixWorld(true);
@@ -1776,18 +1776,17 @@
             shape.updateMatrixWorld(true);
             const scene = new THREE.Scene();
             scene.add(shape);
-            const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, size.z + 4);
+            const camera = new THREE.OrthographicCamera(-size.x / 2, size.x / 2, size.y, 0, 0.1, size.z + 4);
             camera.position.set(0, 0, size.z / 2 + 2); // looks down −Z
             return {
                 dispose,
-                // draws the slice z0..z1 of the window x0..x1 × y0..y1 (mm) into ctx at (dx, dy)
-                paint(ctx, dx, dy, x0, x1, y0, y1, z0, z1) {
+                // draws the slice z0..z1 (mm) of the whole model into ctx at (dx, dy), w × h px
+                paint(ctx, dx, dy, w, h, z0, z1) {
                     planes[0].constant = -z0; // keep z ≥ z0
                     planes[1].constant = z1;  // keep z ≤ z1
-                    camera.left = x0; camera.right = x1; camera.bottom = y0; camera.top = y1;
-                    camera.updateProjectionMatrix();
+                    renderer.setSize(w, h, false);
                     renderer.render(scene, camera);
-                    ctx.drawImage(renderer.domElement, dx, dy, cellPx, cellPx);
+                    ctx.drawImage(renderer.domElement, dx, dy, w, h);
                 },
             };
         } catch (err) {
@@ -1797,23 +1796,27 @@
         }
     }
 
-    /* Assembly map: the model seen from the front, one panel per depth row
-       (front row first), layers stacked bottom-up, spreadsheet-style IDs on
-       the occupied cells, print-friendly. Returns PNG bytes. */
+    /* Assembly map: the model seen from the front, drawn to scale, one panel
+       per depth row (front row first), layers stacked bottom-up, spreadsheet-
+       style IDs on the occupied cells, print-friendly. Returns PNG bytes. */
     async function renderAssemblyMap(g, occupied, s, mesh) {
         const cols = g.counts.x, layers = g.counts.y, rows = g.counts.z;
         const footerLines = [
             `${s.name} — ×${s.scale}  ·  ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm  ·  ${occupied.size} parts`,
-            `Front view: columns = letters (left→right), layers bottom-up; one panel per row (front row first)`,
+            `Front view, to scale: columns = letters (left→right), layers bottom-up; one panel per row (front row first)`,
             `Printer ${s.printer}, margin ${s.margin} mm · gap ${s.gap} mm · connectors ${s.connectors}`,
         ];
+        const edges = (axis, len) => [0, ...g.cuts[axis], len];
+        const bx = edges("x", s.size.x), by = edges("y", s.size.y), bz = edges("z", s.size.z);
+        const spans = (b) => b.slice(1).map((v, i) => v - b[i]);
+        const colMm = spans(bx), layerMm = spans(by);
         const canvas = document.createElement("canvas");
         const mctx = canvas.getContext("2d"); // measuring only; resizing the canvas resets it
         const footerFont = "12px Inter, sans-serif";
         mctx.font = footerFont;
         const measure = (t) => mctx.measureText(t).width;
-        const cellPx = Core.assemblyCellPx(cols, layers, rows, footerLines.length);
-        const lay = Core.assemblyMapLayout({ cols, layers, rows, cellPx, footerLines, measure });
+        const pxPerMm = Core.assemblyScale(colMm, layerMm, rows, footerLines.length);
+        const lay = Core.assemblyMapLayout({ colMm, layerMm, rows, pxPerMm, footerLines, measure });
         canvas.width = lay.width;
         canvas.height = lay.height;
         const ctx = canvas.getContext("2d");
@@ -1822,9 +1825,7 @@
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.textBaseline = "middle";
 
-        const edges = (axis, len) => [0, ...g.cuts[axis], len];
-        const bx = edges("x", s.size.x), by = edges("y", s.size.y), bz = edges("z", s.size.z);
-        const painter = createSilhouettePainter(mesh, s.size, cellPx);
+        const painter = createSilhouettePainter(mesh, s.size);
         try {
             for (const panel of lay.panels) {
                 const ri = panel.row - 1;
@@ -1832,33 +1833,24 @@
                 ctx.font = "bold 15px Inter, sans-serif";
                 ctx.textAlign = "left";
                 ctx.fillText(Core.assemblyPanelTitle(panel.row, rows), panel.x, panel.y - 13);
-                for (let li = 0; li < layers; li++) {
-                    for (let ci = 0; ci < cols; ci++) {
-                        const r = Core.assemblyCellRect(panel, cellPx, layers, ci, li);
-                        if (painter && occupied.has(Core.partId(ci, ri, li, layers))) {
-                            painter.paint(ctx, r.x, r.y, bx[ci] - s.size.x / 2, bx[ci + 1] - s.size.x / 2,
-                                by[li], by[li + 1], bz[ri] - s.size.z / 2, bz[ri + 1] - s.size.z / 2);
-                        }
-                    }
-                }
-                ctx.strokeStyle = "#999";
-                ctx.lineWidth = 1;
+                if (painter) painter.paint(ctx, panel.x, panel.y, panel.w, panel.h,
+                    bz[ri] - s.size.z / 2, bz[ri + 1] - s.size.z / 2);
                 ctx.textAlign = "center";
                 for (let li = 0; li < layers; li++) {
                     for (let ci = 0; ci < cols; ci++) {
-                        const r = Core.assemblyCellRect(panel, cellPx, layers, ci, li);
+                        const r = Core.assemblyCellRect(panel, ci, li);
+                        ctx.strokeStyle = "#999";
+                        ctx.lineWidth = 1;
                         ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
                         const id = Core.partId(ci, ri, li, layers);
                         if (!occupied.has(id)) continue;
-                        ctx.font = `bold ${Math.max(10, cellPx * 0.3)}px Inter, sans-serif`;
+                        ctx.font = `bold ${Math.max(10, Math.min(r.w, r.h) * 0.3)}px Inter, sans-serif`;
                         ctx.lineJoin = "round";
                         ctx.lineWidth = 3;
                         ctx.strokeStyle = "#fff";
                         ctx.strokeText(id, r.x + r.w / 2, r.y + r.h / 2);
                         ctx.fillStyle = "#000";
                         ctx.fillText(id, r.x + r.w / 2, r.y + r.h / 2);
-                        ctx.strokeStyle = "#999";
-                        ctx.lineWidth = 1;
                     }
                 }
             }

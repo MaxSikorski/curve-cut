@@ -321,9 +321,12 @@ window.BigPrintCore = (() => {
         return L.join("\n");
     }
 
-    /* Assembly map (front view): one panel per depth row, front row first,
-       each cols × layers cells with layer 1 at the bottom. Pure geometry, no
-       DOM: the caller passes `measure(text)` → px width (ctx.measureText). */
+    /* Assembly map (front view), drawn to scale: one panel per depth row, front
+       row first, each panel as wide and tall as the model in px (one px-per-mm
+       factor for the whole map), split into columns and layers at the real cut
+       positions, layer 1 at the bottom. Pure geometry, no DOM: the caller
+       passes `measure(text)` → px width (ctx.measureText). colMm / layerMm are
+       the mm extents of each column (left→right) and layer (bottom-up). */
     const MAP_MAX_PANEL_W = 600, MAP_MAX_H = 4096, MAP_MIN_CELL = 22;
 
     function assemblyPanelTitle(row, rows) {
@@ -331,24 +334,32 @@ window.BigPrintCore = (() => {
         return row === rows ? `Row ${row} — front` : row === 1 ? "Row 1 — back" : `Row ${row}`;
     }
 
-    function assemblyCellPx(cols, layers, rows, footerCount, { pad = 34, header = 26, gapPx = 18, lineH = 18 } = {}) {
+    /* px per mm: widest panel ≤ 600 px and canvas ≤ 4096 px tall, but the
+       smallest cell side is never under 22 px (then the canvas just grows). */
+    function assemblyScale(colMm, layerMm, rows, footerCount, { pad = 34, header = 26, gapPx = 18, lineH = 18 } = {}) {
+        const sum = (a) => a.reduce((t, v) => t + v, 0);
         const fixed = pad / 2 + rows * (header + gapPx) + footerCount * lineH + pad;
-        for (let c = Math.min(64, Math.floor(MAP_MAX_PANEL_W / cols)); c > MAP_MIN_CELL; c--) {
-            if (fixed + rows * layers * c <= MAP_MAX_H) return c;
-        }
-        return MAP_MIN_CELL;
+        const s = Math.min(MAP_MAX_PANEL_W / sum(colMm), (MAP_MAX_H - fixed) / (rows * sum(layerMm)));
+        return Math.max(s, MAP_MIN_CELL / Math.min(...colMm, ...layerMm));
     }
 
-    function assemblyMapLayout({ cols, layers, rows, cellPx, footerLines, measure,
+    function assemblyMapLayout({ colMm, layerMm, rows, pxPerMm, footerLines, measure,
             pad = 34, header = 26, gapPx = 18, lineH = 18 }) {
-        const panelW = cols * cellPx, panelH = layers * cellPx;
+        // rounded cumulative edges, so cells tile the panel exactly
+        const edges = (mm) => {
+            const e = [0]; let t = 0;
+            for (const v of mm) { t += v; e.push(Math.round(t * pxPerMm)); }
+            return e;
+        };
+        const ex = edges(colMm), ey = edges(layerMm);
+        const panelW = ex[ex.length - 1], panelH = ey[ey.length - 1];
         let inner = panelW;
         for (const t of footerLines) inner = Math.max(inner, measure(t));
         for (let r = 1; r <= rows; r++) inner = Math.max(inner, measure(assemblyPanelTitle(r, rows)));
         const panels = [];
         let y = pad / 2;
         for (let row = rows; row >= 1; row--) { // rows number back→front, so the front row is the highest
-            panels.push({ row, x: pad, y: y + header, w: panelW, h: panelH });
+            panels.push({ row, x: pad, y: y + header, w: panelW, h: panelH, ex, ey });
             y += header + panelH + gapPx;
         }
         return { width: Math.ceil(inner) + 2 * pad, height: Math.ceil(y + footerLines.length * lineH + pad),
@@ -356,8 +367,10 @@ window.BigPrintCore = (() => {
     }
 
     /* Rect of one cell inside a panel: layer 0 sits at the panel's bottom. */
-    function assemblyCellRect(panel, cellPx, layers, col, layer) {
-        return { x: panel.x + col * cellPx, y: panel.y + (layers - 1 - layer) * cellPx, w: cellPx, h: cellPx };
+    function assemblyCellRect(panel, col, layer) {
+        const { ex, ey } = panel;
+        return { x: panel.x + ex[col], y: panel.y + panel.h - ey[layer + 1],
+            w: ex[col + 1] - ex[col], h: ey[layer + 1] - ey[layer] };
     }
 
     /* Exploded-view placement: parts drift away from the model's center by
@@ -425,7 +438,7 @@ window.BigPrintCore = (() => {
     }
 
     return { PRINTERS, axisCuts, computeGrid, cellCount, gridCells, seamOf, seamGridPositions, seamPlanes,
-        serializeSTL, serialize3MF, buildManifest, assemblyMapLayout, assemblyCellRect, assemblyCellPx,
+        serializeSTL, serialize3MF, buildManifest, assemblyMapLayout, assemblyCellRect, assemblyScale,
         assemblyPanelTitle, explodedPosition, proxyTargetFor, explodeNoteText,
         colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,
         partStory, hollowSavingsStory };

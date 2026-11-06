@@ -6,9 +6,13 @@
 </head>
 <body>
 <pre id="log"></pre>
+<script src="../vendor/three/three.min.js"></script>
 <script src="../vendor/manifold/manifold.wasm.b64.js"></script>
 <script src="../vendor/manifold/manifold.js"></script>
+<script src="../vendor/hershey/hershey-font.js"></script>
+<script src="../js/cut-core.js"></script>
 <script src="../js/hollow-core.js"></script>
+<script src="../js/lamp-core.js"></script>
 <script>
 /* Headless test for the hybrid hollowing engine. Run via tools/check_hollow.py.
    Result lands in document.title: "PASS" or "FAIL: <reason>". */
@@ -37,6 +41,16 @@
             }
             return H._test.orientMesh(H._test.marchGrid(grid, spec, control), control);
         };
+        const soup = { vertices: 6, triVerts: new Uint32Array([
+            0, 1, 2, 1, 0, 3, 0, 1, 4, 1, 0, 5,
+        ]), misorientedEdges: 0 };
+        let auditError = "";
+        try { H._test.auditGridMesh(soup, control); } catch (error) { auditError = error.message; }
+        check("grid audit rejects four uses with zero misorientation",
+            auditError === "grid mesh audit failed: overused=1, conflicts=0", auditError);
+        // With 10 grid nodes the old lo * 10 + hi gives 12 for both edges.
+        check("grid edge keys distinguish vertices beyond node count",
+            H._test.edgeKey(0, 12) !== H._test.edgeKey(1, 2));
         const clean = (result) => result.overused === 0 && result.conflicts === 0;
         const fixedResult = audit(fixed);
         check("grid fan fixed checkerboard", clean(fixedResult),
@@ -146,15 +160,51 @@
         }
     }
 
+    function checkGlowSwatch(wasm) {
+        const steps = [1.2, 1.6, 2.4, 3.2, 4.0, 6.0];
+        check("glow swatch steps", JSON.stringify(LampCore.SWATCH_STEPS) === JSON.stringify(steps));
+        let geometry = null, solid = null, labels = null;
+        try {
+            geometry = LampCore.buildGlowSwatch(window.HERSHEY_FONT);
+            solid = CutCore.toManifold(geometry);
+            const parts = solid.decompose();
+            check("glow swatch watertight one piece", statusOk(solid) && parts.length === 1);
+            parts.forEach(dispose);
+            const bounds = solid.boundingBox();
+            const size = bounds.max.map((value, i) => value - bounds.min[i]);
+            check("glow swatch dimensions", size.every((value, i) => Math.abs(value - [236, 34, 60][i]) < 0.1), size.join(", "));
+            for (let i = 0; i < steps.length; i++) {
+                const x = -118 + 8 + 15 + i * 38;
+                const slab = translated(wasm.Manifold.cube([0.2, 20, 60], true), [x, 20, 0]);
+                const intersection = solid.intersect(slab);
+                const box = intersection.boundingBox();
+                const thickness = box.max[2] - box.min[2];
+                check(`glow swatch fin ${steps[i].toFixed(1)}`, Math.abs(thickness - steps[i]) < 0.02, `${thickness}`);
+                dispose(intersection); dispose(slab);
+            }
+            const abovePlate = translated(wasm.Manifold.cube([236, 31, 60], true), [0, 19.5, 0]);
+            labels = solid.intersect(abovePlate);
+            dispose(abovePlate);
+            for (let i = 0; i < steps.length; i++) {
+                const x = -118 + 8 + 15 + i * 38;
+                const footprint = translated(wasm.Manifold.cube([30.2, 31, steps[i] + 0.2], true) /* 0.1 mm larger each side: no coplanar slivers */, [x, 19.5, 0]);
+                const next = labels.subtract(footprint);
+                dispose(labels); dispose(footprint); labels = next;
+            }
+            const labelTop = labels.boundingBox().max[1];
+            check("glow swatch raised labels", labels.volume() > 0 && Math.abs(labelTop - 4.8) < 0.05,
+                `volume=${labels.volume()}, top=${labelTop}`);
+        } finally {
+            dispose(labels); dispose(solid);
+            if (geometry) geometry.dispose();
+        }
+    }
+
     let wasm, cube, refined, thinRefined;
     const ownedResults = [];
     try {
-        const raw = atob(window.MANIFOLD_WASM_B64);
-        const bytes = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-        window.MANIFOLD_WASM_B64 = null;
-        wasm = await window.ManifoldModule({ wasmBinary: bytes });
-        wasm.setup();
+        wasm = await CutCore.init();
+        checkGlowSwatch(wasm);
         const H = window.CurveCut.hollowCore;
         check("core API", !!(H && H.hollow && H.estimate && H.previewShell && H.wallWarnings));
         checkGridFans(H);

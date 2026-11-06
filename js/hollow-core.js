@@ -672,9 +672,19 @@
         return grown;
     }
 
+    // Edge key radix: exact in a double while both indices stay below 2^26
+    // (lo * 2^26 + hi < 2^52), far beyond any grid mesh the voxel cap allows.
+    const EDGE_VERTEX_BASE = 67108864;
+
+    function edgeKey(a, b) {
+        const lo = Math.min(a, b), hi = Math.max(a, b);
+        if (hi >= EDGE_VERTEX_BASE) throw new Error("grid mesh too large for edge tracking");
+        return lo * EDGE_VERTEX_BASE + hi;
+    }
+
     function marchGrid(grid, spec, control) {
         const [nx, ny, nz] = spec.dims, [ox, oy, oz] = spec.min, h = spec.h;
-        const plane = nx * ny, total = grid.length;
+        const plane = nx * ny;
         let vp = new Float32Array(1 << 20), tv = new Uint32Array(1 << 20), nv = 0, nt = 0;
         let xBottom = new Int32Array(plane), xTop = new Int32Array(plane);
         let yBottom = new Int32Array(plane), yTop = new Int32Array(plane);
@@ -683,7 +693,7 @@
         const openEdges = new Map();
         let misorientedEdges = 0;
         const trackEdge = (a, b) => {
-            const lo = Math.min(a, b), hi = Math.max(a, b), key = lo * total + hi;
+            const key = edgeKey(a, b);
             const direction = a < b ? 0 : 1, previous = openEdges.get(key);
             if (previous === undefined) openEdges.set(key, direction);
             else { if (previous === direction) misorientedEdges++; openEdges.delete(key); }
@@ -851,7 +861,7 @@
         }
         const boundaryPairs = [];
         for (const [key, direction] of openEdges) {
-            const lo = Math.floor(key / total), hi = key - lo * total;
+            const lo = Math.floor(key / EDGE_VERTEX_BASE), hi = key - lo * EDGE_VERTEX_BASE;
             boundaryPairs.push(direction === 0 ? lo : hi, direction === 0 ? hi : lo);
         }
         return {
@@ -990,6 +1000,23 @@
         }
     }
 
+    /* Full overused/conflict audit whenever orientMesh can pack the mesh
+       (≤ 2,097,151 vertices and triangles). Bigger meshes keep the old rule
+       (audit only when marching saw a misoriented edge), so a mesh that hollowed
+       before still hollows; lifting the pack limit belongs with finer lamp walls. */
+    function auditGridMesh(meshArrays, control) {
+        const tooBig = meshArrays.vertices > 2097151 || meshArrays.triVerts.length / 3 > 2097151;
+        if (tooBig && !meshArrays.misorientedEdges) {
+            capDirectedBoundaries(meshArrays, meshArrays.boundaryPairs, control);
+            return;
+        }
+        const oriented = orientMesh(meshArrays, control);
+        if (oriented.overused || oriented.conflicts) {
+            throw new Error(`grid mesh audit failed: overused=${oriented.overused}, conflicts=${oriented.conflicts}`);
+        }
+        capDirectedBoundaries(meshArrays, oriented.boundaryPairs, control);
+    }
+
     function runGrid(source, arrays, wall, control, stageMs) {
         let grid = null, meshArrays = null, inner = null, hollow = null;
         const warnings = [];
@@ -1007,17 +1034,7 @@
             control.stage("grid-band", () => exactBandPass(arrays, spec, grid, control));
             meshArrays = control.stage("grid-march", () => marchGrid(grid, spec, control));
             grid = null;
-            control.stage("grid-audit", () => {
-                let boundaryPairs = meshArrays.boundaryPairs;
-                if (meshArrays.misorientedEdges) {
-                    const oriented = orientMesh(meshArrays, control);
-                    if (oriented.overused || oriented.conflicts) {
-                        throw new Error(`grid mesh audit failed: overused=${oriented.overused}, conflicts=${oriented.conflicts}`);
-                    }
-                    boundaryPairs = oriented.boundaryPairs;
-                }
-                capDirectedBoundaries(meshArrays, boundaryPairs, control);
-            });
+            control.stage("grid-audit", () => auditGridMesh(meshArrays, control));
             meshArrays.Mesh = arrays.Mesh;
             meshArrays.Manifold = arrays.Manifold;
             inner = control.stage("grid-build", () => manifoldFromArrays(meshArrays));
@@ -1153,6 +1170,6 @@
         wallWarnings,
         HollowCancelled,
         HollowGridTooLarge,
-        _test: { marchGrid, orientMesh },
+        _test: { marchGrid, orientMesh, auditGridMesh, edgeKey },
     };
 })();

@@ -8,7 +8,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `cut-test.html` | `check_cut_engine.py` | Cut engine: spline cuts give watertight pieces with conserved volume |
 | `formats-test.html` | `check_formats.py` | OBJ import, 3MF export round trip, basic repair ladder |
 | `repair-test.html` | `check_repair.py` | Boundary-loop repair of open meshes, plus old-vs-new weld/loop/repair equivalence |
-| `hollow-test.html` | `check_hollow.py` | Hybrid hollowing: wall thickness, watertight shells, honest savings |
+| `hollow-test.html` | `check_hollow.py` | Hybrid hollowing: wall thickness, watertight shells, honest savings, and glow swatch geometry |
 | `units-test.html` | `check_units.py` | Units and orientation math |
 | `bigprint-test.html` | `check_bigprint.py` | Big Print grid math, the streaming cell cutter, solid blocks and label pads on hollow seams (plus the solid-output golden digest), manifest wording, and the exploded-view proxy target + note wording |
 | `compute-test.html` | `check_compute.py` | The compute worker: fused repair, cache tokens, worker cuts match main-thread cuts, cancel, fallback |

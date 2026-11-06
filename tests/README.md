@@ -11,6 +11,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `hollow-test.html` | `check_hollow.py` | Hybrid hollowing: wall thickness, watertight shells, honest savings, open faces and drilled holes (T1-T17, including the unchanged-output digest guard), and glow swatch geometry |
 | `units-test.html` | `check_units.py` | Units and orientation math |
 | `bigprint-test.html` | `check_bigprint.py` | Big Print grid math, wall lists (auto/hand, reset rules) and the nudge clamp, the streaming cell cutter, solid blocks and label pads on hollow seams (plus the solid-output golden digest), manifest wording, and the exploded-view proxy target + note wording |
+| `assembly-test.html` | `check_assembly.py` | 3D assembly viewer: neighbours, per-part triangle targets, mesh pack/unpack, collector, the file text, the 6 MB cap and its halve, manifest note, and the viewer mounted in a plain div (select, tap vs drag, explode, layout, dispose) |
 | `compute-test.html` | `check_compute.py` | The compute worker: fused repair, cache tokens, worker cuts match main-thread cuts, cancel, fallback, and hollowApply carrying open faces and holes on worker and fallback (C1-C3) |
 | `memory-test.html` | `check_memory.py` | Worker memory stats and the deferred recycle |
 | `property-test.html` | `check_property.py` | Random-seed invariants for cuts and hollows (volume, watertightness, kerf) |

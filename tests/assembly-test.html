@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<div id="stage" style="position:absolute;left:0;top:0;width:480px;height:320px;overflow:hidden"></div>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/three/OrbitControls.js"></script>
+<script src="../vendor/fflate/fflate.min.js"></script>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../js/cut-core.js"></script>
+<script src="../js/bigprint-core.js"></script>
+<script src="../js/assembly-core.js"></script>
+<script src="../js/assembly-viewer.js"></script>
+<script>
+/* Headless test for the 3D assembly viewer data, packing, file and viewer.
+   Run via tools/check_assembly.py. Result lands in document.title:
+   "PASS" or "FAIL: <reason>". */
+(async () => {
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+    const finish = () => {
+        document.title = fails.length ? "FAIL: " + fails.join("; ") : "PASS";
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+    if (!window.AssemblyCore || !window.AssemblyViewer) {
+        check("assembly modules exist", false,
+            "AssemblyCore=" + typeof window.AssemblyCore + " AssemblyViewer=" + typeof window.AssemblyViewer);
+        finish();
+        return;
+    }
+
+    try {
+        await CutCore.init();
+        const AC = AssemblyCore;
+        const BC = BigPrintCore;
+
+        // ----- fixture: 3 x 2 x 2 grid of 100 mm cells, two cells empty -----
+        const min = { x: -150, y: 0, z: -100 };
+        const size = { x: 300, y: 200, z: 200 };
+        const grid = { counts: { x: 3, y: 2, z: 2 },
+            cuts: { x: [100, 200], y: [100], z: [100] } };
+        const empty = new Set(["2,1,0", "0,0,1"]);
+        const cells = Array.from(BC.gridCells(grid, size, min));
+        const keyOf = (c) => `${c.ci},${c.ri},${c.li}`;
+        const live = cells.filter((c) => !empty.has(keyOf(c)));
+
+        function sphereFor(cell) {
+            const g = new THREE.SphereGeometry(40, 64, 48).toNonIndexed();
+            g.translate((cell.x0 + cell.x1) / 2, (cell.y0 + cell.y1) / 2, (cell.z0 + cell.z1) / 2);
+            return g;
+        }
+        function partFor(cell, geo) {
+            geo.computeBoundingBox();
+            const b = geo.boundingBox;
+            const c = new THREE.Vector3();
+            b.getCenter(c);
+            return { id: cell.id, cell: { ci: cell.ci, ri: cell.ri, li: cell.li },
+                file: `Part_${cell.id}.stl`,
+                box: { min: [b.min.x, b.min.y, b.min.z], max: [b.max.x, b.max.y, b.max.z] },
+                center: [c.x, c.y, c.z], engraved: false, pegs: null, sockets: null };
+        }
+        const triCount = (g) => (g.getIndex() ? g.getIndex().count : g.getAttribute("position").count) / 3;
+        const meta = {
+            name: "Boat<\/script><b>&\"x\"", exportDate: "2026-11-06T00:00:00.000Z",
+            appVersion: "2.1.0", scale: 4, size, gap: 0.2, connectors: "round 4 mm, tolerance 0.2 mm",
+            grid, min,
+        };
+        const fakeSource = { three: "/*three*/", orbit: "/*orbit*/", fflate: "/*fflate*/",
+            core: "/*core*/", viewer: "/*viewer*/", licences: "LICENCE TEXT" };
+
+        async function makeCollector(simplify) {
+            const col = AC.createCollector({ candidates: cells.length,
+                simplify: simplify || CutCore.simplifyToTarget });
+            const sources = [];
+            for (const cell of cells) {
+                if (empty.has(keyOf(cell))) { col.skip(); continue; }
+                const geo = sphereFor(cell);
+                sources.push({ geo, tris: triCount(geo) });
+                col.add(partFor(cell, geo), geo);
+            }
+            return { col, sources };
+        }
+        const decode = (bytes) => {
+            const html = new TextDecoder().decode(bytes);
+            const doc = new DOMParser().parseFromString(html, "text/html");
+            const data = JSON.parse(doc.getElementById("ccav-data").textContent);
+            const bin = atob(doc.getElementById("ccav-mesh").textContent.trim());
+            const packed = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) packed[i] = bin.charCodeAt(i);
+            return { html, doc, data, mesh: fflate.inflateSync(packed) };
+        };
+
+        // ----- C1 neighbours -----
+        {
+            const parts = live.map((c) => ({ id: c.id, cell: { ci: c.ci, ri: c.ri, li: c.li } }));
+            const nb = AC.neighbours(parts);
+            const byId = new Map(parts.map((p) => [p.id, nb.get ? nb.get(p.id) : nb[p.id]]));
+            const get = (id) => byId.get(id);
+            let symmetric = true, selfFree = true, noEmpty = true, matches = true;
+            const emptyIds = new Set(cells.filter((c) => empty.has(keyOf(c))).map((c) => c.id));
+            for (const p of parts) {
+                const list = get(p.id);
+                for (const other of list) {
+                    if (other === p.id) selfFree = false;
+                    if (!get(other) || !get(other).includes(p.id)) symmetric = false;
+                    if (emptyIds.has(other)) noEmpty = false;
+                }
+                const expected = parts.filter((q) => Math.abs(q.cell.ci - p.cell.ci)
+                    + Math.abs(q.cell.ri - p.cell.ri) + Math.abs(q.cell.li - p.cell.li) === 1)
+                    .map((q) => q.id).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+                if (!same(list, expected)) matches = false;
+            }
+            check("C1 neighbours symmetric", symmetric);
+            check("C1 nobody lists itself", selfFree);
+            check("C1 empty cells never appear", noEmpty);
+            check("C1 neighbours match the face-sharing rule (no diagonals)", matches);
+            check("C1 A1 is exactly A2, B1", same(get("A1"), ["A2", "B1"]), JSON.stringify(get("A1")));
+            check("C1 B2-L2 is exactly A2-L2, B1-L2, B2, C2-L2",
+                same(get("B2-L2"), ["A2-L2", "B1-L2", "B2", "C2-L2"]), JSON.stringify(get("B2-L2")));
+            check("C1 ten parts", parts.length === 10);
+        }
+
+        // ----- C2 targets -----
+        {
+            const vt = AC.viewerTarget;
+            check("C2 10 cells -> 4000", vt(10, 200000) === 4000);
+            check("C2 120 cells -> 1666", vt(120, 200000) === 1666, String(vt(120, 200000)));
+            check("C2 1000 cells -> 400", vt(1000, 200000) === 400);
+            check("C2 no budget -> 400", vt(1, 0) === 400);
+            check("C2 halved 10 -> 2000", vt(10, 200000, true) === 2000);
+            check("C2 halved 1000 -> 200", vt(1000, 200000, true) === 200);
+            const L = AC.LIMITS;
+            check("C2 limits", L.TOTAL_TRIS === 200000 && L.MIN_PART_TRIS === 400
+                && L.MAX_PART_TRIS === 4000 && L.CAP_BYTES === 6000000);
+        }
+
+        // ----- C3 pack round trip -----
+        {
+            const sphere = CutCore.simplifyToTarget(
+                new THREE.SphereGeometry(40, 64, 48).toNonIndexed(), 2000);
+            sphere.translate(123.456, 7.8, -90.1);
+            const packed = AC.packMesh(sphere);
+            const out = AC.unpackMesh(Object.assign({ offset: 0 }, packed), packed.data);
+            const pos = sphere.getAttribute("position");
+            let worst = true;
+            for (let i = 0; i < pos.count; i++) {
+                for (let a = 0; a < 3; a++) {
+                    const err = Math.abs(out.position[i * 3 + a] - pos.array[i * 3 + a]);
+                    if (err > packed.step[a] / 2 + 1e-6) worst = false;
+                }
+            }
+            check("C3 every vertex within step/2", worst && out.position.length === pos.array.length);
+            const idx = sphere.getIndex().array;
+            check("C3 indices identical", out.index.length === idx.length
+                && out.index.every((v, i) => v === idx[i]));
+            check("C3 triangle count same", packed.tris === idx.length / 3);
+            check("C3 narrow indices", packed.wide === false);
+
+            const flat = new THREE.PlaneGeometry(50, 30).rotateX(-Math.PI / 2);
+            for (let i = 0; i < flat.getAttribute("position").count; i++) flat.getAttribute("position").setY(i, 0); // exactly flat, not float noise
+            const fp = AC.packMesh(flat);
+            const fo = AC.unpackMesh(Object.assign({ offset: 0 }, fp), fp.data);
+            check("C3 flat part unpacks without NaN",
+                Array.from(fo.position).every((v) => Number.isFinite(v)) && fp.step.includes(0));
+            let flatOk = true;
+            const fpos = flat.getAttribute("position");
+            for (let i = 0; i < fpos.count * 3; i++) {
+                if (Math.abs(fo.position[i] - fpos.array[i]) > 1e-3) flatOk = false;
+            }
+            check("C3 flat part keeps its shape", flatOk);
+
+            const big = new THREE.PlaneGeometry(1, 1, 300, 250);
+            const bp = AC.packMesh(big);
+            const bo = AC.unpackMesh(Object.assign({ offset: 0 }, bp), bp.data);
+            const bidx = big.getIndex().array;
+            check("C3 75,551 vertices pack wide", bp.wide === true && bp.verts === 75551, `${bp.verts} verts`);
+            check("C3 wide round trip", bo.index instanceof Uint32Array && bo.index.length === bidx.length
+                && bo.index.every((v, i) => v === bidx[i]) && bo.position.length === 75551 * 3);
+        }
+
+        // ----- C4 collector -----
+        const main = await makeCollector();
+        const mainBuild = await main.col.build({ meta, source: fakeSource });
+        {
+            const decoded = decode(mainBuild.bytes);
+            const trisList = decoded.data.parts.map((p) => p.mesh && p.mesh.tris);
+            check("C4 ten parts", main.col.count() === 10 && decoded.data.parts.length === 10);
+            check("C4 each part has 0 < tris <= 4000", trisList.every((t) => t > 0 && t <= 4000),
+                trisList.join(","));
+            check("C4 total <= 40,000", main.col.tris() <= 40000, String(main.col.tris()));
+            check("C4 sources not disposed or changed",
+                main.sources.every((s) => triCount(s.geo) === s.tris
+                    && s.geo.getAttribute("position").count > 0));
+            const thrown = AC.createCollector({ candidates: 2, simplify: () => { throw new Error("boom"); } });
+            const bigGeo = new THREE.SphereGeometry(40, 64, 48).toNonIndexed();
+            const smallGeo = new THREE.SphereGeometry(40, 32, 24).toNonIndexed();
+            thrown.add(partFor(cells[0], bigGeo), bigGeo);
+            thrown.add(partFor(cells[1], smallGeo), smallGeo);
+            const tb = await thrown.build({ meta, source: fakeSource });
+            check("C4 build survives a throwing simplify", tb.ok === true);
+            if (tb.ok) {
+                const td = decode(tb.bytes).data;
+                check("C4 big part with failed simplify has mesh null", td.parts[0].mesh === null);
+                check("C4 small part with failed simplify keeps its mesh",
+                    td.parts[1].mesh && td.parts[1].mesh.tris === triCount(smallGeo));
+            }
+            thrown.dispose();
+        }
+
+        // ----- C5 explode -----
+        {
+            const origin = { x: 0, y: 100, z: 0 };
+            const centres = [{ x: 0, y: 0, z: 0 }, { x: 50, y: 100, z: -50 }, { x: -150.5, y: 20.25, z: 99.9 },
+                { x: 3.3, y: 199, z: 0.1 }, { x: 77, y: 1, z: -100 }];
+            let exact = true;
+            for (const c of centres) for (const k of [0, 0.37, 1]) {
+                const a = AC.explodedPosition(c, origin, k), b = BC.explodedPosition(c, origin, k);
+                if (a.x !== b.x || a.y !== b.y || a.z !== b.z) exact = false;
+            }
+            check("C5 explodedPosition equals BigPrintCore's", exact);
+        }
+
+        // ----- C6 file -----
+        const html = new TextDecoder().decode(mainBuild.bytes);
+        {
+            check("C6 build ok", mainBuild.ok === true && mainBuild.bytes instanceof Uint8Array);
+            const count = (re) => (html.match(re) || []).length;
+            check("C6 one data block and one mesh block",
+                count(/id="ccav-data"/g) === 1 && count(/id="ccav-mesh"/g) === 1);
+            check("C6 closing and opening script counts match",
+                count(/<\/script/gi) === count(/<scrip[t]/gi), `${count(/<\/script/gi)} vs ${count(/<scrip[t]/gi)}`);
+            check("C6 title is escaped",
+                html.includes("<title>Boat&lt;/script&gt;&lt;b&gt;&amp;&quot;x&quot;"));
+            const d = decode(mainBuild.bytes);
+            check("C6 data kind and format", d.data.kind === "curve-cut-assembly" && d.data.format === 1);
+            check("C6 name round trips", d.data.name === meta.name);
+            check("C6 ten parts in gridCells order",
+                same(d.data.parts.map((p) => p.id), live.map((c) => c.id)));
+            check("C6 walls", same(d.data.grid.walls.x, [-50, 50]) && same(d.data.grid.walls.y, [100])
+                && same(d.data.grid.walls.z, [0]), JSON.stringify(d.data.grid.walls));
+            check("C6 counts and detail", same(d.data.grid.counts, grid.counts)
+                && d.data.detail.halved === false && d.data.detail.simplified === true);
+            let inRange = true, aligned = true;
+            for (const p of d.data.parts) {
+                const m = p.mesh;
+                const pad4 = (n) => Math.ceil(n / 4) * 4;
+                const end = m.offset + pad4(m.verts * 6) + pad4(m.tris * 3 * (m.wide ? 4 : 2));
+                if (end > d.mesh.length) inRange = false;
+                if (m.offset % 4 !== 0) aligned = false;
+            }
+            check("C6 mesh offsets in range", inRange);
+            check("C6 mesh offsets 4-byte aligned", aligned);
+            check("C6 licence comment present", html.includes("LICENCE TEXT") && html.includes("<" + "!--"));
+            check("C6 no external URLs", !/https?:\/\//i.test(html.replace(/github\.com\/MaxSikorski/g, "")),
+                (html.match(/https?:\/\/\S{0,40}/) || [""])[0]);
+            check("C6 neighbours written", same(d.data.parts[0].neighbours, ["A2", "B1"]));
+        }
+
+        // ----- C7 cap -----
+        {
+            const unhalvedSize = mainBuild.sizeBytes;
+            const unhalvedTris = main.col.tris();
+            check("C7 sizeBytes is the UTF-8 length", unhalvedSize === mainBuild.bytes.length);
+            const big = await main.col.build({ meta, source: fakeSource, capBytes: 1e9 });
+            check("C7 big cap -> ok, not halved", big.ok && big.halved === false);
+
+            const stages = [];
+            const half = await main.col.build({ meta, source: fakeSource, capBytes: unhalvedSize - 1,
+                onStage: (t) => stages.push(t) });
+            check("C7 small cap -> ok, halved", half.ok === true && half.halved === true);
+            check("C7 halved triangles <= 0.6 x", half.tris <= 0.6 * unhalvedTris,
+                `${half.tris} vs ${unhalvedTris}`);
+            check("C7 onStage heard the halving",
+                stages.includes("Making the 3D assembly view smaller…"), JSON.stringify(stages));
+            if (half.ok) check("C7 data says halved", decode(half.bytes).data.detail.halved === true);
+
+            const tiny = await main.col.build({ meta, source: fakeSource, capBytes: 1000 });
+            check("C7 tiny cap -> too-big, no bytes", tiny.ok === false && tiny.reason === "too-big"
+                && !tiny.bytes && tiny.sizeBytes > 1000, JSON.stringify({ r: tiny.reason, s: tiny.sizeBytes }));
+
+            // ----- C8 stop -----
+            const stopped = await main.col.build({ meta, source: fakeSource, capBytes: 1000,
+                shouldStop: () => true });
+            check("C8 stop during the halve", stopped.ok === false && stopped.reason === "stopped",
+                String(stopped.reason));
+        }
+
+        // ----- C9 manifest note -----
+        {
+            const okNote = AC.manifestNote({ ok: true, parts: 10, sizeBytes: 2345678, halved: false });
+            check("C9 ok note", okNote === "\n\n3D assembly view:\n"
+                + "  assembly.html — open it in any browser, no internet needed: spin the model, pull the parts apart, tap a part to see its ID.\n"
+                + "  10 parts, 2.3 MB, simplified shapes — the part files are full detail.", JSON.stringify(okNote));
+            const halfNote = AC.manifestNote({ ok: true, parts: 10, sizeBytes: 2345678, halved: true });
+            check("C9 halved note", halfNote.endsWith("  10 parts, 2.3 MB, simplified shapes (half detail to stay under 6 MB) — the part files are full detail."));
+            const big = AC.manifestNote({ ok: false, reason: "too-big", sizeBytes: 7400000 });
+            check("C9 too-big note", big === "\n\n3D assembly view:\n"
+                + "  Left out — it came to 7.4 MB even at half detail, over the 6 MB limit. The part files are complete.");
+            const err = AC.manifestNote({ ok: false, reason: "error" });
+            check("C9 error note", err === "\n\n3D assembly view:\n"
+                + "  Left out — it couldn't be built in this browser. The part files are complete.");
+        }
+
+        // ----- V1-V6 viewer, mounted in a plain div -----
+        {
+            check("V0 loadSource is a function and was not called",
+                typeof AssemblyViewer.loadSource === "function"
+                && typeof window.CurveCutAssemblyViewerSource === "undefined");
+            const stage = document.getElementById("stage");
+            const d = decode(mainBuild.bytes);
+            let handle = AssemblyViewer.mount(stage, { THREE, data: d.data, bytes: d.mesh });
+            await sleep(200);
+            const canvas = stage.querySelector("canvas");
+            check("V1 canvas exists (WebGL available)", !!canvas);
+            check("V1 partCount is 10", handle.partCount() === 10);
+            check("V1 ids match", same(handle.ids(), live.map((c) => c.id)));
+            if (canvas) {
+                canvas.setPointerCapture = () => {};     // synthetic pointers are not "active"
+                canvas.releasePointerCapture = () => {};
+                const fire = (type, x, y) => canvas.dispatchEvent(new PointerEvent(type, {
+                    clientX: x, clientY: y, pointerId: 1, pointerType: "mouse", button: 0,
+                    buttons: type === "pointerup" ? 0 : 1, bubbles: true, isPrimary: true }));
+                const tap = (x, y) => { fire("pointerdown", x, y); fire("pointerup", x, y); };
+
+                const pt = handle.screenPointOf("A1");
+                check("V2 screenPointOf(A1) not null", !!pt);
+                if (pt) {
+                    tap(pt.x, pt.y);
+                    check("V2 tap selects A1", handle.selected() === "A1", String(handle.selected()));
+                    const card = handle.cardText();
+                    check("V2 card text", card.includes("A1") && card.includes("Layer 1 of 2")
+                        && card.includes("Touches A2, B1") && card.includes("File"), card);
+                    const label = stage.querySelector(".ccav-label");
+                    check("V2 label visible and reads A1", !!label && label.textContent.trim() === "A1"
+                        && getComputedStyle(label).display !== "none"
+                        && getComputedStyle(label).visibility !== "hidden");
+                    const rect = canvas.getBoundingClientRect();
+                    tap(rect.left + 3, rect.top + 3);
+                    check("V2 tap on empty space clears", handle.selected() === null, String(handle.selected()));
+                }
+
+                handle.select("A1");
+                const b1 = handle.screenPointOf("B1");
+                check("V3 screenPointOf(B1) not null", !!b1);
+                if (b1) {
+                    fire("pointerdown", b1.x, b1.y);
+                    fire("pointermove", b1.x + 20, b1.y);
+                    fire("pointermove", b1.x + 40, b1.y);
+                    fire("pointerup", b1.x + 40, b1.y);
+                    check("V3 a 40 px drag is an orbit, selection unchanged", handle.selected() === "A1",
+                        String(handle.selected()));
+                }
+
+                handle.setExplode(1);
+                const origin = d.data.origin;
+                let moved = true;
+                for (const p of d.data.parts) {
+                    const want = BC.explodedPosition({ x: p.center[0], y: p.center[1], z: p.center[2] }, origin, 1);
+                    const pos = handle.meshOf(p.id).position;
+                    if (Math.abs(pos.x - want.x) > 1e-6 || Math.abs(pos.y - want.y) > 1e-6
+                        || Math.abs(pos.z - want.z) > 1e-6) moved = false;
+                }
+                check("V4 explode 1 moves every part by explodedPosition", moved);
+                handle.setExplode(0);
+            }
+
+            const root = stage.querySelector(".ccav");
+            check("V5 480 px container is narrow", !!root && root.classList.contains("ccav-narrow"));
+            stage.style.width = "1000px";
+            stage.style.height = "600px";
+            for (let i = 0; i < 30 && root && root.classList.contains("ccav-narrow"); i++) await sleep(100);
+            check("V5 1000 px container is wide", !!root && !root.classList.contains("ccav-narrow"));
+
+            handle.dispose();
+            check("V6 dispose empties the container", stage.childElementCount === 0
+                && !stage.querySelector("canvas"), stage.innerHTML.slice(0, 80));
+            let again = null, threw = null;
+            try {
+                again = AssemblyViewer.mount(stage, { THREE, data: d.data, bytes: d.mesh });
+                again.dispose();
+            } catch (err) { threw = err; }
+            check("V6 second mount and dispose works", !threw && stage.childElementCount === 0,
+                threw ? String(threw) : "");
+        }
+    } catch (err) {
+        check("test run threw", false, String(err && err.stack || err));
+    }
+    finish();
+})();
+</script>
+</body>
+</html>

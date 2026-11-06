@@ -864,6 +864,14 @@
         getFitDist: () => fitDist,
         // the load-time framing ("home position") — the tour uses it on exit
         flyHome: () => flyTo(new THREE.Vector3(1, 0.55, 1).normalize()),
+        // a named view ("home" and "iso" are the load-time framing); false for an unknown name
+        flyToView: (name) => {
+            const dir = name === "iso" || name === "home"
+                ? new THREE.Vector3(1, 0.55, 1).normalize() : VIEW_DIRS[name];
+            if (!dir) return false;
+            flyTo(dir);
+            return true;
+        },
         baseMaterial: meshMaterial,
         toast,
         showStats,

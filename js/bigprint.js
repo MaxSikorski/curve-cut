@@ -2161,7 +2161,7 @@
                     assembly = { ok: false, reason: "error" };
                 }
                 viewer.dispose();
-                if (assembly.reason === "stopped" || cancelled || !op.alive()) {
+                if (assembly.reason === "stopped" || cancelled || op.cancelled || !op.alive()) {
                     cancelled = true;
                     writer.abort();
                     CC.progress.hide();

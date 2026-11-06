@@ -36,7 +36,7 @@ LICENCES = (
 CURVE_CUT_NOTICE = ("curve cut — Copyright Max Sikorski — AGPL-3.0-only — "
                     "source: github.com/MaxSikorski/curve-cut")
 CHUNK_SIZE = 64000
-BAD_TOKENS = ("</script", "<script", "<!--")
+BAD_TOKENS = ("</script", "<script", "<!--", "--!>")
 
 HEADER = """/* GENERATED FILE — do not edit.
    Source assembly: tools/embed_viewer.py

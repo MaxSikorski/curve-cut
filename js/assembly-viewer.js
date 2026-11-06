@@ -14,7 +14,7 @@
     const NARROW_PX = 720;
     const TAP_PX = 6;
     const TAP_MS = 500;
-    const FADED = 0.35;
+    const FADED = 0.15;
     const EMPTY_CARD = "Tap or click a part to see its ID.";
     const NO_WEBGL = "This page needs WebGL to show the 3D view. The part list is in manifest.txt.";
     const FOOTER = "Made with curve cut — AGPL-3.0, source at github.com/MaxSikorski/curve-cut · "
@@ -31,7 +31,7 @@
 .ccav-view canvas{display:block;width:100%;height:100%;touch-action:none}
 .ccav-panel{flex:0 0 300px;overflow:auto;padding:16px;border-left:1px solid var(--ccav-line)}
 .ccav-narrow{flex-direction:column}
-.ccav-narrow .ccav-view{flex:0 0 65%}
+.ccav-narrow .ccav-view{flex:0 0 50%}
 .ccav-narrow .ccav-panel{flex:1 1 auto;border-left:0;border-top:1px solid var(--ccav-line)}
 .ccav-title{margin:0 0 4px;font-size:20px;font-weight:700;overflow-wrap:anywhere}
 .ccav-meta,.ccav-note,.ccav-foot{margin:0 0 8px;color:var(--ccav-muted);font-size:13px}
@@ -45,7 +45,7 @@
 .ccav-slider::-webkit-slider-thumb{-webkit-appearance:none;width:44px;height:44px;margin-top:-20px;border-radius:50%;background:var(--ccav-fg);border:0}
 .ccav-slider::-moz-range-track{height:4px;border-radius:2px;background:var(--ccav-muted)}
 .ccav-slider::-moz-range-thumb{width:44px;height:44px;border-radius:50%;background:var(--ccav-fg);border:0}
-.ccav-btn{min-height:44px;min-width:44px;padding:0 16px;border:1px solid var(--ccav-line);border-radius:10px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.ccav-btn{min-height:44px;min-width:44px;padding:0 16px;border:1px solid var(--ccav-line);border-radius:30px;background:transparent;color:inherit;font:inherit;cursor:pointer}
 .ccav-label{position:absolute;left:0;top:0;display:none;pointer-events:none;transform:translate(-50%,-50%);padding:2px 10px;border-radius:999px;background:var(--ccav-fg);color:var(--ccav-bg);font-size:13px;font-weight:700;white-space:nowrap}
 .ccav-nogl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--ccav-muted)}
 `;
@@ -284,11 +284,30 @@
                 if (!material.emissive) continue;   // outline-only parts have no lit material
                 const picked = selectedId !== null && mesh.userData.id === selectedId;
                 const faded = selectedId !== null && !picked;
-                material.emissive.setHex(picked ? 0x444444 : 0x000000);
+                material.emissive.setHex(picked ? 0x888888 : 0x000000);
                 material.transparent = faded;
                 material.opacity = faded ? FADED : 1;
+                material.depthWrite = !faded;   // faded parts must not hide what is behind them
                 material.needsUpdate = true;
             }
+            showOutline();
+        }
+
+        // the picked part also gets a thin outline in the text colour
+        let outline = null;
+        function showOutline() {
+            if (outline) {
+                outline.parent.remove(outline);
+                outline.geometry.dispose();
+                outline.material.dispose();
+                outline = null;
+            }
+            const mesh = selectedId === null ? null : meshById.get(selectedId);
+            if (!mesh || !mesh.geometry.getAttribute("position") || mesh.material.visible === false) return;
+            const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+            outline = new T.LineSegments(new T.EdgesGeometry(mesh.geometry, 35),
+                new T.LineBasicMaterial({ color: dark ? 0xffffff : 0x000000 }));
+            mesh.add(outline);
         }
 
         function select(id) {
@@ -368,9 +387,9 @@
         };
         const onUp = (e) => {
             if (!press || press.id !== e.pointerId) return;
+            onMove(e);                  // measure the release point before clearing the press
             const done = press;
             press = null;
-            onMove(e);
             if (done.valid && done.far < TAP_PX && performance.now() - done.t < TAP_MS) {
                 pick(e.clientX, e.clientY);
             }
@@ -420,6 +439,8 @@
                 canvas.removeEventListener("pointercancel", onCancel);
             }
             if (controls) controls.dispose();
+            selectedId = null;
+            showOutline();
             for (const item of owned) item.dispose();
             if (renderer) {
                 renderer.dispose();

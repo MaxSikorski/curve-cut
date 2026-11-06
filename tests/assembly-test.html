@@ -326,6 +326,10 @@
             check("V1 partCount is 10", handle.partCount() === 10);
             check("V1 ids match", same(handle.ids(), live.map((c) => c.id)));
             if (canvas) {
+                const fadeProbe = (() => { handle.select("A1"); const m = handle.meshOf("B1").material;
+                    const ok = m.transparent && m.opacity <= 0.15 && m.depthWrite === false
+                        && handle.meshOf("A1").material.emissive.getHex() !== 0; handle.select(null); return ok; })();
+                check("V2b others fade to 0.15 without writing depth; picked part glows", fadeProbe);
                 canvas.setPointerCapture = () => {};     // synthetic pointers are not "active"
                 canvas.releasePointerCapture = () => {};
                 const fire = (type, x, y) => canvas.dispatchEvent(new PointerEvent(type, {
@@ -361,6 +365,16 @@
                     check("V3 a 40 px drag is an orbit, selection unchanged", handle.selected() === "A1",
                         String(handle.selected()));
                 }
+
+                // V3b: a flick with no pointermove at all is still not a tap
+                handle.select("A1");
+                const b1b = handle.screenPointOf("B1");
+                if (b1b) {
+                    fire("pointerdown", b1b.x, b1b.y);
+                    fire("pointerup", b1b.x + 40, b1b.y);
+                    check("V3b release 40 px away with no move is not a tap", handle.selected() === "A1",
+                        String(handle.selected()));
+                } else check("V3b screenPointOf(B1) not null", false);
 
                 handle.setExplode(1);
                 const origin = d.data.origin;

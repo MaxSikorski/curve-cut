@@ -12,6 +12,8 @@
     const panel = document.getElementById("hollow-panel");
     const panelCollapse = CC.makeCollapsible(panel);
     const actionDock = document.getElementById("action-dock");
+    const viewDock = document.getElementById("view-dock");
+    const piecesPanel = document.getElementById("pieces-panel");
     const openBtn = document.getElementById("hollow-btn");
     const wallInput = document.getElementById("hollow-wall");
     const wallHint = document.getElementById("hollow-wall-hint");
@@ -192,25 +194,22 @@
 
     // ------------------------------------------------------ worker session
 
-    function release(entry) {
+    /* CC.compute runs one job at a time (Big Print starts its own release when
+       the pieces change), so a busy refusal is retried shortly, a bounded
+       number of times. A recycled worker has already dropped the copy. */
+    function release(entry, tries = 0) {
         if (!entry) return;
         try {
             const promise = CC.compute.run("release", { token: entry.token });
             if (promise && promise.catch) promise.catch(() => {});
-        } catch (_) { /* a busy or recycled worker already dropped it */ }
-    }
-
-    function forgetToken() {
-        const entry = token;
-        token = null;
-        if (!running) release(entry);
+        } catch (_) {
+            if (tries < 30) setTimeout(() => release(entry, tries + 1), 100);
+        }
     }
 
     async function ensureToken(source) {
         if (token && token.geometry === source.geometry && token.worker === CC.compute._worker) return;
         const old = token;
-        token = null;
-        release(old);
         const payload = await CC.compute.geometryPayloadAsync(source.geometry);
         const name = `hollow-panel-${++serial}`;
         // Scale is always 1 on the main page: the units panel bakes scale into
@@ -218,9 +217,16 @@
         const primed = CC.compute.run("prime", { token: name, geometry: payload, scale: 1 },
             { transfer: [payload.vertProperties.buffer, payload.triVerts.buffer] });
         job = { id: primed.id };
-        await primed;
+        try {
+            await primed;
+        } catch (error) {
+            job = null;
+            release({ token: name }); // the prime may have finished before the failure
+            throw error;
+        }
         job = null;
         token = { token: name, geometry: source.geometry, worker: CC.compute._worker };
+        release(old); // the new copy is primed first, then the old one goes
     }
 
     // ------------------------------------------------------------- preview
@@ -305,18 +311,22 @@
             };
         } catch (error) {
             failed = true;
-            if (error && error.message === "CC.compute is busy") {
+            const busy = !!error && error.message === "CC.compute is busy";
+            if (busy) {
+                failed = false;
                 CC.toast(BUSY_TOAST);
             } else if (isCancel(error) || !op.alive()) {
                 setStatus("Hollowing cancelled — model unchanged.");
             } else {
                 setStatus(failureText(error, wall), true);
             }
-            const entry = token;
-            token = null; // a cancel can recycle the worker, which drops every cached source
+            if (!busy) {
+                const entry = token;
+                token = null; // a cancel can recycle the worker, which drops every cached source
+                release(entry);
+            }
             job = null;
             running = false;
-            release(entry);
         } finally {
             job = null;
             running = false;
@@ -343,6 +353,8 @@
     /* The model under the preview changed (undo, redo, another edit). */
     function resetPreview() {
         if (preview) preview.source.visible = true; // that mesh may live on in an undo snapshot
+        // a piece rebuilt while the source was hidden can have inherited the hidden flag
+        for (const piece of CC.pieces) piece.visible = true;
         discardPreview();
         const entry = token;
         token = null;
@@ -368,7 +380,7 @@
         closeRequested = false;
         resetAfterRun = false;
         refresh();
-        gsap.to(actionDock, { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
+        gsap.to([viewDock, actionDock, piecesPanel], { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
         panelCollapse.reset();
         gsap.fromTo(panel, { y: 16 }, {
             autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out",
@@ -399,7 +411,10 @@
         release(entry);
         isOpenNow = false;
         gsap.to(panel, { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
-        gsap.fromTo(actionDock, { y: 10 }, {
+        if (CC.pieces.length) {
+            gsap.to(piecesPanel, { autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out", delay: 0.1 });
+        }
+        gsap.fromTo([viewDock, actionDock], { y: 10 }, {
             autoAlpha: 1, y: 0, duration: 0.7, ease: "power4.out", delay: 0.1,
             onStart: () => openBtn.focus(),
         });
@@ -483,6 +498,7 @@
 
     window.addEventListener("keydown", (e) => {
         if (e.key !== "Escape" || !isOpenNow) return;
+        if (CC.tour && CC.tour.isActive()) return;
         if (!cancelRun()) close();
     });
 

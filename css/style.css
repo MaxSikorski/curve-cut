@@ -723,6 +723,13 @@ p { line-height: 1.6; color: inherit; opacity: 0.85; }
     font-size: 0.75rem;
     white-space: nowrap;
 }
+.hollow-row-label {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    width: 52px;
+    flex-shrink: 0;
+}
 .hollow-faces { display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .hollow-status { text-align: left; }
 .hollow-stale {

@@ -634,6 +634,10 @@
 
     statsRepair.addEventListener("click", () => {
         if (pieces.length !== 1) return;
+        if (window.CurveCut.hollow && window.CurveCut.hollow.isOpen()) {
+            toast("Close the Hollow panel first.");
+            return;
+        }
         runRepair(pieces[0]);
     });
 

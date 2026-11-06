@@ -64,6 +64,10 @@
     }
 
     function refuseHollow() {
+        if (CC.hollow && CC.hollow.isOpen()) {
+            CC.toast("Close the Hollow panel first.");
+            return true;
+        }
         if (!CC.pieces[0] || !CC.pieces[0].userData.hollow) return false;
         CC.toast("Units and size are locked on a hollow model: undo the hollow (⌘Z) to change them.");
         return true;

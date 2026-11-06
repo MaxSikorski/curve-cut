@@ -17,7 +17,7 @@ from browser import ensure_playwright, page_url, run_page, skip_or_fail
 
 def main() -> int:
     ensure_playwright()
-    result = run_page(page_url("tests/hollow-panel-test.html"), 240,
+    result = run_page(page_url("tests/hollow-panel-test.html"), 420,
                       args=("--allow-file-access-from-files",))
     if result.skipped:
         return skip_or_fail(result.skipped)

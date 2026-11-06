@@ -25,6 +25,34 @@
     const statusOk = (manifold) => String(manifold.status()) === "NoError";
     const warningCodes = (result) => result.stats.warnings.map((warning) => warning.code);
 
+    function checkGridFans(H) {
+        const spec = { dims: [5, 5, 5], min: [0, 0, 0], h: 3, wall: 6 };
+        const control = { check() {}, progress() {} }, values = [0, 3.9, 5.9, 9];
+        const fixed = [9, 3.9, 3.9, 9, 9, 5.9, 5.9, 3.9, 3.9, 9, 3.9, 3.9];
+        const audit = (block) => {
+            const grid = new Float32Array(125);
+            let i = 0;
+            for (let z = 1; z <= 3; z++) for (let y = 1; y <= 2; y++) for (let x = 1; x <= 2; x++) {
+                grid[x + 5 * y + 25 * z] = block[i++];
+            }
+            return H._test.orientMesh(H._test.marchGrid(grid, spec, control), control);
+        };
+        const clean = (result) => result.overused === 0 && result.conflicts === 0;
+        const fixedResult = audit(fixed);
+        check("grid fan fixed checkerboard", clean(fixedResult),
+            `overused=${fixedResult.overused}, conflicts=${fixedResult.conflicts}`);
+        let failed = 0;
+        for (let seed = 0; seed < 3000; seed++) {
+            let state = seed;
+            const block = Array.from({ length: 12 }, () => {
+                state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+                return values[state >>> 30];
+            });
+            if (!clean(audit(block))) failed++;
+        }
+        check("grid fan 3000 seeded blocks", failed === 0, `${failed} failed`);
+    }
+
     function manifoldFromArrays(wasm, vertProperties, triVerts) {
         const mesh = new wasm.Mesh({ numProp: 3, vertProperties, triVerts });
         mesh.merge();
@@ -129,6 +157,7 @@
         wasm.setup();
         const H = window.CurveCut.hollowCore;
         check("core API", !!(H && H.hollow && H.estimate && H.previewShell && H.wallWarnings));
+        checkGridFans(H);
 
         cube = wasm.Manifold.cube([60, 60, 60], true);
         check("cube fixture has 12 triangles", cube.numTri() === 12, `${cube.numTri()} triangles`);

@@ -29,6 +29,23 @@
     const statusOk = (manifold) => String(manifold.status()) === "NoError";
     const warningCodes = (result) => result.stats.warnings.map((warning) => warning.code);
 
+    // FNV-1a over typed arrays, plain arrays and numbers, fed in order.
+    function makeDigest() {
+        let hash = 0x811c9dc5;
+        return {
+            add(...parts) {
+                for (const part of parts) {
+                    const view = typeof part === "number" ? new Uint32Array([part])
+                        : Array.isArray(part) ? Uint32Array.from(part) : part;
+                    const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+                    for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 0x01000193) >>> 0;
+                }
+            },
+            hex: () => hash.toString(16).padStart(8, "0"),
+        };
+    }
+    const fanDigest = makeDigest();
+
     function checkGridFans(H) {
         const spec = { dims: [5, 5, 5], min: [0, 0, 0], h: 3, wall: 6 };
         const control = { check() {}, progress() {} }, values = [0, 3.9, 5.9, 9];
@@ -39,7 +56,10 @@
             for (let z = 1; z <= 3; z++) for (let y = 1; y <= 2; y++) for (let x = 1; x <= 2; x++) {
                 grid[x + 5 * y + 25 * z] = block[i++];
             }
-            return H._test.orientMesh(H._test.marchGrid(grid, spec, control), control);
+            const marched = H._test.marchGrid(grid, spec, control);
+            const result = H._test.orientMesh(marched, control);
+            fanDigest.add(result.boundaryPairs, result.overused, result.conflicts, marched.triVerts);
+            return result;
         };
         const soup = { vertices: 6, triVerts: new Uint32Array([
             0, 1, 2, 1, 0, 3, 0, 1, 4, 1, 0, 5,
@@ -512,6 +532,57 @@
         } finally { dispose(plate); }
     }
 
+    // The raw marched mesh of a source, the same steps as runGrid up to the march.
+    function rawMarch(H, manifold, wall) {
+        const arrays = H.toArrays(manifold), control = { check() {}, progress() {} };
+        const spec = H._test.gridSpec(arrays, wall);
+        spec.wall = wall;
+        const grid = new Float32Array(spec.voxels);
+        H._test.columnSignPass(arrays, spec, grid, control);
+        H._test.exactBandPass(arrays, spec, grid, control);
+        return H._test.marchGrid(grid, spec, control);
+    }
+
+    // T18: byte-identical audit on the existing fixtures.
+    function checkRawAuditGoldens(wasm, H) {
+        // recorded on unchanged main d8571e0
+        const GOLDEN = { G1: ["8a597727", "d24a4093"], G2: ["9d2a9fe7", "70b04a8f"],
+            G3: ["811c9dc5", "9be17165"], G4: ["ad054948", "e2d8719a"], G3b: ["5753a65e", "7eda34a0"], G5: "ed10a2dd" };
+        const control = { check() {}, progress() {} };
+        const digestOf = (marched) => {
+            const first = makeDigest();
+            first.add(marched.vertProperties, marched.triVerts);
+            const reference = { vertices: marched.vertices, triVerts: marched.triVerts.slice() };
+            const oriented = H._test.orientMesh(reference, control);
+            const audited = { vertices: marched.vertices, triVerts: marched.triVerts.slice() };
+            H._test.auditGridMesh(audited, control);
+            const second = makeDigest();
+            second.add(audited.triVerts, oriented.boundaryPairs, oriented.overused, oriented.conflicts);
+            return [first.hex(), second.hex()];
+        };
+        const got = {};
+        let cavitySource = null, flat = null, round = null;
+        try {
+            got.G1 = digestOf(rawMarch(H, cube, 6));
+            round = refinedIcosphere(wasm, 20, 6);
+            got.G2 = digestOf(rawMarch(H, round, 6));
+            flat = refinedIcosphere(wasm, 20, 6, 0.2);
+            got.G3 = digestOf(rawMarch(H, flat, 6));
+            // G3 at wall 6 marches to an empty mesh (the sphere is only 8 mm thick), so G3b
+            // repeats it with a wall that leaves an inner surface.
+            got.G3b = digestOf(rawMarch(H, flat, 2));
+            const first = translated(wasm.Manifold.sphere(6, 24), [-12, 0, 0]);
+            const second = translated(wasm.Manifold.sphere(6, 24), [12, 0, 0]);
+            cavitySource = subtractAll(wasm.Manifold.cube([60, 40, 40], true), [first, second]);
+            got.G4 = digestOf(rawMarch(H, cavitySource, 2));
+        } finally { dispose(cavitySource); dispose(flat); dispose(round); }
+        got.G5 = fanDigest.hex();
+        log("raw audit digests: " + JSON.stringify(got));
+        const same = Object.keys(GOLDEN).every((name) =>
+            JSON.stringify(got[name]) === JSON.stringify(GOLDEN[name]));
+        check("T18 raw grid audit identical to main (G1-G5)", same, JSON.stringify(got));
+    }
+
     let wasm, cube, refined, thinRefined;
     const ownedResults = [];
     try {
@@ -667,6 +738,7 @@
             && Math.abs(afterCancel.stats.volumeAfterMm3 - 105408) < 1e-6);
 
         checkOpenFacesAndHoles(wasm, H, cube);
+        checkRawAuditGoldens(wasm, H);
 
         document.title = failures.length ? `FAIL: ${failures.join("; ")}` : "PASS";
     } catch (error) {

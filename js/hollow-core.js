@@ -1489,6 +1489,7 @@
         HollowCancelled,
         HollowGridTooLarge,
         bottomPlane,
-        _test: { marchGrid, orientMesh, auditGridMesh, edgeKey, HOLE_SEGMENTS },
+        _test: { marchGrid, orientMesh, auditGridMesh, edgeKey, gridSpec, columnSignPass,
+            exactBandPass, HOLE_SEGMENTS },
     };
 })();

@@ -37,15 +37,56 @@ window.BigPrintCore = (() => {
         if (!(usable > 0) || size <= usable) return [];
         const n = Math.ceil(size / usable);
         const slack = n * usable - size;
-        let phase = (usable - slack / 2 + nudge) % usable;
-        if (phase <= 0) phase += usable;
+        const w = slack / 2;
+        // A nudge past the window would wrap round and add a sliver part, so it
+        // stops at the window edge instead (the part count never rises).
+        const nd = Number.isFinite(nudge) ? Math.min(Math.max(nudge, -w), w) : 0;
+        let phase = usable - w + nd;
+        phase = Math.min(Math.max(phase, usable - slack), usable);
         const cuts = [];
-        for (let t = phase; t < size - 1e-9; t += usable) cuts.push(t);
+        for (let t = phase; t < size - 1e-9 && cuts.length < n - 1; t += usable) cuts.push(t);
         return cuts;
     }
 
-    /* Full grid for a scaled model: sizes in mm (scene axes), bed in printer
-       coordinates, margin off every bed dimension, per-axis nudges.
+    /* How far the cuts on one axis can slide before another part would appear. */
+    function nudgeWindow(size, usable) {
+        if (!(usable > 0) || size <= usable) return { lo: 0, hi: 0 };
+        const w = (Math.ceil(size / usable) * usable - size) / 2;
+        return { lo: -w, hi: w };
+    }
+
+    /* Wall lists (DESIGN-SLIVERS phase 0): the grid is three sorted lists of wall
+       positions, mm from the scaled model's low edge on each axis. */
+    const MIN_WALL_GAP_MM = 1;
+
+    /* The biggest cell on one axis. An axis with walls has pegs, so with a
+       reserve the cell shrinks by it; an axis without walls keeps the full room. */
+    function cellLimit(room, reserve, hasWalls) {
+        return hasWalls && reserve > 0 ? room - reserve : room;
+    }
+
+    /* Grid from explicit wall lists. Same shape as computeGrid's result. Does not
+       validate the lists (see checkWalls): auto lists are trusted. */
+    function gridFromWalls({ size, bed, margin = 5, reserve = 0, walls }) {
+        const room = {
+            x: bed.w - 2 * margin,
+            z: bed.d - 2 * margin,
+            y: bed.h - 2 * margin,
+        };
+        if (room.x <= 0 || room.y <= 0 || room.z <= 0) return null;
+        const r = reserve > 0 ? reserve : 0;
+        const usable = {}, cuts = {};
+        for (const axis of ["x", "y", "z"]) {
+            usable[axis] = cellLimit(room[axis], r, walls[axis].length > 0);
+            if (usable[axis] <= 0) return null;
+            cuts[axis] = walls[axis].slice();
+        }
+        const counts = { x: cuts.x.length + 1, y: cuts.y.length + 1, z: cuts.z.length + 1 };
+        return { room, usable, reserve: r, cuts, counts, total: counts.x * counts.y * counts.z };
+    }
+
+    /* Full auto-placed grid for a scaled model: sizes in mm (scene axes), bed in
+       printer coordinates, margin off every bed dimension, per-axis nudges.
        `reserve` (mm) = how far a connector peg stands past a cell face. On an
        axis that gets cut (so it gets seams, so it gets pegs) the cell shrinks
        by `reserve`, so a part plus its pegs still fits the bed minus margin.
@@ -58,19 +99,66 @@ window.BigPrintCore = (() => {
         };
         if (room.x <= 0 || room.y <= 0 || room.z <= 0) return null;
         const r = reserve > 0 ? reserve : 0;
-        const usable = {}, cuts = {};
+        const cuts = {};
         for (const axis of ["x", "y", "z"]) {
             const n = nudge[axis] || 0;
-            usable[axis] = room[axis];
             cuts[axis] = axisCuts(size[axis], room[axis], n);
             if (cuts[axis].length && r > 0) {
-                usable[axis] = room[axis] - r;
-                if (usable[axis] <= 0) return null;
-                cuts[axis] = axisCuts(size[axis], usable[axis], n);
+                const usable = room[axis] - r;
+                if (usable <= 0) return null;
+                cuts[axis] = axisCuts(size[axis], usable, n);
             }
         }
-        const counts = { x: cuts.x.length + 1, y: cuts.y.length + 1, z: cuts.z.length + 1 };
-        return { room, usable, reserve: r, cuts, counts, total: counts.x * counts.y * counts.z };
+        return gridFromWalls({ size, bed, margin, reserve: r, walls: cuts });
+    }
+
+    /* null if a hand-placed list is fine, else why not. First failure wins. */
+    function checkWalls(list, size, limit) {
+        if (list.some((v) => !Number.isFinite(v) || v <= 0 || v >= size)) return "outside";
+        for (let i = 1; i < list.length; i++) if (!(list[i] > list[i - 1])) return "not-sorted";
+        const b = [0, ...list, size];
+        for (let i = 1; i < b.length; i++) if (b[i] - b[i - 1] < MIN_WALL_GAP_MM - 1e-9) return "too-close";
+        for (let i = 1; i < b.length; i++) if (b[i] - b[i - 1] > limit + 1e-9) return "too-big";
+        return null;
+    }
+
+    const limitKey = (p) => JSON.stringify([p.size.x, p.size.y, p.size.z,
+        p.bed.w, p.bed.d, p.bed.h, p.margin, p.reserve > 0 ? p.reserve : 0]);
+
+    /* Where auto walls come from. The only such place (no-cut zones plug in here). */
+    function autoWalls(auto, axis) {
+        return auto.cuts[axis].slice();
+    }
+
+    /* The one place params turn into walls. `prev` = last return value or null.
+       Hand axes survive a refresh unless the cell limit's inputs changed (scale,
+       printer, margin, reserve) or the list is no longer valid. */
+    function resolveLayout(prev, p) {
+        const auto = computeGrid(p);
+        if (!auto) return null;
+        const key = limitKey(p);
+        const reset = !prev || prev.key !== key;
+        const mode = {}, walls = {}, win = {}, nudge = {};
+        for (const axis of ["x", "y", "z"]) {
+            mode[axis] = "auto";
+            if (!reset && prev.mode[axis] === "hand") {
+                const list = prev.walls[axis];
+                const lim = cellLimit(auto.room[axis], auto.reserve, list.length > 0);
+                if (lim > 0 && checkWalls(list, p.size[axis], lim) === null) {
+                    mode[axis] = "hand";
+                    walls[axis] = list.slice();
+                }
+            }
+            if (mode[axis] === "auto") walls[axis] = autoWalls(auto, axis);
+        }
+        const grid = gridFromWalls({ size: p.size, bed: p.bed, margin: p.margin, reserve: p.reserve, walls });
+        for (const axis of ["x", "y", "z"]) {
+            win[axis] = nudgeWindow(p.size[axis], auto.usable[axis]);
+            const raw = (p.nudge || {})[axis];
+            nudge[axis] = mode[axis] === "auto" && Number.isFinite(raw)
+                ? Math.min(Math.max(raw, win[axis].lo), win[axis].hi) : 0;
+        }
+        return { key, mode, walls, nudge, window: win, grid };
     }
 
     /* 0 → A, 25 → Z, 26 → AA (spreadsheet style). */
@@ -264,6 +352,7 @@ window.BigPrintCore = (() => {
     function buildManifest(rows, s) {
         const L = [];
         const nudge = s.nudge || { x: 0, y: 0, z: 0 };
+        const fmtMm = (v) => String(+(+v).toFixed(2));
         L.push(`Curve Cut — Big Print manifest`);
         L.push(`Provenance:`);
         L.push(`  Application: Curve Cut`);
@@ -276,7 +365,7 @@ window.BigPrintCore = (() => {
         L.push(`    Printer: ${s.printer}`);
         L.push(`    Bed (W×D×H): ${s.bed.w} × ${s.bed.d} × ${s.bed.h} mm`);
         L.push(`    Margin: ${s.margin} mm`);
-        L.push(`    Nudge (W×D×H): ${nudge.x} × ${nudge.z} × ${nudge.y} mm`);
+        L.push(`    Nudge (W×D×H): ${fmtMm(nudge.x)} × ${fmtMm(nudge.z)} × ${fmtMm(nudge.y)} mm`);
         L.push(`    Assembly gap: ${s.gap} mm`);
         L.push(`    Format: ${s.format || "not recorded"}`);
         L.push(`    Connectors: ${s.connectors}`);
@@ -453,7 +542,8 @@ window.BigPrintCore = (() => {
         };
     }
 
-    return { PRINTERS, axisCuts, computeGrid, cellCount, gridCells, seamOf, seamGridPositions, seamPlanes,
+    return { PRINTERS, axisCuts, nudgeWindow, MIN_WALL_GAP_MM, cellLimit, gridFromWalls, checkWalls,
+        resolveLayout, computeGrid, cellCount, gridCells, seamOf, seamGridPositions, seamPlanes,
         serializeSTL, serialize3MF, buildManifest, assemblyMapLayout, assemblyCellRect, assemblyScale, assemblyLabelPx,
         assemblyPanelTitle, explodedPosition, proxyTargetFor, explodeNoteText,
         colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,

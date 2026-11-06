@@ -23,7 +23,7 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 | `check_memory.py` | Worker memory stats and recycle | heavy |
 | `check_property.py` | Random-seed invariants for cuts and hollows | heavy |
 | `check_race.py` | Eight operation-coordinator race scenarios (`index.html#racetest`) | heavy |
-| `check_perf.py`, `check_perf_medium.py`, `check_perf_real.py` | Speed and memory budgets; `check_perf_real` needs the private statue model, strict budgets with `CURVECUT_PERF_STRICT=1` | heavy |
+| `check_perf.py`, `check_perf_medium.py`, `check_perf_real.py` | Speed and memory budgets; `check_perf_real` needs the private large test model, strict budgets with `CURVECUT_PERF_STRICT=1` | heavy |
 | `check_benchy.py` | 3DBenchy wavy-cut acceptance (needs `test-assets/3DBenchy.stl`) | heavy |
 
 Heavy checks use several CPU cores each: run them one at a time.

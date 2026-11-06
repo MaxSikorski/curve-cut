@@ -11,7 +11,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `hollow-test.html` | `check_hollow.py` | Hybrid hollowing: wall thickness, watertight shells, honest savings, open faces and drilled holes (T1-T17, including the unchanged-output digest guard), and glow swatch geometry |
 | `hollow-panel-test.html` | `check_hollow_panel.py` | The Hollow panel in the real app (P0-P14): Lamp preset, worker preview, Out of date, Confirm and undo, gates, grid-too-large message, Escape cancel, saved settings |
 | `units-test.html` | `check_units.py` | Units and orientation math |
-| `bigprint-test.html` | `check_bigprint.py` | Big Print grid math, the streaming cell cutter, solid blocks and label pads on hollow seams (plus the solid-output golden digest), manifest wording, and the exploded-view proxy target + note wording |
+| `bigprint-test.html` | `check_bigprint.py` | Big Print grid math, wall lists (auto/hand, reset rules) and the nudge clamp, the streaming cell cutter, solid blocks and label pads on hollow seams (plus the solid-output golden digest), manifest wording, and the exploded-view proxy target + note wording |
 | `compute-test.html` | `check_compute.py` | The compute worker: fused repair, cache tokens, worker cuts match main-thread cuts, cancel, fallback, and hollowApply carrying open faces and holes on worker and fallback (C1-C3) |
 | `memory-test.html` | `check_memory.py` | Worker memory stats and the deferred recycle |
 | `property-test.html` | `check_property.py` | Random-seed invariants for cuts and hollows (volume, watertightness, kerf) |
@@ -19,6 +19,6 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `benchy-test.html` | `check_benchy.py` | Acceptance: 3DBenchy wavy cut, recut, watertight parts (needs `test-assets/3DBenchy.stl`) |
 | `bigprint-benchy-test.html` | `check_bigprint.py` | Acceptance: 6× Benchy through grid, kerf, connectors and engraved IDs (needs the Benchy) |
 
-Harnesses inside the app itself (`js/*-hook.js`, run as `index.html#<hash>` from disk or localhost only): `#racetest` → `check_race.py`, `#perftest` → `check_perf.py`, `#perfmed` → `check_perf_medium.py`, `#perfreal` → `check_perf_real.py` (needs the private statue model).
+Harnesses inside the app itself (`js/*-hook.js`, run as `index.html#<hash>` from disk or localhost only): `#racetest` → `check_race.py`, `#perftest` → `check_perf.py`, `#perfmed` → `check_perf_medium.py`, `#perfreal` → `check_perf_real.py` (needs the private large test model).
 
 Private models live in `test-assets/`, which is never committed (licences forbid it); checks that need them skip without them.

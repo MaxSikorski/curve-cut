@@ -45,9 +45,6 @@
         cuts = B.axisCuts(500, 246, 10);
         check("nudge +10 slides both cuts", near(cuts[0], 137) && near(cuts[1], 383),
             JSON.stringify(cuts));
-        const wrapped = B.axisCuts(500, 246, 246);
-        check("nudge of one full cell is a no-op",
-            wrapped.length === 2 && near(wrapped[0], 127), JSON.stringify(wrapped));
 
         let legal = true;
         for (let size = 50; size <= 2000; size += 37) {
@@ -126,6 +123,220 @@
             B.computeGrid({ ...sv, reserve: 490 }) === null);
         check("margin bigger than the bed returns null",
             B.computeGrid({ size: { x: 10, y: 10, z: 10 }, bed: { w: 20, d: 20, h: 20 }, margin: 10 }) === null);
+
+        // ============ wall lists (DESIGN-SLIVERS phase 0)
+        if (typeof B.gridFromWalls !== "function" || typeof B.resolveLayout !== "function") {
+            check("wall-list API exists", false);
+        } else {
+            // frozen copy of main cd551f0, the equivalence oracle; never edit
+            function legacyAxisCuts(size, usable, nudge = 0) {
+                if (!(usable > 0) || size <= usable) return [];
+                const n = Math.ceil(size / usable);
+                const slack = n * usable - size;
+                let phase = (usable - slack / 2 + nudge) % usable;
+                if (phase <= 0) phase += usable;
+                const cuts = [];
+                for (let t = phase; t < size - 1e-9; t += usable) cuts.push(t);
+                return cuts;
+            }
+            function legacyComputeGrid({ size, bed, margin = 5, nudge = { x: 0, y: 0, z: 0 }, reserve = 0 }) {
+                const room = {
+                    x: bed.w - 2 * margin,
+                    z: bed.d - 2 * margin,
+                    y: bed.h - 2 * margin,
+                };
+                if (room.x <= 0 || room.y <= 0 || room.z <= 0) return null;
+                const r = reserve > 0 ? reserve : 0;
+                const usable = {}, cuts = {};
+                for (const axis of ["x", "y", "z"]) {
+                    const n = nudge[axis] || 0;
+                    usable[axis] = room[axis];
+                    cuts[axis] = legacyAxisCuts(size[axis], room[axis], n);
+                    if (cuts[axis].length && r > 0) {
+                        usable[axis] = room[axis] - r;
+                        if (usable[axis] <= 0) return null;
+                        cuts[axis] = legacyAxisCuts(size[axis], usable[axis], n);
+                    }
+                }
+                const counts = { x: cuts.x.length + 1, y: cuts.y.length + 1, z: cuts.z.length + 1 };
+                return { room, usable, reserve: r, cuts, counts, total: counts.x * counts.y * counts.z };
+            }
+            const deepEq = (a, b) => {
+                if (a === b) return true;
+                if (typeof a !== "object" || typeof b !== "object" || !a || !b) return false;
+                if (Array.isArray(a) !== Array.isArray(b)) return false;
+                const ka = Object.keys(a), kb = Object.keys(b);
+                if (ka.length !== kb.length) return false;
+                return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && deepEq(a[k], b[k]));
+            };
+
+            // ---- sweep
+            {
+                const S = [30, 199.9, 246, 290, 291, 492, 500, 580.5, 733, 1000, 1999.7, 2000, 6000];
+                const beds = [{ w: 70, d: 70, h: 70 }, { w: 256, d: 256, h: 256 }, { w: 300, d: 300, h: 300 },
+                    { w: 340, d: 320, h: 325 }, { w: 500, d: 500, h: 500 }, { w: 250, d: 210, h: 220 }];
+                const margins = [0, 5, 12.5], reserves = [0, 2, 4.8, 9.6];
+                const N = [0, 7, -13.5, 39.9, -40, 119, 246, 1000, -1000];
+                let cases = 0, w1 = true, w2 = true, w3 = true, w4 = true;
+                let w1d = "", w2d = "", w3d = "", w4d = "";
+                for (let i = 0; i < S.length; i++) {
+                    const size = { x: S[i], y: S[(i + 3) % 13], z: S[(i + 7) % 13] };
+                    for (const bed of beds) for (const margin of margins) for (const reserve of reserves) {
+                        for (let j = 0; j < N.length; j++) {
+                            const nudge = { x: N[j], y: N[(j + 1) % 9], z: N[(j + 2) % 9] };
+                            const p = { size, bed, margin, reserve, nudge };
+                            cases++;
+                            const g = B.computeGrid(p);
+                            const lg = legacyComputeGrid(p);
+                            const L = B.resolveLayout(null, p);
+                            // W4
+                            if (g === null) {
+                                if (L !== null && w4) { w4 = false; w4d = "layout not null for null grid"; }
+                            } else if (!L || !L.mode || L.mode.x !== "auto" || L.mode.y !== "auto" || L.mode.z !== "auto"
+                                || !deepEq(L.walls, g.cuts) || !deepEq(L.grid, g)) {
+                                if (w4) { w4 = false; w4d = JSON.stringify(p); }
+                            }
+                            if (g === null || lg === null) {
+                                if ((g === null) !== (lg === null) && w1) { w1 = false; w1d = "null mismatch " + JSON.stringify(p); }
+                                continue;
+                            }
+                            // W1
+                            const gw = B.gridFromWalls({ size, bed, margin, reserve, walls: g.cuts });
+                            if (!deepEq(gw, g) && w1) { w1 = false; w1d = JSON.stringify(p); }
+                            const zero = legacyComputeGrid({ ...p, nudge: { x: 0, y: 0, z: 0 } });
+                            const winOf = (axis) => {
+                                const u = lg.usable[axis];
+                                const slack = size[axis] > u ? Math.ceil(size[axis] / u) * u - size[axis] : 0;
+                                return lg.cuts[axis].length === 0 || Math.abs(nudge[axis]) <= slack / 2;
+                            };
+                            const allIn = winOf("x") && winOf("y") && winOf("z");
+                            for (const axis of ["x", "y", "z"]) {
+                                const nv = nudge[axis];
+                                const inWin = winOf(axis);
+                                const a = g.cuts[axis], b = lg.cuts[axis];
+                                if (inWin) {
+                                    const ok = a.length === b.length && a.every((v, k) => v === b[k])
+                                        && deepEq(g.room, lg.room) && deepEq(g.usable, lg.usable)
+                                        && g.reserve === lg.reserve && g.counts[axis] === lg.counts[axis]
+                                        && (!allIn || g.total === lg.total);
+                                    if (!ok && w2) { w2 = false; w2d = `${axis} ${JSON.stringify(p)}`; }
+                                } else {
+                                    const bounds = [0, ...a, size[axis]];
+                                    let ok = a.length === zero.cuts[axis].length;
+                                    for (let k = 1; k < bounds.length; k++) {
+                                        const c = bounds[k] - bounds[k - 1];
+                                        if (!(c > 0) || c > g.usable[axis] + 1e-9) ok = false;
+                                    }
+                                    const first = bounds[1] - bounds[0];
+                                    const last = bounds[bounds.length - 1] - bounds[bounds.length - 2];
+                                    if (nv > 0 && Math.abs(first - g.usable[axis]) > 1e-9) ok = false;
+                                    if (nv < 0 && Math.abs(last - g.usable[axis]) > 1e-9) ok = false;
+                                    if (!ok && w3) { w3 = false; w3d = `${axis} ${JSON.stringify(p)}`; }
+                                }
+                            }
+                        }
+                    }
+                }
+                log(`sweep: ${cases} cases`);
+                check("gridFromWalls(computeGrid(p).cuts) deep-equals computeGrid(p) over the sweep", w1, w1d);
+                check("in-window nudges cut exactly where main did", w2, w2d);
+                check("out-of-window nudges never add a part", w3, w3d);
+                check("resolveLayout(null, p) is all auto and its grid deep-equals computeGrid(p)", w4, w4d);
+            }
+
+            // ---- wrap-around regression
+            check("oracle reproduces the old bug", legacyAxisCuts(500, 290, 60).length === 2);
+            check("500 mm, 290 cells, nudge +60 → one wall at 290", deepEq(B.axisCuts(500, 290, 60), [290]),
+                JSON.stringify(B.axisCuts(500, 290, 60)));
+            {
+                const g = B.computeGrid({ size: { x: 500, y: 100, z: 100 }, bed: { w: 300, d: 300, h: 300 },
+                    margin: 5, nudge: { x: 60, y: 0, z: 0 } });
+                const bb = [0, ...g.cuts.x, 500];
+                const cellsX = bb.slice(1).map((v, i) => v - bb[i]);
+                check("computeGrid with nudge +60: 2 columns of 290 and 210",
+                    g.counts.x === 2 && near(cellsX[0], 290) && near(cellsX[1], 210) && cellsX.every((c) => c >= 20),
+                    JSON.stringify(cellsX));
+            }
+            check("nudge −60 → one wall at 210", deepEq(B.axisCuts(500, 290, -60), [210]),
+                JSON.stringify(B.axisCuts(500, 290, -60)));
+            check("nudgeWindow 500/290 is ±40; a model that fits has {0,0}",
+                deepEq(B.nudgeWindow(500, 290), { lo: -40, hi: 40 })
+                && deepEq(B.nudgeWindow(200, 290), { lo: 0, hi: 0 }),
+                JSON.stringify([B.nudgeWindow(500, 290), B.nudgeWindow(200, 290)]));
+            check("nudge past the window stops at its edge", deepEq(B.axisCuts(500, 246, 246), [246, 492]),
+                JSON.stringify(B.axisCuts(500, 246, 246)));
+
+            // ---- checkWalls
+            {
+                const cw = B.checkWalls;
+                check("checkWalls: fine list is null", cw([290], 500, 290) === null);
+                check("checkWalls: not-sorted", cw([300, 200], 500, 290) === "not-sorted");
+                check("checkWalls: too-close between walls", cw([250, 250.5], 500, 290) === "too-close");
+                check("checkWalls: too-close to a model edge", cw([0.5], 500, 290) === "too-close");
+                check("checkWalls: outside (0, size, NaN)",
+                    cw([0], 500, 290) === "outside" && cw([500], 500, 290) === "outside"
+                    && cw([NaN], 500, 290) === "outside");
+                check("checkWalls: too-big", cw([100], 500, 290) === "too-big" && cw([], 500, 290) === "too-big");
+                check("checkWalls: no walls on a model that fits is fine", cw([], 200, 290) === null);
+            }
+
+            // ---- reset rules
+            {
+                const p = { size: { x: 600, y: 2000, z: 400 }, bed: { w: 500, d: 500, h: 500 },
+                    margin: 5, reserve: 9.6, nudge: { x: 0, y: 0, z: 0 } };
+                const L = B.resolveLayout(null, p);
+                const H = { ...L, mode: { ...L.mode, x: "hand" }, walls: { ...L.walls, x: [250, 450] } };
+                const cg = (q) => B.computeGrid(q);
+                const allAuto = (l) => l.mode.x === "auto" && l.mode.y === "auto" && l.mode.z === "auto";
+
+                const r1 = B.resolveLayout(H, p);
+                check("R1 hand walls survive a refresh",
+                    r1.mode.x === "hand" && deepEq(r1.grid.cuts.x, [250, 450]) && r1.grid.counts.x === 3
+                    && deepEq(r1.grid.cuts.y, cg(p).cuts.y) && deepEq(r1.grid.cuts.z, cg(p).cuts.z));
+
+                const pY = { ...p, nudge: { x: 0, y: 30, z: 0 } };
+                const r2 = B.resolveLayout(H, pY);
+                check("R2 a nudge on another axis leaves hand walls alone",
+                    r2.mode.x === "hand" && deepEq(r2.grid.cuts.x, [250, 450])
+                    && deepEq(r2.grid.cuts.y, cg(pY).cuts.y));
+
+                const r3 = B.resolveLayout(H, { ...p, nudge: { x: 20, y: 0, z: 0 } });
+                check("R3 a nudge on the hand axis leaves its walls alone (phase 0)",
+                    r3.mode.x === "hand" && deepEq(r3.grid.cuts.x, [250, 450]) && r3.nudge.x === 0);
+
+                const triggers = {
+                    "margin 6": { ...p, margin: 6 },
+                    "printer (bed.w 501)": { ...p, bed: { ...p.bed, w: 501 } },
+                    "scale (size ×1.01)": { ...p, size: { x: 606, y: 2020, z: 404 } },
+                    "connectors off / full volume (reserve 0)": { ...p, reserve: 0 },
+                    "peg size (reserve 8)": { ...p, reserve: 8 },
+                };
+                for (const [name, q] of Object.entries(triggers)) {
+                    const r = B.resolveLayout(H, q);
+                    check(`R4 ${name} resets every axis to auto`,
+                        !!r && allAuto(r) && deepEq(r.walls, cg(q).cuts));
+                }
+
+                const r5 = B.resolveLayout({ ...H, walls: { ...H.walls, x: [700] } }, p);
+                check("R5 an invalid hand list falls back to auto", r5.mode.x === "auto");
+
+                const rFull = B.resolveLayout(null, { ...p, reserve: 0 });
+                check("R6 full volume raises the limit by exactly the peg depth",
+                    Math.abs(rFull.grid.usable.y - L.grid.usable.y - 9.6) < 1e-9);
+
+                const bad = B.resolveLayout(H, { ...p, margin: 300 });
+                const after = B.resolveLayout(bad, p);
+                check("R7 null when the margin eats the bed; the next valid call starts all auto",
+                    bad === null && allAuto(after));
+
+                const p8 = { size: { x: 500, y: 100, z: 100 }, bed: { w: 300, d: 300, h: 300 }, margin: 5,
+                    reserve: 0, nudge: { x: 60, y: 0, z: 0 } };
+                const L8 = B.resolveLayout(null, p8);
+                check("R8 effective nudge is clamped",
+                    L8.nudge.x === 40 && deepEq(L8.window.x, { lo: -40, hi: 40 }),
+                    JSON.stringify([L8.nudge, L8.window.x]));
+            }
+        }
 
         check("column letters", B.colLetter(0) === "A" && B.colLetter(25) === "Z"
             && B.colLetter(26) === "AA" && B.colLetter(51) === "AZ" && B.colLetter(52) === "BA");
@@ -522,6 +733,16 @@
             manifest.includes("Hollow:") && manifest.includes("Wall: 6 mm")
             && manifest.includes("Material saved: 68.5%")
             && manifest.includes("Engine: mesh") && manifest.includes("Fallback: no"));
+        {
+            const mN = B.buildManifest([], {
+                name: "n", scale: 1, size: { x: 60, y: 60, z: 60 },
+                bed: { w: 256, d: 256, h: 256 }, printer: "A1", margin: 5,
+                nudge: { x: 39.999999, y: 0, z: -12.5 }, gap: 0.15, connectors: "off",
+            });
+            check("manifest prints the effective nudge, 2 decimals max",
+                mN.includes("Nudge (W×D×H): 40 × -12.5 × 0 mm"));
+            check("manifest nudge text unchanged for whole numbers", manifest.includes("1 × 3 × 2"));
+        }
         const solidManifest = B.buildManifest([], {
             name: "solid", scale: 1, size: { x: 60, y: 60, z: 60 },
             bed: { w: 256, d: 256, h: 256 }, printer: "A1", margin: 5,
@@ -557,6 +778,34 @@
             check("S1 solid parts are byte-identical to the recorded golden digest",
                 made === 8 && digest === GOLDEN, `digest ${digest}, golden ${GOLDEN}, ${made} parts`);
             check("S1 no solid part reports a label pad", !anyPad);
+        }
+
+        // S2 — same as S1 but with an in-window nudge (window is +-10 mm here), so
+        // the nudged cut positions must stay byte-identical across the wall-list rework.
+        const GOLDEN2 = "6eab47df"; // recorded on unchanged main 8a68a0a (slivers phase 0, Step 0)
+        {
+            const pS2 = { size: size100, bed: { w: 70, d: 70, h: 70 }, margin: 5, nudge: { x: 7, y: -4, z: 3 } };
+            const gridS2 = B.resolveLayout ? B.resolveLayout(null, pS2).grid : B.computeGrid(pS2);
+            const cellsS2 = [...B.gridCells(gridS2, size100, min100)];
+            const solidS2 = CutCore.toManifold(cube100);
+            const CONN_S2 = { size: 8, depth: 6, shape: "circle", tolR: 0.2, tolD: 0.1, spacing: 30 };
+            let hash = 0x811c9dc5, made = 0;
+            for (const cell of cellsS2) {
+                const g = CutCore.cutGridCell(solidS2, { ...cell, engraveId: cell.id }, 0.15, CONN_S2);
+                if (!g) continue;
+                made++;
+                const bytes = B.serializeSTL(g);
+                for (let i = 0; i < bytes.length; i++) {
+                    hash ^= bytes[i];
+                    hash = Math.imul(hash, 0x01000193);
+                }
+                g.dispose();
+            }
+            solidS2.delete();
+            const digest2 = (hash >>> 0).toString(16).padStart(8, "0");
+            log(`S2 digest ${digest2} (${made} parts)`);
+            check("S2 nudged solid parts are byte-identical to the recorded golden digest",
+                made === 8 && digest2 === GOLDEN2, `digest ${digest2}, golden ${GOLDEN2}, ${made} parts`);
         }
 
         // M1 — manifest wording for the new columns and settings

@@ -597,7 +597,7 @@
 
     function updateStatsResetVisibility() {
         const single = pieces.length === 1;
-        statsReset.hidden = !(single && pieces[0].userData.bakedScale);
+        statsReset.hidden = !(single && pieces[0].userData.bakedScale && !pieces[0].userData.hollow);
         statsRepair.hidden = !single;
     }
 
@@ -610,6 +610,8 @@
         if (Math.abs(bakedScale - 1) > 1e-9) {
             detail += ` · ${window.BigPrintCore.bakedScaleLabel(bakedScale)}`;
         }
+        const hollow = pieces[0] && pieces[0].userData.hollow;
+        if (hollow && window.CurveCut.hollow) detail += ` · ${window.CurveCut.hollow.describe(hollow)}`;
         const capRepair = pieces[0] && pieces[0].userData.capRepair;
         if (capRepair) detail += ` · ${capRepair.loops} hole${capRepair.loops === 1 ? "" : "s"} capped`;
         document.getElementById("stats-detail").textContent = detail;

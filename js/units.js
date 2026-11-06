@@ -50,8 +50,10 @@
     function updateTrigger() {
         const loaded = CC.pieces.length > 0;
         const pristine = CC.pieces.length === 1;
-        trigger.disabled = !pristine;
-        trigger.title = loaded && !pristine ? "reload the model to change units" : "Units & Orientation";
+        const hollow = pristine && !!CC.pieces[0].userData.hollow;
+        trigger.disabled = !pristine || hollow;
+        trigger.title = hollow ? "undo the hollow (⌘Z) to change units or size"
+            : (loaded && !pristine ? "reload the model to change units" : "Units & Orientation");
         if (!pristine && open) hide();
     }
 
@@ -61,9 +63,16 @@
         return true;
     }
 
+    function refuseHollow() {
+        if (!CC.pieces[0] || !CC.pieces[0].userData.hollow) return false;
+        CC.toast("Units and size are locked on a hollow model: undo the hollow (⌘Z) to change them.");
+        return true;
+    }
+
     function show() {
         if (open) return;
         if (refuseBusy()) return;
+        if (refuseHollow()) return;
         if (CC.pieces.length !== 1) {
             CC.toast("Reload the model to change units.");
             return;
@@ -88,6 +97,7 @@
 
     function applyGeometryChange(name, mutate, nextState) {
         if (refuseBusy()) return false;
+        if (refuseHollow()) return false;
         const current = modelState();
         if (!current) {
             CC.toast("Reload the model to change units.");

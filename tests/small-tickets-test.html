@@ -9,8 +9,8 @@
 <pre id="log"></pre>
 <iframe id="app"></iframe>
 <script>
-/* Real app tests for three small fixes: Pieces export zip names, camera view
-   keys while drawing a curve, and the version line in About.
+/* Real app tests for Pieces export zip names, camera keys, About, missed cuts,
+   and resetting unit/calibration changes.
    Run via tools/check_small_tickets.py; results are in document.title. */
 (() => {
     "use strict";
@@ -63,6 +63,48 @@
     };
     const fmtDir = (d) => `(${d.x.toFixed(4)}, ${d.y.toFixed(4)}, ${d.z.toFixed(4)})`;
     const sameDir = (a, b) => a.distanceTo(b) < 1e-3;
+    const undoCount = () => CC.history.memoryReport().undoEntries;
+    const toast = () => $("toast-live").textContent;
+    const placePoints = (points) => {
+        const layer = $("draw-layer"), capture = layer.setPointerCapture;
+        layer.setPointerCapture = () => {};
+        try {
+            const pointer = (type, x, y, buttons) => {
+                const target = doc.elementFromPoint(x, y);
+                target.dispatchEvent(new win.PointerEvent(type, {
+                    bubbles: true, pointerId: 1, pointerType: "mouse", button: 0,
+                    buttons, clientX: x, clientY: y,
+                }));
+            };
+            for (const [x, y] of points) {
+                pointer("pointerdown", x, y, 1); pointer("pointerup", x, y, 0);
+            }
+        } finally {
+            layer.setPointerCapture = capture;
+        }
+    };
+    const boxSize = () => {
+        const geometry = CC.pieces[0].geometry;
+        geometry.computeBoundingBox();
+        return geometry.boundingBox.getSize(new win.THREE.Vector3());
+    };
+    const openUnits = async () => {
+        if (!await waitFor(idle, 60000)) throw new Error("model check did not finish");
+        $("units-trigger").click();
+        if (!await waitFor(() => visible("units-modal"), 5000)) throw new Error("Units did not open");
+    };
+
+    // A click is refused (modal stays open) if an automatic repair grabs the op lock
+    // between the idle check and the click, so click again until the modal closes.
+    const clickUntilClosed = async (el, what) => {
+        const end = Date.now() + 30000;
+        while (Date.now() < end) {
+            if (!visible("units-modal")) return;
+            if (idle()) el.click();
+            if (await waitFor(() => !visible("units-modal"), 1500)) return;
+        }
+        throw new Error(`Units did not close after ${what}`);
+    };
 
     // the same download capture the hollow panel test uses
     const captures = [];
@@ -157,22 +199,8 @@
             doc.querySelector('#mode-dock [data-mode="curve"]').click();
             await waitFor(() => CC.pen.isActive(), 4000);
             await sleep(1000);
-            const layer = $("draw-layer"), capture = layer.setPointerCapture;
-            layer.setPointerCapture = () => {};
-            try {
-                const pointer = (type, x, y, buttons) => {
-                    const target = doc.elementFromPoint(x, y);
-                    target.dispatchEvent(new win.PointerEvent(type, {
-                        bubbles: true, pointerId: 1, pointerType: "mouse", button: 0,
-                        buttons, clientX: x, clientY: y,
-                    }));
-                };
-                const x = win.innerWidth / 2, y = win.innerHeight / 2;
-                pointer("pointerdown", x - 40, y, 1); pointer("pointerup", x - 40, y, 0);
-                pointer("pointerdown", x + 40, y, 1); pointer("pointerup", x + 40, y, 0);
-            } finally {
-                layer.setPointerCapture = capture;
-            }
+            const x = win.innerWidth / 2, y = win.innerHeight / 2;
+            placePoints([[x - 40, y], [x + 40, y]]);
             const before = CC.pen.points ? CC.pen.points() : [];
             check("14 two curve points placed", before.length === 2, String(before.length));
             check("14 the camera row stays hidden in pen mode (keys only)", !visible("view-dock"));
@@ -203,6 +231,116 @@
             $("cut-apply").click();
             check("14 Apply cuts the box into 2 pieces", await waitFor(() => CC.pieces.length === 2 && idle(), 120000),
                 String(CC.pieces.length));
+
+            // ===== 7: missed cuts leave the original, history and curve intact
+            await load(new win.THREE.BoxGeometry(60, 60, 60).toNonIndexed(), "miss box.stl");
+            await closeDonate();
+            doc.querySelector('#view-dock [data-view="front"]').click();
+            await settleCamera();
+            const original = CC.pieces[0], undoBefore = undoCount();
+            const box = new win.THREE.Box3().setFromObject(original);
+            const topY = Math.min(...[box.min.x, box.max.x].flatMap((bx) =>
+                [box.min.z, box.max.z].map((bz) => {
+                    const corner = new win.THREE.Vector3(bx, box.max.y, bz).project(CC.camera);
+                    return (1 - corner.y) * win.innerHeight / 2;
+                })));
+            const missY = topY - 30;
+            check("7 missed curve points are above the box and on screen", missY > 0 && missY < topY,
+                `top ${topY}, points ${missY}`);
+            $("draw-btn").click();
+            doc.querySelector('#mode-dock [data-mode="curve"]').click();
+            if (!await waitFor(() => CC.pen.isActive(), 4000)) throw new Error("curve mode did not open");
+            await sleep(1000);
+            placePoints([[x - 40, missY], [x + 40, missY]]);
+            check("7 two missed curve points placed", CC.pen.points().length === 2, String(CC.pen.points().length));
+            $("draw-done").click();
+            if (!await waitFor(() => CC.spline && visible("preview-dock"), 5000)) throw new Error("miss preview did not open");
+            await waitFor(idle, 60000);
+            const missedSpline = CC.spline;
+            const missMessage = "That line doesn't cross the model — draw it across the model to cut.";
+            $("cut-apply").click();
+            check("7 missed curve reports the exact message", await waitFor(() => toast() === missMessage && idle(), 120000), toast());
+            check("7 missed curve keeps the mesh and undo count", CC.pieces.length === 1 && CC.pieces[0] === original
+                && undoCount() === undoBefore, `pieces ${CC.pieces.length}, undo ${undoCount()}`);
+            check("7 missed curve stays in preview", CC.spline === missedSpline && visible("preview-dock"));
+            check("7 missed curve keeps the side tint", CC.pieces[0].material.vertexColors === true
+                && !!CC.pieces[0].geometry.getAttribute("color"));
+            $("cut-discard").click();
+            doc.querySelector('#mode-dock [data-mode="planar"]').click();
+            if (!await waitFor(() => visible("simplecut-panel") && !$("sc-apply").disabled, 5000))
+                throw new Error("planar controls did not open");
+            $("sc-height").value = String(box.max.y + 10);
+            $("sc-height").dispatchEvent(new win.Event("input", { bubbles: true }));
+            // Clear the previous message so this wait proves the planar cut reported it.
+            $("toast-live").textContent = "";
+            $("sc-apply").click();
+            check("7 missed plane reports the exact message", await waitFor(() => toast() === missMessage && idle(), 120000), toast());
+            check("7 missed plane keeps the mesh and undo count", CC.pieces.length === 1 && CC.pieces[0] === original
+                && undoCount() === undoBefore, `pieces ${CC.pieces.length}, undo ${undoCount()}`);
+            $("sc-cancel").click();
+            await waitFor(() => visible("view-dock"), 5000);
+            $("draw-btn").click();
+            doc.querySelector('#mode-dock [data-mode="curve"]').click();
+            if (!await waitFor(() => CC.pen.isActive(), 4000)) throw new Error("curve mode did not reopen");
+            await sleep(1000);
+            placePoints([[x - 40, y], [x + 40, y]]);
+            check("7 two crossing curve points placed", CC.pen.points().length === 2, String(CC.pen.points().length));
+            $("draw-done").click();
+            if (!await waitFor(() => CC.spline && visible("preview-dock"), 5000)) throw new Error("crossing preview did not open");
+            await waitFor(idle, 60000);
+            $("cut-apply").click();
+            check("7 crossing curve makes two pieces and one undo step",
+                await waitFor(() => CC.pieces.length === 2 && idle(), 120000) && undoCount() === undoBefore + 1,
+                `pieces ${CC.pieces.length}, undo ${undoCount()}`);
+
+            // ===== 15: reset unit and calibration scaling as one undo step
+            // THREE's y is height and z is depth: W × D × H = 1.6 × 1.2 × 0.8.
+            await load(new win.THREE.BoxGeometry(1.6, 0.8, 1.2).toNonIndexed(), "units box.stl");
+            await closeDonate();
+            await waitFor(idle, 60000); // a load's automatic repair holds the op lock
+            await openUnits();
+            await clickUntilClosed($("units-modal").querySelector('[data-unit="cm"]'), "unit change");
+            await waitFor(idle, 60000); // a load's automatic repair holds the op lock
+            await openUnits();
+            $("units-cal-axis").value = "W";
+            $("units-target").value = "32";
+            await clickUntilClosed($("units-apply-cal"), "calibration");
+            check("15 calibration produces 32 mm width", Math.abs(boxSize().x - 32) <= 1e-6, String(boxSize().x));
+            await openUnits();
+            check("15 reset row shows the original file dimensions", visible("units-reset-row")
+                && $("units-reset-row").textContent.includes("1.6 × 1.2 × 0.8"), $("units-reset-row").textContent.trim());
+            await waitFor(idle, 60000); // a load's automatic repair holds the op lock
+            const resetUndoBefore = undoCount();
+            await clickUntilClosed($("units-reset"), "reset");
+            const resetSize = boxSize();
+            check("15 reset restores all three dimensions", Math.abs(resetSize.x - 1.6) <= 1e-6
+                && Math.abs(resetSize.z - 1.2) <= 1e-6 && Math.abs(resetSize.y - 0.8) <= 1e-6,
+                `${resetSize.x} × ${resetSize.z} × ${resetSize.y}`);
+            check("15 reset adds one undo step", undoCount() === resetUndoBefore + 1, String(undoCount()));
+            await openUnits();
+            check("15 reset row is hidden at original size", !visible("units-reset-row"));
+            check("15 reset selects mm again", $("units-modal").querySelector('[data-unit="mm"]').classList.contains("on")
+                && !$("units-modal").querySelector('[data-unit="cm"]').classList.contains("on"));
+            // mm is already selected, so this click must be a no-op (it used to shrink the model 10x)
+            $("units-modal").querySelector('[data-unit="mm"]').click();
+            await sleep(500);
+            const afterMm = boxSize();
+            check("15 mm after reset leaves the size unchanged", Math.abs(afterMm.x - 1.6) <= 1e-6
+                && Math.abs(afterMm.z - 1.2) <= 1e-6 && Math.abs(afterMm.y - 0.8) <= 1e-6,
+                `${afterMm.x} × ${afterMm.z} × ${afterMm.y}`);
+            await waitFor(idle, 60000);
+            check("15 reset row stays hidden after mm", !visible("units-reset-row"));
+            // a Big Print bake hides the reset row: its "Original file" promise would not hold
+            CC.pieces[0].userData.unitsFactor = 10;
+            CC.pieces[0].userData.bakedScale = 2;
+            win.dispatchEvent(new win.CustomEvent("curvecut:pieces-changed", { detail: { source: "test" } }));
+            check("15 reset row hidden when a Big Print bake is present", !visible("units-reset-row"));
+            delete CC.pieces[0].userData.bakedScale;
+            CC.pieces[0].userData.unitsFactor = 1;
+            $("units-close").click();
+            await waitFor(() => !visible("units-modal"), 5000);
+            CC.history.undo();
+            check("15 undo restores 32 mm width", Math.abs(boxSize().x - 32) <= 1e-6, String(boxSize().x));
 
             check("No page errors", pageErrors.length === 0, pageErrors.join(" | "));
         } catch (error) {

@@ -890,6 +890,16 @@ body.theme-anim * {
     white-space: nowrap;
 }
 .units-calibration .view-btn { margin-left: auto; }
+.units-reset:not([hidden]) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 18px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
 .close-modal {
     position: absolute;
     top: 18px;

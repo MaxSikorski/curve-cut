@@ -18,7 +18,7 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 | `check_api.py` | The page API step A1 (`CC.api` reading tools): tool list parses in Python, `tests/api-test.html`, and the real app answers `invoke` | medium |
 | `check_hollow_panel.py` | The Hollow panel driven through the real app (preview, Confirm, undo, cancel, saved settings) and Big Print on a confirmed hollow (refusals, size lock, exported hollow parts, manifest, phone and tablet reach) | medium |
 | `check_ux_polish.py` | Cut cancellation and recovery; About and tour timing, focus and button labels | medium |
-| `check_small_tickets.py` | Pieces zip names, pen-mode camera keys, About version line | medium |
+| `check_small_tickets.py` | Pieces zip names, pen-mode camera keys, About version line, missed cuts, Units scale reset and undo | medium |
 | `check_cut_engine.py`, `check_formats.py`, `check_repair.py`, `check_hollow.py` | Cut engine; OBJ/3MF; mesh repair; hollowing | fast to medium |
 | `check_bigprint.py` | Big Print grid math and cell cutter (plus the 6× Benchy acceptance when `test-assets/` has the Benchy) | medium to heavy |
 | `check_bigprint_panel.py` | The Big Print panel against its export on a 300 x 300 x 600 box: Size and Scale agree, nudge limits shown and enforced, part sizes in the manifest (STL and 3MF), peg note, connector and ID plan before export | heavy |

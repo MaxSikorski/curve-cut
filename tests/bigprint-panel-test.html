@@ -300,6 +300,9 @@
                 $("bp-size").value === "60" && $("bp-scale").value === "0.1"
                 && $("bp-status").textContent.startsWith("Final 30 × 30 × 60 mm"),
                 `size ${$("bp-size").value}, scale ${$("bp-scale").value}, ${$("bp-status").textContent}`);
+            check("F10 one part (no seams): says so, IDs sentence stays",
+                connNote() === "One part: no seams, so no connectors. Part IDs will be engraved on each part where there is room.",
+                connNote() || "(empty)");
             sizeEntry(0);
             check("F3 typed 0: ignored, field rewritten from the scale on commit",
                 $("bp-size").value === "60" && $("bp-scale").value === "0.1", `size ${$("bp-size").value}, scale ${$("bp-scale").value}`);
@@ -308,6 +311,8 @@
                 $("bp-size").value === "6" && $("bp-scale").value === "0.01"
                 && toast().includes("Smallest scale is 0.01× — 6 mm is the smallest size for this model."),
                 `size ${$("bp-size").value}, scale ${$("bp-scale").value}, ${toast()}`);
+            check("L2 tiny model: Final keeps decimals under 10 mm, whole when whole",
+                $("bp-status").textContent.startsWith("Final 3 × 3 × 6 mm"), $("bp-status").textContent);
             setValue("bp-scale", 250);
             $("bp-scale").blur();
             check("F3 above 100x: clamps and says why",
@@ -315,6 +320,58 @@
                 && toast().includes("Largest scale is 100×"),
                 `size ${$("bp-size").value}, scale ${$("bp-scale").value}, ${toast()}`);
             setValue("bp-scale", 1);
+
+            // ===== F11: spinner and arrow keys step by a little, never jump to the minimum
+            fixedState();
+            setValue("bp-scale", 1);
+            await sleep(100);
+            const stepped = (id, dir) => {
+                const el = $(id);
+                el.focus();
+                el[dir]();
+                el.dispatchEvent(new win.Event("input", { bubbles: true }));
+                el.dispatchEvent(new win.Event("change", { bubbles: true }));
+                const v = el.value;
+                el.blur();
+                return v;
+            };
+            const sUp = stepped("bp-scale", "stepUp");
+            const sDown = stepped("bp-scale", "stepDown"), sDown2 = stepped("bp-scale", "stepDown");
+            check("F11 Scale at 1: up 1.01, down 0.99 (then 1 after the matching up)", sUp === "1.01" && sDown === "1" && sDown2 === "0.99",
+                `${sUp} ${sDown} ${sDown2}`);
+            setValue("bp-scale", 1);
+            const zUp = stepped("bp-size", "stepUp"), zDown = stepped("bp-size", "stepDown");
+            check("F11 Size at 600: up 601, back to 600", zUp === "601" && zDown === "600", `${zUp} ${zDown}`);
+            const nUp = stepped("bp-nudge-y", "stepUp"), nDown = stepped("bp-nudge-y", "stepDown");
+            check("F11 Nudge H at 0: up 0.01, back to 0", nUp === "0.01" && nDown === "0",
+                `${nUp} ${nDown}; min ${$("bp-nudge-y").min} step ${$("bp-nudge-y").step}`);
+
+            // ===== F12: a window that shrinks under a typed nudge: the box shows the edge the grid uses
+            fixedState();
+            setValue("bp-scale", 1);
+            setChecked("bp-connectors", false);
+            setChecked("bp-engrave", false);
+            setValue("bp-nudge-y", 100);
+            $("bp-nudge-y").blur();
+            setValue("bp-margin", 52.402); // usable 395.196, so the H window ends at 95.196: off the 0.01 grid
+            await sleep(100);
+            const f12Max = $("bp-nudge-y").max;
+            check("F12 shrunk window: field is the inward edge, never above max",
+                $("bp-nudge-y").value === "95.19" && f12Max === "95.19", `value ${$("bp-nudge-y").value}, max ${f12Max}`);
+            const e12 = await runExport();
+            const man12 = e12.zip && e12.zip["manifest.txt"] ? textOf(e12.zip["manifest.txt"]) : "";
+            const nl = (man12.split("\n").find((l) => l.includes("Nudge (W×D×H)")) || "").trim();
+            check("F12 the export used the shown nudge", nl.endsWith("× 95.19 mm") && !!e12.result, nl);
+            // L6: an emptied nudge box is rewritten on commit
+            setValue("bp-margin", 5);
+            setValue("bp-nudge-y", 12);
+            $("bp-nudge-y").focus();
+            $("bp-nudge-y").value = "";
+            $("bp-nudge-y").dispatchEvent(new win.Event("input", { bubbles: true }));
+            $("bp-nudge-y").blur();
+            check("L6 emptied nudge box shows the effective value on commit", $("bp-nudge-y").value === "0",
+                `[${$("bp-nudge-y").value}]`);
+            setValue("bp-nudge-y", 0);
 
             // ===== F4: nudge limits (SV08 Max, scale 2)
             fixedState();
@@ -333,8 +390,8 @@
             check("F4 9999 typed/pasted: field 180.4", $("bp-nudge-x").value === "180.4", $("bp-nudge-x").value);
             typedEntry("bp-nudge-x", "-9999");
             check("F4 -9999 typed/pasted: field -180.4", $("bp-nudge-x").value === "-180.4", $("bp-nudge-x").value);
-            check("F4 field limits are the real edges, step any",
-                $("bp-nudge-x").min === "-180.4" && $("bp-nudge-x").max === "180.4" && $("bp-nudge-x").step === "any",
+            check("F4 field limits are the real edges, step 0.01",
+                $("bp-nudge-x").min === "-180.4" && $("bp-nudge-x").max === "180.4" && $("bp-nudge-x").step === "0.01",
                 `${$("bp-nudge-x").min}..${$("bp-nudge-x").max} step ${$("bp-nudge-x").step}`);
             $("bp-format").value = "stl";
             scriptEntry("bp-nudge-x", 9999);

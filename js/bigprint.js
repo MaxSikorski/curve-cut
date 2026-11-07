@@ -137,7 +137,7 @@
 
     const MIN_SCALE = 0.01, MAX_SCALE = 100;
     const fmtScale = (k) => String(+k.toFixed(4));
-    const fmtMm = (mm) => String(+mm.toFixed(1));
+    const fmtMm = Core.fmtMm;
     let scaleClamp = null; // "min" / "max" when the last accepted entry hit a limit
 
     function setScale(k, from) {
@@ -205,6 +205,13 @@
     // that: on Enter or blur the box is rewritten to the nudge that is really used.
     // The window edges are rounded inward to 0.01 so the box never shows a value past the real limit.
     const formatNudge = (v) => String(+v.toFixed(2));
+    // what the box shows for the nudge the grid uses: a window end is written as its inward edge
+    const shownNudge = (axis) => {
+        const v = layout.nudge[axis];
+        if (Math.abs(v - layout.window[axis].hi) < 1e-9) return formatNudge(windowEdge(axis, "hi"));
+        if (Math.abs(v - layout.window[axis].lo) < 1e-9) return formatNudge(windowEdge(axis, "lo"));
+        return formatNudge(v);
+    };
     const windowEdge = (axis, end) => end === "hi"
         ? Math.floor(layout.window[axis].hi * 100 + 1e-6) / 100
         : Math.ceil(layout.window[axis].lo * 100 - 1e-6) / 100;
@@ -212,13 +219,18 @@
         const snap = () => {
             if (!active || explodeGroup || !layout || layout.mode[axis] !== "auto") return;
             const typed = parseFloat(el.value) || 0;
+            if (!Number.isFinite(parseFloat(el.value))) { // emptied: show the nudge that is used
+                el.value = shownNudge(axis);
+                refresh();
+                return;
+            }
             const edge = typed > windowEdge(axis, "hi") ? windowEdge(axis, "hi")
                 : typed < windowEdge(axis, "lo") ? windowEdge(axis, "lo") : null;
             if (edge !== null) {
                 el.value = formatNudge(edge);
                 refresh();
-            } else if (Math.abs(layout.nudge[axis] - typed) > 1e-9) {
-                el.value = formatNudge(layout.nudge[axis]);
+            } else if (shownNudge(axis) !== formatNudge(typed)) {
+                el.value = shownNudge(axis);
                 refresh();
             }
         };
@@ -855,6 +867,14 @@
     /* How far a connector peg stands past its part's face (0 with connectors
        off). Same formula as the export's conn.depth; computeGrid shrinks cut
        axes by it so a part plus its pegs stays inside bed minus margin. */
+    /* The connector size and tolerance the export uses (size at least 2 mm, tolerance not below 0);
+       the plan sentence reads the same numbers. */
+    function connLimits() {
+        return {
+            size: Math.max(parseFloat(connSize.value) || 4, 2),
+            tol: Math.max(parseFloat(connTol.value) || 0, 0),
+        };
+    }
     function connDepth(sizeValue) {
         return Math.max((parseFloat(sizeValue) || 4) * 0.8, 2);
     }
@@ -877,8 +897,8 @@
             const shape = connShape.selectedOptions[0] ? connShape.selectedOptions[0].textContent.toLowerCase() : connShape.value;
             const pegs = Core.cellCount(grid) === 1 ? "One part: no seams, so no connectors."
                 : connBox.checked
-                    ? `Will add ${shape} pegs and sockets (${formatNudge(parseFloat(connSize.value) || 4)} mm, `
-                        + `tolerance ${formatNudge(parseFloat(connTol.value) || 0)} mm) on every seam with room; exact counts after export.`
+                    ? `Will add ${shape} pegs and sockets (${formatNudge(connLimits().size)} mm, `
+                        + `tolerance ${formatNudge(connLimits().tol)} mm) on every seam with room; exact counts after export.`
                     : "No connectors: parts will need glue only.";
             note.textContent = pegs + " " + (engraveBox.checked
                 ? "Part IDs will be engraved on each part where there is room." : "No part IDs engraved.");
@@ -973,6 +993,7 @@
 
         // Nudge range is the window where no extra part appears (whole mm for the spinner).
         const ranges = [];
+        let rewrote = false;
         for (const [axis, label, el] of [["x", "W", nudgeX], ["z", "D", nudgeZ], ["y", "H", nudgeY]]) {
             const lo = windowEdge(axis, "lo") || 0, hi = windowEdge(axis, "hi") || 0;
             el.min = lo;
@@ -981,11 +1002,13 @@
                 ? `${label} −${formatNudge(-lo)}…+${formatNudge(hi)}` : `${label} fixed`);
             // a bed/printer/scale change can shrink the window under a typed value
             if (layout.mode[axis] === "auto" && document.activeElement !== el
-                && Math.abs(layout.nudge[axis] - (parseFloat(el.value) || 0)) > 1e-9) {
-                el.value = formatNudge(layout.nudge[axis]);
+                && shownNudge(axis) !== formatNudge(parseFloat(el.value) || 0)) {
+                el.value = shownNudge(axis);
+                rewrote = true;
             }
         }
         nudgeRange.textContent = `Range ${ranges.join(" · ")} mm`;
+        if (rewrote) refresh(); // the grid uses exactly the value now shown
     }
 
     // ------------------------------------------------------------ mode flow
@@ -1599,11 +1622,11 @@
             const fmt = document.getElementById("bp-format").value === "3mf" ? "3mf" : "stl";
             const gap = Math.min(Math.max(parseFloat(gapInput.value) || 0, 0), 0.5);
             const conn = connBox.checked ? {
-                size: Math.max(parseFloat(connSize.value) || 4, 2),
+                size: connLimits().size,
                 depth: connDepth(connSize.value),
                 shape: connShape.value,
-                tolR: Math.max(parseFloat(connTol.value) || 0, 0),
-                tolD: Math.max(parseFloat(connTol.value) || 0, 0),
+                tolR: connLimits().tol,
+                tolD: connLimits().tol,
             } : null;
 
             const receipt = hollowStatus(model) === "confirmed" ? model.userData.hollow : null;

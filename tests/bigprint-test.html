@@ -736,6 +736,20 @@
             solidManifest.includes("Hollow: none (solid parts)") && !solidManifest.includes("Wall:")
             && !solidManifest.includes("Material saved"));
         {
+            // L2 / L3: one mm formatter for the panel and the manifest; scale to 4 significant digits
+            check("fmtMm: 2 decimals under 10 mm, 1 decimal otherwise, whole when whole",
+                B.fmtMm(0.034) === "0.03" && B.fmtMm(5) === "5" && B.fmtMm(9.456) === "9.46"
+                && B.fmtMm(29.5) === "29.5" && B.fmtMm(12.34) === "12.3" && B.fmtMm(300) === "300" && B.fmtMm(24.999999) === "25",
+                [0.034, 5, 9.456, 29.5, 12.34, 24.999999].map(B.fmtMm).join(" "));
+            const tiny = B.buildManifest([], {
+                name: "t", scale: 0.083333333, size: { x: 25.0000001, y: 50, z: 24.96 },
+                bed: { w: 180, d: 180, h: 180 }, printer: "A1 mini", margin: 5,
+                nudge: { x: 0, y: 0, z: 0 }, gap: 0.15, connectors: "off" });
+            check("manifest scale has 4 significant digits and Final size uses the panel's formatter",
+                tiny.includes("Scale: ×0.08333") && !tiny.includes("0.083333")
+                && tiny.includes("Final size (W×D×H): 25 × 25 × 50 mm"), tiny.split("\n").filter((l) => /Scale|Final/.test(l)).join(" | "));
+        }
+        {
             // T6: the part table lists each part's finished W x D x H
             const sizeBase = { name: "s", scale: 1, size: { x: 300, y: 600, z: 300 },
                 bed: { w: 500, d: 500, h: 500 }, printer: "SV08 Max", margin: 5,

@@ -1444,7 +1444,7 @@
     async function renderAssemblyMap(g, occupied, s, mesh) {
         const cols = g.counts.x, layers = g.counts.y, rows = g.counts.z;
         const footerLines = [
-            `${s.name} — ×${s.scale}  ·  ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm  ·  ${occupied.size} parts`,
+            `${s.name} — ×${Core.fmtScale4(s.scale)}  ·  ${Core.fmtMm(s.size.x)} × ${Core.fmtMm(s.size.z)} × ${Core.fmtMm(s.size.y)} mm  ·  ${occupied.size} parts`,
             `Front view, to scale: columns = letters (left→right), layers bottom-up; one panel per row (front row first)`,
             `Printer ${s.printer}, margin ${s.margin} mm · gap ${s.gap} mm · connectors ${s.connectors}${s.fullVolume ? " · full build volume (pegs use the margin)" : ""}`,
         ];
@@ -1726,7 +1726,7 @@
                 name: model.name || "model",
                 version: CC.VERSION,
                 exportDate: new Date().toISOString(),
-                scale: +scale.toFixed(3),
+                scale, // raw: the manifest rounds it (fmtScale4)
                 size: p.size, bed: p.bed, margin: p.margin, nudge: exportNudge, gap,
                 format: fmt.toUpperCase(),
                 engraveIds: engraveBox.checked,
@@ -1761,7 +1761,7 @@
                     const source = await AssemblyViewer.loadSource();
                     assembly = await viewer.build({
                         meta: { name: settings.name, exportDate: settings.exportDate,
-                            appVersion: settings.version, scale: settings.scale, size: p.size, gap,
+                            appVersion: settings.version, scale: +Core.fmtScale4(settings.scale), size: p.size, gap,
                             connectors: settings.connectors, grid: g, min },
                         source,
                         onStage: (text) => CC.progress.update(text, 1),

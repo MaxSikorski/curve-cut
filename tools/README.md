@@ -22,7 +22,7 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 | `check_cut_engine.py`, `check_formats.py`, `check_repair.py`, `check_hollow.py` | Cut engine; OBJ/3MF; mesh repair; hollowing | fast to medium |
 | `check_bigprint.py` | Big Print grid math and cell cutter (plus the 6× Benchy acceptance when `test-assets/` has the Benchy) | medium to heavy |
 | `check_bigprint_panel.py` | The Big Print panel against its export on a 300 x 300 x 600 box: Size and Scale agree, nudge limits shown and enforced, part sizes in the manifest (STL and 3MF), peg note, connector and ID plan before export | heavy |
-| `check_assembly.py` | The 3D assembly viewer (also runs `embed_viewer.py --check`), plus a real Benchy Big Print export and its `assembly.html` opened from disk when `test-assets/` has the Benchy | medium; heavy with the Benchy |
+| `check_assembly.py` | The 3D assembly viewer (also runs `embed_viewer.py --check`), plus a real Benchy Big Print export and its `assembly.html` opened from disk when `test-assets/` has the Benchy + the in-app route (I0–I12; a tiny export, no private model) | medium; heavy with the Benchy |
 | `check_compute.py` | The compute worker (also runs `embed_worker.py --check`) | medium |
 | `check_memory.py` | Worker memory stats and recycle | heavy |
 | `check_property.py` | Random-seed invariants for cuts and hollows | heavy |

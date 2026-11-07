@@ -16,6 +16,7 @@
 <script src="../js/bigprint-core.js"></script>
 <script src="../js/assembly-core.js"></script>
 <script src="../js/assembly-viewer.js"></script>
+<script src="../js/assembly-open-core.js"></script>
 <script>
 /* Headless test for the 3D assembly viewer data, packing, file and viewer.
    Run via tools/check_assembly.py. Result lands in document.title:
@@ -36,6 +37,11 @@
     if (!window.AssemblyCore || !window.AssemblyViewer) {
         check("assembly modules exist", false,
             "AssemblyCore=" + typeof window.AssemblyCore + " AssemblyViewer=" + typeof window.AssemblyViewer);
+        finish();
+        return;
+    }
+    if (!window.AssemblyOpenCore) {
+        check("assembly open module exists", false);
         finish();
         return;
     }
@@ -315,6 +321,167 @@
             const err = AC.manifestNote({ ok: false, reason: "error" });
             check("C9 error note", err === "\n\n3D assembly view:\n"
                 + "  Left out — it couldn't be built in this browser. The part files are complete.");
+        }
+
+        // ----- O1-O12: untrusted assembly files -----
+        {
+            const OC = AssemblyOpenCore;
+            const ref = decode(mainBuild.bytes);
+            const equalResult = (r) => same(r.data, ref.data) && same(Array.from(r.bytes), Array.from(ref.mesh));
+            const clone = (x) => JSON.parse(JSON.stringify(x));
+            const b64 = (bytes) => {
+                let s = "";
+                for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode(...bytes.subarray(i, i + 8192));
+                return btoa(s);
+            };
+            const packed = fflate.deflateSync(ref.mesh);
+            const makeHtml = (data, mesh = packed) => AC.buildHtml(fakeSource, data, b64(mesh));
+            const refusal = async (operation, code) => {
+                try { await operation(); return false; } catch (e) { return e instanceof OC.OpenError && e.code === code; }
+            };
+            const spy = (blob) => {
+                let read = 0;
+                return { size: blob.size, slice(start, end) {
+                    const piece = blob.slice(start, end);
+                    read += piece.size;
+                    return piece;
+                }, get read() { return read; } };
+            };
+            const zip = (entries, level = 0) => fflate.zipSync(entries, { level });
+            const findSignature = (bytes, sig) => {
+                for (let i = 0; i <= bytes.length - 4; i++) {
+                    if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === sig && bytes[i + 3] === 2) return i;
+                }
+                return -1;
+            };
+            const patchDirectory = (bytes, offset, value, width = 2) => {
+                const copy = bytes.slice();
+                const at = findSignature(copy, 1);
+                if (at < 0) throw new Error("fixture has no central directory");
+                const view = new DataView(copy.buffer, copy.byteOffset, copy.byteLength);
+                if (width === 2) view.setUint16(at + offset, value, true);
+                else view.setUint32(at + offset, value, true);
+                return copy;
+            };
+            check("O1 parseHtml round trip", equalResult(OC.parseHtml(html)));
+            check("O2 Blob round trip", equalResult(await OC.readAssembly(new Blob([mainBuild.bytes]))));
+            const zipCases = [
+                zip({ "Part_A1.stl": new Uint8Array([1, 2]), "assembly.html": mainBuild.bytes }),
+                zip({ "Part_A1.stl": new Uint8Array([1, 2]), "assembly.html": mainBuild.bytes }, 6),
+                zip({ "MyModel/assembly.html": mainBuild.bytes }, 6),
+                zip({ "x/assembly.html": new Uint8Array([1]), "assembly.html": mainBuild.bytes })
+            ];
+            for (let i = 0; i < zipCases.length; i++) {
+                check(`O3 zip ${i + 1}`, equalResult(await OC.readAssembly(new Blob([zipCases[i]]))));
+            }
+            const largeZip = spy(new Blob([zip({ "filler.bin": new Uint8Array(5000000), "assembly.html": mainBuild.bytes })]));
+            check("O3 zip reads only directory and entry", equalResult(await OC.readAssembly(largeZip)) && largeZip.read < 5000000, String(largeZip.read));
+            const singleZip = zip({ "assembly.html": mainBuild.bytes });
+            const badZips = [
+                [zip({ "Part_A1.stl": new Uint8Array([1]) }), "zip-no-assembly"],
+                [patchDirectory(singleZip, 8, 1), "zip-unsupported"],
+                [patchDirectory(singleZip, 10, 12), "zip-unsupported"],
+                [singleZip.slice(0, singleZip.length - 22), "damaged"]
+            ];
+            for (const [bytes, code] of badZips) check(`O4 zip ${code}`, await refusal(() => OC.readAssembly(new Blob([bytes])), code));
+            const oversizedFixture = zip({ "assembly.html": mainBuild.bytes, "filler.bin": new Uint8Array(5000000) });
+            const oversizedZip = spy(new Blob([patchDirectory(oversizedFixture, 24, 13000000, 4)]));
+            const endRecord = new DataView(oversizedFixture.buffer, oversizedFixture.byteOffset + oversizedFixture.length - 22, 22);
+            const directoryBytes = endRecord.getUint32(12, true);
+            check("O4 oversized entry refused before reading", await refusal(() => OC.readAssembly(oversizedZip), "too-big")
+                && oversizedZip.read === 4 + Math.min(65557, oversizedFixture.length) + directoryBytes, String(oversizedZip.read));
+            for (const blob of [new Blob([new Uint8Array([0, 1, 2, 3])]), new Blob(["<html><body>hello</body></html>"]), new Blob([]), new Blob([new Uint8Array(1000000)])]) {
+                check("O5 not an assembly", await refusal(() => OC.readAssembly(blob), "not-assembly"));
+            }
+            const hugeHtml = spy(new Blob([mainBuild.bytes.slice(0, 65536), new Uint8Array(13000000)]));
+            check("O5 HTML size checked after sniff", await refusal(() => OC.readAssembly(hugeHtml), "too-big") && hugeHtml.read <= 65540, String(hugeHtml.read));
+            check("O6 truncated file", await refusal(() => OC.readAssembly(new Blob([mainBuild.bytes.slice(0, Math.floor(mainBuild.bytes.length * 0.6))])), "damaged"));
+            check("O6 broken JSON", await refusal(() => OC.parseHtml(html.replace(/(<script\b[^>]*id="ccav-data"[^>]*>)[\s\S]*?(<\/script)/i, "$1{$2")), "damaged"));
+            const variants = [
+                ["kind", (d) => { d.kind = "other"; }, "not-assembly"],
+                ["new format", (d) => { d.format = 2; }, "newer"],
+                ["invalid format", (d) => { d.format = "1"; }, "damaged"],
+                ["duplicate IDs", (d) => { d.parts[1].id = d.parts[0].id; }, "damaged"],
+                ["cell outside grid", (d) => { d.parts[0].cell.li = d.grid.counts.y; }, "damaged"],
+                ["empty parts", (d) => { d.parts = []; }, "damaged"],
+                ["unaligned offset", (d) => { d.parts[0].mesh.offset = 2; }, "damaged"],
+                ["overlapping records", (d) => { d.parts[1].mesh.offset = d.parts[0].mesh.offset; }, "damaged"],
+                ["record past block", (d) => { d.parts[d.parts.length - 1].mesh.tris += 2; }, "damaged"],
+                ["narrow oversized vertices", (d) => { d.parts[0].mesh.verts = 70000; d.parts[0].mesh.wide = false; }, "damaged"]
+            ];
+            for (const [name, mutate, code] of variants) {
+                const data = clone(ref.data); mutate(data);
+                check(`O6 ${name}`, await refusal(() => OC.parseHtml(makeHtml(data)), code));
+            }
+            const badMesh = ref.mesh.slice();
+            const m = ref.data.parts[0].mesh;
+            const indexStart = m.offset + Math.ceil(m.verts * 6 / 4) * 4;
+            const indexView = new DataView(badMesh.buffer, badMesh.byteOffset, badMesh.byteLength);
+            if (m.wide) indexView.setUint32(indexStart, m.verts, true); else indexView.setUint16(indexStart, m.verts, true);
+            check("O6 index outside vertices", await refusal(() => OC.parseHtml(makeHtml(ref.data, fflate.deflateSync(badMesh))), "damaged"));
+            const bomb = fflate.deflateSync(new Uint8Array(50000000));
+            const totals = [];
+            check("O7 bounded inflate refuses bomb", await refusal(() => OC.inflateBounded(bomb, 1000, (n) => totals.push(n)), "damaged"));
+            check("O7 bounded overshoot", totals.length > 0 && totals[totals.length - 1] > 1000
+                && totals[totals.length - 1] <= 1000 + OC.LIMITS.INFLATE_OVERSHOOT
+                && totals.every((n, i) => n - (i ? totals[i - 1] : 0) <= OC.LIMITS.INFLATE_OVERSHOOT), JSON.stringify(totals));
+            const started = performance.now();
+            check("O7 bomb in file refused within five seconds", await refusal(() => OC.readAssembly(new Blob([makeHtml(ref.data, bomb)])), "damaged") && performance.now() - started < 5000);
+            let progressCalled = false;
+            check("O7 too-large limit before push", await refusal(() => OC.inflateBounded(packed, 70000000, () => { progressCalled = true; }), "too-big") && !progressCalled);
+            check("O7 empty input", await refusal(() => OC.inflateBounded(new Uint8Array(), 1000), "damaged"));
+            check("O7 truncated stream", await refusal(() => OC.inflateBounded(packed.slice(0, Math.floor(packed.length / 2)), 64000000), "damaged"));
+            delete window.__o8;
+            const malicious = '<script>window.__o8 = 1<\/script><img src=x onerror="window.__o8 = 2">' + html;
+            check("O8 scripts and handlers never run", equalResult(OC.parseHtml(malicious)) && window.__o8 === undefined);
+            const tolerant = html.replace('<script type="application/json" id="ccav-data">', '<script id=\'ccav-data\' type="application/json">')
+                .replace(/(<script[^>]*id="ccav-mesh"[^>]*>[\s\S]*?)<\/script>/i, "$1<\/SCRIPT >");
+            check("O9 tolerant tags", equalResult(OC.parseHtml(tolerant)));
+            const messages = {
+                "not-assembly": "That isn't a curve cut assembly file. Choose the assembly.html from a Big Print zip, or the zip itself.",
+                "zip-no-assembly": "This zip has no assembly.html. If the export was split into several zips, try the last one or the one before it. Exports made before the 3D view existed don't have one.",
+                "zip-unsupported": "This zip can't be read here (unusual compression or encryption). Unzip it and open assembly.html instead.",
+                "too-big": "This file is too big to be a 3D assembly view (over 12 MB).",
+                "damaged": "This assembly file is damaged or incomplete. Export it again from Big Print.",
+                "newer": "This assembly file was made by a newer curve cut. Reload the app to update, then try again.",
+                "read-failed": "The file couldn't be read. Try choosing it again."
+            };
+            check("O10 exact messages and fallback", Object.entries(messages).every(([code, message]) => OC.messageFor(code) === message)
+                && ["unknown", "toString", "constructor", "__proto__"].every((code) => OC.messageFor(code) === messages.damaged));
+            const limits = { HEAD_BYTES: 65536, HTML_MAX_BYTES: 12000000, ZIP_TAIL_BYTES: 65557, ZIP_DIR_MAX_BYTES: 8000000, MESH_MAX_BYTES: 64000000, PARTS_MAX: 20000, TRIS_MAX: 2000000, VERTS_MAX: 1000000, INFLATE_CHUNK: 4096, INFLATE_OVERSHOOT: 4300000 };
+            check("O11 exact limits", Object.isFrozen(OC.LIMITS) && Object.keys(OC.LIMITS).length === Object.keys(limits).length
+                && Object.entries(limits).every(([name, value]) => OC.LIMITS[name] === value));
+            const oddGeometry = (triangles) => {
+                const g = new THREE.BufferGeometry();
+                g.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0], 3));
+                g.setIndex(Array.from({ length: triangles * 3 }, (_, i) => i % 4));
+                return g;
+            };
+            const p1 = AC.packMesh(oddGeometry(3)), p2 = AC.packMesh(oddGeometry(5));
+            const joined = new Uint8Array(p1.data.length + p2.data.length);
+            joined.set(p1.data); joined.set(p2.data, p1.data.length);
+            const oddData = clone(ref.data); oddData.parts = oddData.parts.slice(0, 2);
+            oddData.parts[0].mesh = Object.assign({}, p1, { offset: 0 });
+            oddData.parts[1].mesh = Object.assign({}, p2, { offset: p1.data.length });
+            delete oddData.parts[0].mesh.data; delete oddData.parts[1].mesh.data;
+            const oddFile = makeHtml(oddData, fflate.deflateSync(joined));
+            const oddResult = await OC.readAssembly(new Blob([oddFile]));
+            const pad4 = (n) => Math.ceil(n / 4) * 4;
+            const expected = pad4(p1.verts * 6) + pad4(18) + pad4(p2.verts * 6) + pad4(30);
+            check("O12 odd index padding and records", !p1.wide && !p2.wide && OC.validate(oddData) === expected && expected === joined.length
+                && same(Array.from(oddResult.bytes), Array.from(joined))
+                && oddData.parts.every((part, i) => same(Array.from(AC.unpackMesh(part.mesh, oddResult.bytes).index), Array.from(oddGeometry(i ? 5 : 3).index.array))));
+            oddData.parts[1].mesh.tris++;
+            {
+                const tagEnd = html.indexOf(">", html.indexOf("ccav-data")) + 1;
+                const hostile = html.slice(0, tagEnd) + "<script".repeat(300000);
+                const started = performance.now();
+                const refused = await refusal(() => OC.readAssembly(new Blob([hostile])), "damaged");
+                const ms = Math.round(performance.now() - started);
+                check("O13 many unclosed script tags are refused fast", refused && ms < 2000, ms + " ms");
+                check("O13 normal export still opens", equalResult(await OC.readAssembly(new Blob([html]))));
+            }
+            check("O12 record past padded block", await refusal(() => OC.readAssembly(new Blob([makeHtml(oddData, fflate.deflateSync(joined))])), "damaged"));
         }
 
         // ----- V1-V6 viewer, mounted in a plain div -----

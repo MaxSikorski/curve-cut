@@ -1098,6 +1098,41 @@ body.theme-anim * {
 
 /* ---------- Modal ---------- */
 
+.assembly-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 250;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    background: var(--bg-color);
+    color: var(--text-color);
+    opacity: 0;
+    visibility: hidden;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    box-sizing: border-box;
+}
+.assembly-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--divider);
+}
+.assembly-title { margin: 0; font-size: 1rem; font-weight: 600; }
+#assembly-close { min-width: 44px; min-height: 44px; }
+.assembly-mount { position: relative; flex: 1 1 0; min-height: 0; }
+.assembly-mount > .ccav { position: absolute; inset: 0; width: auto; height: auto; }
+[data-theme="light"] .ccav {
+    --ccav-bg: #f5f5f7; --ccav-fg: #000; --ccav-muted: rgba(0,0,0,.5); --ccav-line: rgba(0,0,0,.18);
+}
+[data-theme="dark"] .ccav {
+    --ccav-bg: #000; --ccav-fg: #fff; --ccav-muted: rgba(255,255,255,.5); --ccav-line: rgba(255,255,255,.25);
+}
+
 .modal-overlay {
     position: fixed;
     inset: 0;

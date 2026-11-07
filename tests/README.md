@@ -5,7 +5,7 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | Page | Runner | What it proves |
 |---|---|---|
 | `pen-test.html` | `check_pen.py` | Pen math: smooth handles, corners, point insertion, rigid moves, hit distances + phone mode dock stays compact (390×844; covered by `hollow-panel-test.html`) |
-| `cut-test.html` | `check_cut_engine.py` | Cut engine: spline cuts give watertight pieces with conserved volume |
+| `cut-test.html` | `check_cut_engine.py` | Cut engine: spline cuts give watertight pieces with conserved volume; simplify-to-target sweep (85-100% of target, watertight, volume kept, floor, light model unchanged) |
 | `formats-test.html` | `check_formats.py` | OBJ import, 3MF export round trip, basic repair ladder |
 | `repair-test.html` | `check_repair.py` | Boundary-loop repair of open meshes, plus old-vs-new weld/loop/repair equivalence |
 | `hollow-test.html` | `check_hollow.py` | Hybrid hollowing: wall thickness, watertight shells, honest savings, open faces and drilled holes (T1-T17, including the unchanged-output digest guard), and T18-T20: raw grid-audit goldens, the flat edge table against the old reference, the 2.2 M-triangle audit, and glow swatch geometry |
@@ -13,7 +13,8 @@ Each page loads the real app scripts, runs its checks, writes lines into `<pre i
 | `ux-polish-test.html` | `check_ux_polish.py` | Cut cancellation, recovery and model-change messaging; About and tour timing, focus and button labels in the real app |
 | `units-test.html` | `check_units.py` | Units and orientation math |
 | `bigprint-test.html` | `check_bigprint.py` | Big Print grid math, wall lists (auto/hand, reset rules) and the nudge clamp, the streaming cell cutter, solid blocks and label pads on hollow seams (plus the solid-output golden digest), manifest wording, and the exploded-view proxy target + note wording |
-| `compute-test.html` | `check_compute.py` | The compute worker: fused repair, cache tokens, worker cuts match main-thread cuts, cancel, fallback, and hollowApply carrying open faces and holes on worker and fallback (C1-C3) |
+| `compute-test.html` | `check_compute.py` | The compute worker: fused repair, cache tokens, worker cuts match main-thread cuts, cancel, fallback, and hollowApply carrying open faces and holes on worker and fallback (C1-C3), and the simplifyToTarget op (matches the main thread, lands within 85-100% of target, cancels between rounds without losing the cache, newest request wins, fallback parity) |
+| `simplify-timing.html` | `time_simplify.py` | Timing page, not a check: simplify-to-target rounds, longest round, result size and cancel probe on a 600,000-triangle sphere and the private large models |
 | `memory-test.html` | `check_memory.py` | Worker memory stats and the deferred recycle |
 | `property-test.html` | `check_property.py` | Random-seed invariants for cuts and hollows (volume, watertightness, kerf) |
 | `api-test.html` | `check_api.py` | Page API step A1 (`CC.api`): measure vs Manifold, section profile finds a dumbbell's neck, diagnosis, `look` PNG is the asked size and not blank with no WebGL leak; the check also parses `js/ai-tools.js` in Python and drives the real `index.html` |

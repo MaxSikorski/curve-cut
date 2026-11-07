@@ -472,6 +472,15 @@
                 && same(Array.from(oddResult.bytes), Array.from(joined))
                 && oddData.parts.every((part, i) => same(Array.from(AC.unpackMesh(part.mesh, oddResult.bytes).index), Array.from(oddGeometry(i ? 5 : 3).index.array))));
             oddData.parts[1].mesh.tris++;
+            {
+                const tagEnd = html.indexOf(">", html.indexOf("ccav-data")) + 1;
+                const hostile = html.slice(0, tagEnd) + "<script".repeat(300000);
+                const started = performance.now();
+                const refused = await refusal(() => OC.readAssembly(new Blob([hostile])), "damaged");
+                const ms = Math.round(performance.now() - started);
+                check("O13 many unclosed script tags are refused fast", refused && ms < 2000, ms + " ms");
+                check("O13 normal export still opens", equalResult(await OC.readAssembly(new Blob([html]))));
+            }
             check("O12 record past padded block", await refusal(() => OC.readAssembly(new Blob([makeHtml(oddData, fflate.deflateSync(joined))])), "damaged"));
         }
 

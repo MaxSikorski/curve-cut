@@ -258,6 +258,20 @@ def in_app_route() -> bool:
             escape()
             check("I8 app shortcuts stay blocked", page.evaluate("""before => JSON.stringify([CurveCut.pieces[0].scale.x,
                 CurveCut.pieces.length,CurveCut.camera.position.toArray()]) === JSON.stringify(before)""", before))
+            page.evaluate("""() => { window.__realMount = AssemblyViewer.mount; window.__keys = 0;
+                document.addEventListener('keydown', () => { window.__keys++; });
+                AssemblyViewer.mount = () => { throw new Error('mount boom'); }; }""")
+            page.evaluate("document.querySelector('#toast-live').textContent = ''")
+            choose(); page.wait_for_function("document.querySelector('#toast-live').textContent.length > 0")
+            page.keyboard.press('5')
+            failed_mount = page.evaluate("""() => { const s=CurveCut.assembly._state();
+                return !s.open && !s.mounted && !CurveCut.assembly.isOpen() && window.__keys === 1 &&
+                    !document.querySelector('#assembly-mount').children.length &&
+                    document.querySelector('#toast-live').textContent === AssemblyOpenCore.messageFor('damaged') &&
+                    getComputedStyle(document.querySelector('#assembly-overlay')).visibility === 'hidden'; }""")
+            page.evaluate("() => { AssemblyViewer.mount = window.__realMount; }")
+            choose(); opened(); escape()
+            check("I13 a mount that throws leaves the app usable", failed_mount)
             page.set_viewport_size({"width":375,"height":812})
             page.evaluate("""async b64 => { const bin=atob(b64), b=Uint8Array.from(bin,c=>c.charCodeAt(0));
                 await CurveCut.assembly.openFile(new File([b], 'assembly.html')); }""", fixture["base64"]); opened()

@@ -14,10 +14,17 @@
 
     function show(data, bytes, source) {
         if (open) return;
+        gsap.set(overlay, { autoAlpha: 0 });
+        try {
+            handle = AssemblyViewer.mount(mountEl, { THREE: window.THREE, data, bytes });
+        } catch (_) {
+            handle = null;
+            mountEl.replaceChildren();
+            CC.toast(AssemblyOpenCore.messageFor("damaged"));
+            return;
+        }
         open = true;
         opener = source;
-        gsap.set(overlay, { autoAlpha: 0 });
-        handle = AssemblyViewer.mount(mountEl, { THREE: window.THREE, data, bytes });
         trap.activate();
         gsap.to(overlay, { autoAlpha: 1, duration: CC.a11y.dur(0.3), ease: "power2.out" });
         try {

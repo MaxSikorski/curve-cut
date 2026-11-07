@@ -89,12 +89,26 @@
         return result;
     }
 
+    // Finds the opening <script ... id="..."> tag by plain scanning: each candidate is tested on its own
+    // short slice, so a hostile file of thousands of unclosed "<script" cannot make a regex backtrack.
+    function findTag(text, id) {
+        const idRe = new RegExp("\\bid\\s*=\\s*[\"']?" + id + "[\"']?(?![\\w-])", "i");
+        let pos = 0, gt = -1;
+        while ((pos = text.indexOf("<script", pos)) !== -1) {
+            if (gt < pos) gt = text.indexOf(">", pos); // reuse the last ">" so a long run of tags is scanned once
+            if (gt === -1) return null;
+            const after = text.charAt(pos + 7);
+            if (/[\s>/]/.test(after) && idRe.test(text.slice(pos + 7, gt))) return { end: gt + 1 };
+            pos += 7;
+        }
+        return null;
+    }
+
     function parseHtml(text) {
         function block(id) {
-            const re = new RegExp("<script\\b[^>]*\\bid\\s*=\\s*[\"']?" + id + "[\"']?[^>]*>", "i");
-            const match = re.exec(text);
-            if (!match) return null;
-            const start = match.index + match[0].length;
+            const tag = findTag(text, id);
+            if (!tag) return null;
+            const start = tag.end;
             const close = /<\/script/i.exec(text.slice(start));
             return { text: close ? text.slice(start, start + close.index) : null };
         }
@@ -135,7 +149,7 @@
                 ((first[2] === 3 && first[3] === 4) || (first[2] === 5 && first[3] === 6));
             if (!zip) {
                 const head = decoder.decode(await read(0, LIMITS.HEAD_BYTES));
-                if (!/<script\b[^>]*\bid\s*=\s*["']?ccav-data["']?[^>]*>/i.test(head)) fail("not-assembly");
+                if (!findTag(head, "ccav-data")) fail("not-assembly");
                 if (blob.size > LIMITS.HTML_MAX_BYTES) fail("too-big");
                 return parseHtml(decoder.decode(await read(0, blob.size)));
             }

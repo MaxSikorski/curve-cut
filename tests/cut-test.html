@@ -169,6 +169,50 @@
                 detail = `${still}, ${count} vs ${trisOf(sweep.get(6000))}`;
             } catch (e) { detail = String(e); }
             check("simplifyRounds cleans up and leaves its source usable", ok, detail);
+            // return() at a paused yield must free the round's fresh Manifold
+            // (a catch block is skipped by return(); only a finally runs).
+            const proto = Object.getPrototypeOf(solid);
+            const realSimplify = proto.simplify;
+            const leakRun = (target, stopAtRefine) => {
+                const made = [];
+                proto.simplify = function (...args) {
+                    const m = realSimplify.apply(this, args);
+                    made.push(m);
+                    return m;
+                };
+                let reachedRefine = false, rounds = 0;
+                try {
+                    const iterator = CutCore.simplifyRounds(solid, target);
+                    let lastEps = 0;
+                    for (;;) {
+                        const step = iterator.next();
+                        if (step.done) break;
+                        rounds++;
+                        const refining = step.value.eps < lastEps;
+                        lastEps = step.value.eps;
+                        if (stopAtRefine ? refining : rounds === 2) {
+                            reachedRefine = refining;
+                            iterator.return();
+                            break;
+                        }
+                    }
+                } finally { proto.simplify = realSimplify; }
+                const open = made.filter((m) => !m.isDeleted()).length;
+                made.forEach((m) => { if (!m.isDeleted()) m.delete(); });
+                return { open, made: made.length, reachedRefine, rounds };
+            };
+            const rampLeak = leakRun(6000, false);
+            check("simplifyRounds return() in the ramp frees every Manifold",
+                rampLeak.made >= 2 && rampLeak.open === 0,
+                `${rampLeak.open} of ${rampLeak.made} left open`);
+            let refineLeak = null;
+            for (const target of [6000, 3000, 10000, 15000, 20000]) {
+                refineLeak = leakRun(target, true);
+                if (refineLeak.reachedRefine) break;
+            }
+            check("simplifyRounds return() in the refine loop frees every Manifold",
+                refineLeak.reachedRefine && refineLeak.open === 0,
+                `${refineLeak.open} of ${refineLeak.made} left open, refine reached ${refineLeak.reachedRefine}`);
             let rangeName = null;
             try { CutCore.simplifyRounds(solid, 0).next(); } catch (e) { rangeName = e.name; }
             check("simplify target must be positive", rangeName === "RangeError",

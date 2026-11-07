@@ -464,15 +464,18 @@
         const simplifyCalls = [];
         const simplifyComputeRun = CC.compute.run;
         CC.compute.run = function(op, payload, options) {
-            if (op === "simplifyToTarget") simplifyCalls.push({ op, payload });
+            if (op === "simplifyToTarget") simplifyCalls.push({ op, payload, options });
             return simplifyComputeRun.call(this, op, payload, options);
         };
         let simplified = null, simplifiedError = null;
+        let dispatched = null, dispatchedError = null;
         try {
             simplified = await CC.compute.run("simplifyToTarget",
                 { token: simplifyToken, target: 8000 });
+            // The latest-wins dispatcher goes through the same wrapper.
+            dispatched = await CC.compute.requestSimplify(simplifyToken, 8000);
         } catch (error) {
-            simplifiedError = error;
+            if (simplified) dispatchedError = error; else simplifiedError = error;
         } finally {
             CC.compute.run = simplifyComputeRun;
         }
@@ -494,7 +497,16 @@
             && simplified.stats.target === 8000 && simplified.stats.tris === simplifiedTris,
             simplified && `${simplifiedTris} of 8000, rounds ${simplified.stats.rounds}`);
         check("worker simplify result is watertight", !!simplified && watertight(simplified));
-        check("simplify sends a token-only payload", simplifyCalls.length === 1
+        const dispatchedCall = simplifyCalls[1];
+        check("simplify dispatcher sends token and target with the cancel grace",
+            !!dispatched && simplifyCalls.length === 2
+            && JSON.stringify(Object.keys(dispatchedCall.payload)) === '["token","target"]'
+            && !!dispatchedCall.options && dispatchedCall.options.cancelGraceMs === 10000,
+            dispatchedError ? dispatchedError.message : JSON.stringify(dispatchedCall && [
+                Object.keys(dispatchedCall.payload),
+                dispatchedCall.options && dispatchedCall.options.cancelGraceMs]));
+        check("simplify sends a token-only payload", simplifyCalls.length === 2
+            && simplifyCalls[0].payload.token === simplifyToken
             && simplifyCalls[0].payload.token === simplifyToken
             && !["geometry", "vertProperties", "triVerts"].some((key) =>
                 Object.prototype.hasOwnProperty.call(simplifyCalls[0].payload, key)),
@@ -540,24 +552,65 @@
         const outcome = (promise) => promise.then(
             (value) => ({ value }), (error) => ({ error }));
         const simplifyWorkerBeforeSupersede = CC.compute._worker;
-        const requestA = outcome(CC.compute.requestSimplify(simplifyToken, 1000));
-        const requestB = outcome(CC.compute.requestSimplify(simplifyToken, 2000));
-        const requestC = outcome(CC.compute.requestSimplify(simplifyToken, 12000));
-        const [outA, outB, outC] = await Promise.all([requestA, requestB, requestC]);
+        // Run a scenario while the first simplify job is really running in the
+        // worker: `act(started)` gets a promise that resolves once the job has
+        // reported round 1. Returns the highest round the first job reported.
+        const inFlight = async (act, dropId = false) => {
+            const realRun = CC.compute.run;
+            let startedResolve, jobsSeen = 0, startRound = null, maxRound = 0;
+            const started = new Promise((resolve) => { startedResolve = resolve; });
+            CC.compute.run = function(op, payload, options) {
+                if (op !== "simplifyToTarget" || jobsSeen++ > 0) {
+                    return realRun.call(this, op, payload, options);
+                }
+                const job = realRun.call(this, op, payload, Object.assign({}, options, {
+                    onProgress: (progress) => {
+                        if (progress.stage !== "simplify" || typeof progress.round !== "number") return;
+                        maxRound = Math.max(maxRound, progress.round);
+                        if (startRound === null && progress.round >= 1) {
+                            startRound = progress.round;
+                            startedResolve();
+                        }
+                    },
+                }));
+                return dropId ? job.then((value) => value) : job; // a copy has no .id
+            };
+            try { await act(started); } finally { CC.compute.run = realRun; }
+            return { startRound, maxRound };
+        };
+
+        let supersede = null;
+        const supersedeRounds = await inFlight(async (started) => {
+            const a = outcome(CC.compute.requestSimplify(simplifyToken, 1000));
+            await started;
+            const b = outcome(CC.compute.requestSimplify(simplifyToken, 2000));
+            const c = outcome(CC.compute.requestSimplify(simplifyToken, 12000));
+            supersede = await Promise.all([a, b, c]);
+        });
+        const [outA, outB, outC] = supersede;
         let pingAfter = null;
         try { pingAfter = await CC.compute.run("ping", 7); } catch (_) {}
         check("newest simplify request supersedes older ones",
             !!outA.error && outA.error.name === "ComputeSuperseded"
             && !!outB.error && outB.error.name === "ComputeSuperseded"
             && !!outC.value && outC.value.stats.target === 12000
+            && supersedeRounds.startRound !== null
+            && supersedeRounds.maxRound <= supersedeRounds.startRound + 1
+            && CC.memoryReport().workerCacheTokenCount === simplifyTokensBefore
             && CC.compute._worker === simplifyWorkerBeforeSupersede && pingAfter === 7,
             `${outA.error && outA.error.name}, ${outB.error && outB.error.name}, `
-            + `${outC.value ? "target " + outC.value.stats.target : outC.error && outC.error.message}`);
+            + `${outC.value ? "target " + outC.value.stats.target : outC.error && outC.error.message}; `
+            + `running job stopped at round ${supersedeRounds.maxRound} (started ${supersedeRounds.startRound})`);
 
-        const cancelA = outcome(CC.compute.requestSimplify(simplifyToken, 1000));
-        const cancelB = outcome(CC.compute.requestSimplify(simplifyToken, 2000));
-        const cancelledAny = CC.compute.cancelSimplify();
-        const [outCancelA, outCancelB] = await Promise.all([cancelA, cancelB]);
+        let cancelled = null, cancelledAny = null;
+        const cancelRounds = await inFlight(async (started) => {
+            const a = outcome(CC.compute.requestSimplify(simplifyToken, 1000));
+            await started;
+            const b = outcome(CC.compute.requestSimplify(simplifyToken, 2000));
+            cancelledAny = CC.compute.cancelSimplify();
+            cancelled = await Promise.all([a, b]);
+        });
+        const [outCancelA, outCancelB] = cancelled;
         let afterCancelAll = null;
         try {
             afterCancelAll = await CC.compute.requestSimplify(simplifyToken, 12000);
@@ -565,10 +618,42 @@
         check("cancelSimplify rejects pending requests", cancelledAny === true
             && !!outCancelA.error && outCancelA.error.name === "ComputeCancelled"
             && !!outCancelB.error && outCancelB.error.name === "ComputeCancelled"
+            && cancelRounds.startRound !== null
+            && cancelRounds.maxRound <= cancelRounds.startRound + 1
+            && CC.memoryReport().workerCacheTokenCount === simplifyTokensBefore
             && CC.compute._worker === simplifyWorkerBeforeSupersede && !!afterCancelAll
             && CC.compute.cancelSimplify() === false,
             `${cancelledAny}, ${outCancelA.error && outCancelA.error.name}, `
-            + `${outCancelB.error && outCancelB.error.name}`);
+            + `${outCancelB.error && outCancelB.error.name}; running job stopped at round `
+            + `${cancelRounds.maxRound} (started ${cancelRounds.startRound})`);
+
+        // A request that arrives after cancelSimplify() must not turn the cancel
+        // of the running job into a "superseded".
+        let lateCancel = null;
+        await inFlight(async (started) => {
+            const a = outcome(CC.compute.requestSimplify(simplifyToken, 1000));
+            await started;
+            CC.compute.cancelSimplify();
+            const d = outcome(CC.compute.requestSimplify(simplifyToken, 12000));
+            lateCancel = await Promise.all([a, d]);
+        });
+        check("cancelSimplify stays a cancel when a new request follows",
+            !!lateCancel[0].error && lateCancel[0].error.name === "ComputeCancelled"
+            && !!lateCancel[1].value && lateCancel[1].value.stats.target === 12000,
+            `${lateCancel[0].error && lateCancel[0].error.name}, `
+            + `${lateCancel[1].value ? "target " + lateCancel[1].value.stats.target
+                : lateCancel[1].error && lateCancel[1].error.name}`);
+
+        let noIdCancel = null;
+        await inFlight(async (started) => {
+            const a = outcome(CC.compute.requestSimplify(simplifyToken, 1000));
+            await started;
+            CC.compute.cancelSimplify();
+            noIdCancel = await a;
+        }, true);
+        check("cancelSimplify works when a wrapper drops the job id",
+            !!noIdCancel.error && noIdCancel.error.name === "ComputeCancelled",
+            noIdCancel.error ? noIdCancel.error.name : "ran to completion");
 
         let noTokenMessage = null, badTokenMessage = null;
         try { await CC.compute.run("simplifyToTarget", { target: 1000 }); }

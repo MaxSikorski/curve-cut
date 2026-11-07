@@ -1799,7 +1799,9 @@
                 const next = above.simplify(eps);
                 round++;
                 const tris = next.numTri();
-                try { yield { round, tris, eps }; } catch (e) { drop(next); throw e; }
+                // next.return() at the yield skips a catch, so a finally frees it.
+                let adopted = false;
+                try { yield { round, tris, eps }; adopted = true; } finally { if (!adopted) drop(next); }
                 if (tris <= target) { below = next; epsBelow = eps; break; }
                 drop(above);
                 above = next; epsAbove = eps;
@@ -1820,7 +1822,8 @@
                     const trial = above.simplify(mid);
                     round++;
                     const tris = trial.numTri();
-                    try { yield { round, tris, eps: mid }; } catch (e) { drop(trial); throw e; }
+                    let adopted = false;
+                    try { yield { round, tris, eps: mid }; adopted = true; } finally { if (!adopted) drop(trial); }
                     if (tris <= target) {
                         drop(below);
                         below = trial; hi = mid;

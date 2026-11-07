@@ -736,16 +736,21 @@
             request.reject(error);
             return;
         }
-        const flight = { id: promise.id, request, cancelling: false };
+        // A wrapper may drop promise.id; the job just started is the active one.
+        const id = promise.id !== undefined ? promise.id : (active ? active.id : null);
+        const flight = { id, request, cancelling: false, cancelled: false };
         simplifyFlight = flight;
         const finish = (settleRequest, value) => {
             if (simplifyFlight === flight) simplifyFlight = null;
-            if (simplifyWaiting) {
-                const next = simplifyWaiting;
-                simplifyWaiting = null;
-                request.reject(new ComputeSuperseded());
-                startSimplify(next);
-            } else settleRequest(value);
+            // cancelSimplify() wins over everything, even a result that arrives
+            // late or a newer request that came in after it.
+            const outcome = flight.cancelled ? [request.reject, new ComputeCancelled()]
+                : simplifyWaiting ? [request.reject, new ComputeSuperseded()]
+                    : [settleRequest, value];
+            const next = simplifyWaiting;
+            simplifyWaiting = null;
+            outcome[0](outcome[1]);
+            if (next) startSimplify(next);
         };
         promise.then((value) => finish(request.resolve, value),
             (error) => finish(request.reject, error));
@@ -778,6 +783,7 @@
             pending = true;
         }
         if (simplifyFlight) {
+            simplifyFlight.cancelled = true;
             cancelFlight();
             pending = true;
         }

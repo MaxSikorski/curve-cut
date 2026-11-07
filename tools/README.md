@@ -21,6 +21,7 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 | `check_small_tickets.py` | Pieces zip names, pen-mode camera keys, About version line | medium |
 | `check_cut_engine.py`, `check_formats.py`, `check_repair.py`, `check_hollow.py` | Cut engine; OBJ/3MF; mesh repair; hollowing | fast to medium |
 | `check_bigprint.py` | Big Print grid math and cell cutter (plus the 6× Benchy acceptance when `test-assets/` has the Benchy) | medium to heavy |
+| `check_assembly.py` | The 3D assembly viewer (also runs `embed_viewer.py --check`), plus a real Benchy Big Print export and its `assembly.html` opened from disk when `test-assets/` has the Benchy | medium; heavy with the Benchy |
 | `check_compute.py` | The compute worker (also runs `embed_worker.py --check`) | medium |
 | `check_memory.py` | Worker memory stats and recycle | heavy |
 | `check_property.py` | Random-seed invariants for cuts and hollows | heavy |
@@ -34,6 +35,7 @@ Heavy checks use several CPU cores each: run them one at a time.
 | Script | What it does |
 |---|---|
 | `embed_worker.py` | Builds `js/compute-worker-src.js` from the worker shell, Manifold and the core engines; `--check` fails if the file is stale |
+| `embed_viewer.py` | Builds `js/assembly-viewer-src.js` (three.js, OrbitControls, fflate, the viewer and their licence texts as strings) for `assembly.html`; reads `vendor/`, never changes it; `--check` fails if the file is stale |
 | `time_simplify.py` | Times the worker simplify-to-target op (`tests/simplify-timing.html`) and prints the table; not a check, so it stays out of the suite and CI |
 | `embed_demo.py` | Embeds the demo model as `assets/demo/voron-cube.stl.b64.js` |
 | `vendor_libs.py`, `vendor_manifold.py`, `vendor_hershey.py` | Reproducible vendoring of the libraries in `vendor/` |

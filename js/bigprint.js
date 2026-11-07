@@ -1991,6 +1991,11 @@
         let seams = 0, seamsWithPegs = 0, labelled = 0;
         try {
             disposeProxies(); // fresh proxy set per export
+            let viewer = null; // the 3D assembly.html collector; null leaves the export as it was
+            try {
+                viewer = window.AssemblyCore ? AssemblyCore.createCollector({
+                    candidates: totalCells, simplify: CutCore.simplifyToTarget }) : null;
+            } catch (viewerErr) { viewer = null; }
             CC.progress.show("Preparing the model…");
             await new Promise((r) => setTimeout(r, 30)); // let the pill paint
 
@@ -2051,7 +2056,10 @@
                 i++;
                 await new Promise((r) => setTimeout(r)); // keep the UI alive
                 const geo = CutCore.cutGridCell(solid, cell, gap, conn, outerCtx);
-                if (!geo) continue; // the model never enters this cell
+                if (!geo) { // the model never enters this cell
+                    if (viewer) viewer.skip();
+                    continue;
+                }
                 const bytes = fmt === "3mf" ? Core.serialize3MF(geo) : Core.serializeSTL(geo);
                 const file = `Part_${cell.id}.${fmt}`;
                 writer.add(file, bytes);
@@ -2079,7 +2087,22 @@
                 const proxyGoal = Core.proxyTargetFor(
                     totalCells - (i - 1), PROXY_TRI_BUDGET - proxyTris, PROXY_TARGET);
                 if (!proxies.length) proxyFirstTarget = proxyGoal;
+                const proxiesBefore = proxies.length;
                 collectProxy(geo, cell.id, proxyGoal);
+                if (viewer) { // display only — never fail the export over it
+                    try {
+                        geo.computeBoundingBox();
+                        const b = geo.boundingBox, mid = new THREE.Vector3();
+                        b.getCenter(mid);
+                        viewer.add({
+                            id: cell.id, cell: { ci: cell.ci, ri: cell.ri, li: cell.li }, file,
+                            box: { min: [b.min.x, b.min.y, b.min.z], max: [b.max.x, b.max.y, b.max.z] },
+                            center: [mid.x, mid.y, mid.z], engraved: !!info.engraved,
+                            pegs: report ? report.pegs.length : null,
+                            sockets: report ? report.sockets.length : null,
+                        }, proxies.length > proxiesBefore ? proxies[proxies.length - 1].geometry : geo);
+                    } catch (viewerErr) { console.warn("assembly part skipped:", viewerErr); }
+                }
                 geo.dispose(); // streaming: only rows + proxies accumulate
             }
 
@@ -2120,6 +2143,33 @@
                     fellBack: hollow.fellBack,
                 };
             }
+            let assembly = null;
+            CC.progress.update("Building the 3D assembly view…", 1);
+            if (viewer) {
+                try {
+                    const source = await AssemblyViewer.loadSource();
+                    assembly = await viewer.build({
+                        meta: { name: settings.name, exportDate: settings.exportDate,
+                            appVersion: settings.version, scale: settings.scale, size: p.size, gap,
+                            connectors: settings.connectors, grid: g, min },
+                        source,
+                        onStage: (text) => CC.progress.update(text, 1),
+                        shouldStop: () => cancelled || op.cancelled || !op.alive(),
+                    });
+                } catch (viewerErr) {
+                    console.warn("assembly viewer skipped:", viewerErr);
+                    assembly = { ok: false, reason: "error" };
+                }
+                viewer.dispose();
+                if (assembly.reason === "stopped" || cancelled || op.cancelled || !op.alive()) {
+                    cancelled = true;
+                    writer.abort();
+                    CC.progress.hide();
+                    CC.toast("Stopped — nothing more was exported.");
+                    return;
+                }
+                if (assembly.ok) writer.add("assembly.html", assembly.bytes);
+            }
             CC.progress.update("Drawing the assembly map…", 1);
             try {
                 writer.add("assembly-map.png", await renderAssemblyMap(g, occupied, settings, model));
@@ -2128,12 +2178,16 @@
                 CC.toast("The assembly map couldn't be rendered — the zip ships without it.");
             }
             writer.add("manifest.txt",
-                new TextEncoder().encode(Core.buildManifest(rows, settings)));
+                new TextEncoder().encode(Core.buildManifest(rows, settings)
+                    + (assembly ? AssemblyCore.manifestNote(assembly) : "")));
             const files = await writer.end();
 
             CC.bigPrint._lastExport = { parts: rows.length, files, skippedEngravings, rows,
                 seams, seamsWithPegs, labelled,
-                proxies: proxies.length, proxyTruncated, proxySimplified, proxyFirstTarget };
+                proxies: proxies.length, proxyTruncated, proxySimplified, proxyFirstTarget,
+                assembly: assembly ? { ok: assembly.ok, reason: assembly.reason,
+                    sizeBytes: assembly.sizeBytes, parts: assembly.parts, tris: assembly.tris,
+                    halved: assembly.halved } : null };
             exportCompleted = true;
             if (proxies.length) explodeBtn.style.display = "";
             const story = Core.partStory(rows.length, !!settings.hollow);
@@ -2147,6 +2201,10 @@
                     + (skippedEngravings
                         ? ` (${skippedEngravings} had no room — see manifest.txt)` : "") + "."
                     : "")
+                + (assembly ? (assembly.ok ? " Open assembly.html in the zip to see the parts in 3D."
+                    : assembly.reason === "too-big"
+                        ? " The 3D assembly view was left out (too big) — see manifest.txt."
+                        : " The 3D assembly view couldn't be made — see manifest.txt.") : "")
                 + (blocksFailed
                     ? " Solid blocks for connectors and ID labels couldn't be made, so some hollow parts may be missing them."
                     : ""));

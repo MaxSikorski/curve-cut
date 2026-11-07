@@ -186,9 +186,9 @@
         <div class="sc-row">
             <label for="bp-scale">Scale</label>
             <input type="range" id="bp-scale-slider" min="0.1" max="12" step="0.05" value="1">
-            <input type="number" id="bp-scale" step="0.1" min="0.1"><span class="sc-unit">×</span>
+            <input type="number" id="bp-scale" step="any" min="0.01"><span class="sc-unit">×</span>
             <label class="bp-sub" for="bp-size" title="Longest side of the finished model">Size</label>
-            <input type="number" id="bp-size" step="1" min="1"><span class="sc-unit">mm</span>
+            <input type="number" id="bp-size" step="any" min="0.01"><span class="sc-unit">mm</span>
         </div>
         <div class="sc-row bp-hollow-row">
             <span class="bp-hollow-note" id="bp-hollow-note" aria-live="polite"></span>
@@ -196,12 +196,13 @@
         </div>
         <div class="sc-row">
             <label title="Slide the cut grid to dodge fragile features">Nudge</label>
-            <span class="bp-pair"><span class="bp-sub">W</span><input type="number" id="bp-nudge-x" step="1" value="0" title="Slide cuts along the width"></span>
-            <span class="bp-pair"><span class="bp-sub">D</span><input type="number" id="bp-nudge-z" step="1" value="0" title="Slide cuts along the depth"></span>
-            <span class="bp-pair"><span class="bp-sub">H</span><input type="number" id="bp-nudge-y" step="1" value="0" title="Slide cuts up/down"><span class="sc-unit">mm</span></span>
+            <span class="bp-pair"><span class="bp-sub">W</span><input type="number" id="bp-nudge-x" step="any" value="0" title="Slide cuts along the width"></span>
+            <span class="bp-pair"><span class="bp-sub">D</span><input type="number" id="bp-nudge-z" step="any" value="0" title="Slide cuts along the depth"></span>
+            <span class="bp-pair"><span class="bp-sub">H</span><input type="number" id="bp-nudge-y" step="any" value="0" title="Slide cuts up/down"><span class="sc-unit">mm</span></span>
             <span class="bp-pair"><label class="bp-sub" for="bp-gap" title="Gap left between printed parts so they fit together">Gap</label>
             <input type="number" id="bp-gap" step="0.05" min="0" max="0.5" value="0.15"><span class="sc-unit">mm</span></span>
         </div>
+        <div class="sc-row"><span class="bp-nudge-range" id="bp-nudge-range"></span></div>
         <div class="sc-row">
             <label class="sc-check" style="width:auto"><input type="checkbox" id="bp-connectors" checked> Connectors</label>
             <select id="bp-conn-shape" class="bp-conn-shape">

@@ -345,7 +345,7 @@ window.BigPrintCore = (() => {
         }, { level: 6 });
     }
 
-    /* Human-readable manifest for the export zip. rows = [{ id, file, tris,
+    /* Human-readable manifest for the export zip. rows = [{ id, file, size?: {w,d,h}, tris,
        engraved, pegs?, sockets?, thinSeams?, onPad?, noPadRoom? }]; settings includes provenance plus the complete export UI
        state (scale, size, bed, printer, margin, nudge, gap, format, IDs and
        connectors). */
@@ -407,12 +407,16 @@ window.BigPrintCore = (() => {
             : `${plural(r.pegs, "peg")}, ${plural(r.sockets || 0, "socket")}`
                 + (r.thinSeams ? `, ${plural(r.thinSeams, "seam")} too thin` : "");
         const connW = Math.max(26, ...rows.map((r) => rowConn(r).length + 2));
-        L.push("ID        file                 triangles  " + "connectors".padEnd(connW) + "engraved ID");
+        const rowSize = (r) => r.size
+            ? [r.size.w, r.size.d, r.size.h].map((v) => +(+v).toFixed(3)).join(" x ") : "-";
+        const sizeW = Math.max(14, ...rows.map((r) => rowSize(r).length + 2));
+        L.push("ID        file                 " + "W x D x H mm".padEnd(sizeW) + "triangles  "
+            + "connectors".padEnd(connW) + "engraved ID");
         for (const r of rows) {
             const conn = rowConn(r);
             const id = r.engraved ? (r.onPad ? "yes (on a pad)" : "yes")
                 : (r.noPadRoom ? "no (no room for a label pad)" : "no (face too small)");
-            L.push(`${r.id.padEnd(10)}${r.file.padEnd(21)}${String(r.tris).padEnd(11)}${conn.padEnd(connW)}${id}`);
+            L.push(`${r.id.padEnd(10)}${r.file.padEnd(21)}${rowSize(r).padEnd(sizeW)}${String(r.tris).padEnd(11)}${conn.padEnd(connW)}${id}`);
         }
         return L.join("\n");
     }

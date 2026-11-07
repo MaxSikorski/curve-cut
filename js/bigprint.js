@@ -21,6 +21,7 @@
     const marginInput = document.getElementById("bp-margin");
     const fullVolume = document.getElementById("bp-full-volume");
     const fullVolumeNote = document.getElementById("bp-full-volume-note");
+    const nudgeRange = document.getElementById("bp-nudge-range");
     const scaleSlider = document.getElementById("bp-scale-slider");
     const scaleInput = document.getElementById("bp-scale");
     const sizeInput = document.getElementById("bp-size");
@@ -134,20 +135,26 @@
 
     // ------------------------------------------------------- scale linking
 
+    const MIN_SCALE = 0.01, MAX_SCALE = 100;
+    const fmtScale = (k) => String(+k.toFixed(4));
+    const fmtMm = (mm) => String(+mm.toFixed(1));
+    let scaleClamp = null; // "min" / "max" when the last accepted entry hit a limit
+
     function setScale(k, from) {
         if (hollowLocked) { k = 1; from = undefined; } // rewrite all three boxes
-        const nextScale = Math.min(Math.max(k || 1, 0.1), 100);
+        // 0, negative or half-typed values are ignored; the boxes are rewritten on commit
+        if (!(k > 0) || !Number.isFinite(k)) return;
+        scaleClamp = k < MIN_SCALE ? "min" : k > MAX_SCALE ? "max" : null;
+        const nextScale = Math.min(Math.max(k, MIN_SCALE), MAX_SCALE);
         const scaleChanged = Math.abs(nextScale - scale) > 1e-9;
         if (scaleChanged) {
             cancelRepairPrimeTask();
             disposePrintManifoldCache();
         }
         scale = nextScale;
-        if (from !== "scale") scaleInput.value = scale.toFixed(2).replace(/\.?0+$/, "");
+        if (from !== "scale") scaleInput.value = fmtScale(scale);
         if (from !== "slider") scaleSlider.value = Math.min(scale, parseFloat(scaleSlider.max));
-        if (from !== "size") {
-            sizeInput.value = Core.targetForScale(longestSide(), scale).toFixed(0);
-        }
+        if (from !== "size") sizeInput.value = fmtMm(Core.targetForScale(longestSide(), scale));
         refitCamera();
         refresh();
         schedulePrintManifoldWarm();
@@ -172,22 +179,51 @@
     scaleSlider.addEventListener("input", () => setScale(parseFloat(scaleSlider.value), "slider"));
     scaleInput.addEventListener("input", () => setScale(parseFloat(scaleInput.value), "scale"));
     sizeInput.addEventListener("input", () =>
-        setScale(Core.scaleForTarget(longestSide(), parseFloat(sizeInput.value) || 0), "size"));
+        setScale(Core.scaleForTarget(longestSide(), parseFloat(sizeInput.value)), "size"));
+    // Enter or leaving a box: both boxes show the scale that is really used, and a limit says so
+    function commitScaleFields() {
+        if (!active || !model) return;
+        scaleInput.value = fmtScale(scale);
+        sizeInput.value = fmtMm(Core.targetForScale(longestSide(), scale));
+        if (scaleClamp) {
+            const mm = fmtMm(longestSide() * (scaleClamp === "min" ? MIN_SCALE : MAX_SCALE));
+            CC.toast(scaleClamp === "min"
+                ? `Smallest scale is ${MIN_SCALE}× — ${mm} mm is the smallest size for this model.`
+                : `Largest scale is ${MAX_SCALE}× — ${mm} mm is the largest size for this model.`);
+            scaleClamp = null;
+        }
+    }
+    for (const el of [scaleInput, sizeInput]) {
+        el.addEventListener("change", commitScaleFields);
+        el.addEventListener("blur", commitScaleFields);
+    }
 
     for (const el of [marginInput, fullVolume, nudgeX, nudgeY, nudgeZ]) {
         el.addEventListener("input", refresh);
     }
     // A nudge past the "no extra parts" window is cut at the window edge, so show
     // that: on Enter or blur the box is rewritten to the nudge that is really used.
+    // The window edges are rounded inward to 0.01 so the box never shows a value past the real limit.
+    const formatNudge = (v) => String(+v.toFixed(2));
+    const windowEdge = (axis, end) => end === "hi"
+        ? Math.floor(layout.window[axis].hi * 100 + 1e-6) / 100
+        : Math.ceil(layout.window[axis].lo * 100 - 1e-6) / 100;
     for (const [axis, el] of [["x", nudgeX], ["y", nudgeY], ["z", nudgeZ]]) {
-        el.addEventListener("change", () => {
+        const snap = () => {
             if (!active || explodeGroup || !layout || layout.mode[axis] !== "auto") return;
-            const eff = layout.nudge[axis];
-            if (Math.abs(eff - (parseFloat(el.value) || 0)) > 1e-9) {
-                el.value = Math.trunc(eff * 100) / 100;
+            const typed = parseFloat(el.value) || 0;
+            const edge = typed > windowEdge(axis, "hi") ? windowEdge(axis, "hi")
+                : typed < windowEdge(axis, "lo") ? windowEdge(axis, "lo") : null;
+            if (edge !== null) {
+                el.value = formatNudge(edge);
+                refresh();
+            } else if (Math.abs(layout.nudge[axis] - typed) > 1e-9) {
+                el.value = formatNudge(layout.nudge[axis]);
                 refresh();
             }
-        });
+        };
+        el.addEventListener("change", snap);
+        el.addEventListener("blur", snap);
     }
 
     function printManifoldTarget() {
@@ -832,11 +868,23 @@
         const note = document.getElementById("bp-conn-note");
         if (!note) return;
         const wanted = active && model && (connBox.checked || engraveBox.checked);
-        note.textContent = wanted && hollowStatus(model) === "confirmed"
-            ? "Hollow model: each connector and ID label gets a small solid block inside the shell "
+        if (wanted && hollowStatus(model) === "confirmed") {
+            note.textContent = "Hollow model: each connector and ID label gets a small solid block inside the shell "
                 + "so it has plastic to grip (a little extra material). The finish message says "
-                + "how many seams and parts got one."
-            : "";
+                + "how many seams and parts got one.";
+        } else if (active && model && grid) {
+            // solid model: say what the export will do before it runs
+            const shape = connShape.selectedOptions[0] ? connShape.selectedOptions[0].textContent.toLowerCase() : connShape.value;
+            const pegs = Core.cellCount(grid) === 1 ? "One part: no seams, so no connectors."
+                : connBox.checked
+                    ? `Will add ${shape} pegs and sockets (${formatNudge(parseFloat(connSize.value) || 4)} mm, `
+                        + `tolerance ${formatNudge(parseFloat(connTol.value) || 0)} mm) on every seam with room; exact counts after export.`
+                    : "No connectors: parts will need glue only.";
+            note.textContent = pegs + " " + (engraveBox.checked
+                ? "Part IDs will be engraved on each part where there is room." : "No part IDs engraved.");
+        } else {
+            note.textContent = "";
+        }
         note.hidden = !note.textContent;
     }
 
@@ -865,12 +913,12 @@
     function refresh() {
         if (!active || explodeGroup) return; // frozen while exploded
         resetExportConfirmation();
-        fullVolumeNote.hidden = !fullVolume.checked;
-        updateConnNote();
+        fullVolumeNote.hidden = !(fullVolume.checked && connBox.checked);
         model.scale.setScalar(scale);
         const p = params();
         layout = Core.resolveLayout(layout, p);
         grid = layout ? layout.grid : null;
+        updateConnNote();
         removeGrid();
 
         if (!grid) {
@@ -916,7 +964,7 @@
         const count = Core.cellCount(grid);
         const story = Core.partStory(count, sealedHollow(model));
         status.textContent =
-            `Final ${p.size.x.toFixed(0)} × ${p.size.z.toFixed(0)} × ${p.size.y.toFixed(0)} mm` +
+            `Final ${fmtMm(p.size.x)} × ${fmtMm(p.size.z)} × ${fmtMm(p.size.y)} mm` +
             ` · grid ${c.x}×${c.z}×${c.y}` +
             ` · up to ${count.toLocaleString()} part${count === 1 ? "" : "s"}` +
             story.statusSuffix;
@@ -924,15 +972,20 @@
         exportBtn.disabled = false;
 
         // Nudge range is the window where no extra part appears (whole mm for the spinner).
-        for (const [axis, el] of [["x", nudgeX], ["y", nudgeY], ["z", nudgeZ]]) {
-            el.min = Math.ceil(layout.window[axis].lo) || 0;
-            el.max = Math.floor(layout.window[axis].hi) || 0;
+        const ranges = [];
+        for (const [axis, label, el] of [["x", "W", nudgeX], ["z", "D", nudgeZ], ["y", "H", nudgeY]]) {
+            const lo = windowEdge(axis, "lo") || 0, hi = windowEdge(axis, "hi") || 0;
+            el.min = lo;
+            el.max = hi;
+            ranges.push(layout.mode[axis] === "auto" && hi - lo > 0
+                ? `${label} −${formatNudge(-lo)}…+${formatNudge(hi)}` : `${label} fixed`);
             // a bed/printer/scale change can shrink the window under a typed value
             if (layout.mode[axis] === "auto" && document.activeElement !== el
                 && Math.abs(layout.nudge[axis] - (parseFloat(el.value) || 0)) > 1e-9) {
-                el.value = Math.trunc(layout.nudge[axis] * 100) / 100;
+                el.value = formatNudge(layout.nudge[axis]);
             }
         }
+        nudgeRange.textContent = `Range ${ranges.join(" · ")} mm`;
     }
 
     // ------------------------------------------------------------ mode flow
@@ -1109,6 +1162,11 @@
     // connectors change the cell size (pegs reserve room), so re-grid
     connBox.addEventListener("change", () => { refresh(); updateConnNote(); });
     connSize.addEventListener("input", refresh);
+    connSize.addEventListener("change", updateConnNote);
+    for (const el of [connShape, connTol]) {
+        el.addEventListener("input", updateConnNote);
+        el.addEventListener("change", updateConnNote);
+    }
     engraveBox.addEventListener("change", updateConnNote);
 
     let running = false;
@@ -1590,8 +1648,11 @@
                 writer.add(file, bytes);
                 const info = geo.userData || {};
                 const report = info.connectors;
+                geo.computeBoundingBox();
+                const box = geo.boundingBox;
                 rows.push({
                     id: cell.id, file,
+                    size: { w: box.max.x - box.min.x, d: box.max.z - box.min.z, h: box.max.y - box.min.y },
                     tris: geo.getIndex().count / 3,
                     engraved: !!info.engraved,
                     onPad: !!info.onPad,
@@ -1616,8 +1677,7 @@
                 collectProxy(geo, cell.id, proxyGoal);
                 if (viewer) { // display only — never fail the export over it
                     try {
-                        geo.computeBoundingBox();
-                        const b = geo.boundingBox, mid = new THREE.Vector3();
+                        const b = box, mid = new THREE.Vector3();
                         b.getCenter(mid);
                         viewer.add({
                             id: cell.id, cell: { ci: cell.ci, ri: cell.ri, li: cell.li }, file,
@@ -1822,9 +1882,9 @@
         model.geometry.boundingBox.getSize(baseSize);
         scale = model.scale.x || 1;
         syncHollowRow();
-        scaleInput.value = scale.toFixed(2).replace(/\.?0+$/, "");
+        scaleInput.value = fmtScale(scale);
         scaleSlider.value = Math.min(scale, parseFloat(scaleSlider.max));
-        sizeInput.value = Core.targetForScale(longestSide(), scale).toFixed(0);
+        sizeInput.value = fmtMm(Core.targetForScale(longestSide(), scale));
         refitCamera();
         refresh();
         schedulePrintManifoldWarm();

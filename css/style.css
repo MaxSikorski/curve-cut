@@ -1160,6 +1160,8 @@ body.theme-anim * {
         max-width: calc(100vw - 24px);
         overflow-x: auto;
     }
+    /* The mode picker is a view-dock too; keep it a compact row at the top instead of stretching to the bottom dock line. */
+    .mode-dock { top: 76px; bottom: auto; }
     .view-btn { padding: 9px 11px; font-size: 0.75rem; }
 
     .stats-chip {

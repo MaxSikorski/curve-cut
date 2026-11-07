@@ -121,6 +121,9 @@ def in_app_route() -> bool:
             page.on("console", on_console)
             page.goto(page_url("index.html"), wait_until="load")
             page.wait_for_function("window.CurveCut && window.CurveCut.bigPrint", timeout=60_000)
+            page.wait_for_timeout(2800)  # the donate question opens 2.2 s after load and takes focus
+            page.evaluate("() => { const m=document.getElementById('donate-modal'); if (m && getComputedStyle(m).visibility !== 'hidden') document.getElementById('donate-close').click(); }")
+            page.wait_for_function("() => { const o=document.getElementById('donate-overlay'); return !o || getComputedStyle(o).visibility === 'hidden'; }", timeout=10_000)
             i0 = page.evaluate("""() => !!window.CurveCut.assembly &&
                 document.querySelector('#assembly-open-btn')?.textContent.trim() === 'Open assembly file' &&
                 getComputedStyle(document.querySelector('#assembly-open-btn')).visibility === 'visible' &&
@@ -266,11 +269,16 @@ def in_app_route() -> bool:
                     document.documentElement.scrollWidth<=375; }"""))
             escape(); page.set_viewport_size({"width":1280,"height":800})
             page.emulate_media(color_scheme="dark")
+            page.wait_for_timeout(500)  # let the app's own colour-scheme listener finish before the test sets a theme
             page.evaluate("document.body.dataset.theme='light'")
             page.evaluate("""async b64 => { const bin=atob(b64), b=Uint8Array.from(bin,c=>c.charCodeAt(0));
                 await CurveCut.assembly.openFile(new File([b], 'assembly.html')); }""", fixture["base64"]); opened()
+            try: page.wait_for_function("getComputedStyle(document.querySelector('#assembly-mount .ccav')).backgroundColor === 'rgb(245, 245, 247)'", timeout=3000)
+            except Error: pass  # a colour fade can lag a frame; the check below reports the value
             light = page.evaluate("getComputedStyle(document.querySelector('#assembly-mount .ccav')).backgroundColor")
             page.evaluate("document.body.dataset.theme='dark'")
+            try: page.wait_for_function("getComputedStyle(document.querySelector('#assembly-mount .ccav')).backgroundColor === 'rgb(0, 0, 0)'", timeout=3000)
+            except Error: pass
             dark = page.evaluate("getComputedStyle(document.querySelector('#assembly-mount .ccav')).backgroundColor")
             check("I11 app theme overrides OS", light == "rgb(245, 245, 247)" and dark == "rgb(0, 0, 0)")
             escape()
@@ -278,7 +286,11 @@ def in_app_route() -> bool:
             page.wait_for_function("!CurveCut.ops.busy() && CurveCut.pieces.length === 0", timeout=120_000)
             page.evaluate("CurveCut.loadGeometry(new THREE.BoxGeometry(60,60,60), 'cube.stl')")
             page.wait_for_function("!CurveCut.ops.busy() && CurveCut.pieces.length > 0", timeout=120_000)
-            page.evaluate("CurveCut.bigPrint.enter()")
+            for _ in range(40):  # a load's automatic repair holds the op lock and refuses an early enter
+                page.wait_for_function("!CurveCut.ops.busy()", timeout=120_000)
+                page.evaluate("CurveCut.bigPrint.enter()")
+                if page.evaluate("!!CurveCut.bigPrintActive"): break
+                page.wait_for_timeout(500)
             page.evaluate("""() => { const connectors=document.querySelector('#bp-connectors'); connectors.checked=false;
                 connectors.dispatchEvent(new Event('change',{bubbles:true}));
                 for(const [id,value] of [['bp-bed-w',40],['bp-bed-d',40],['bp-bed-h',40],['bp-margin',2]]) {
@@ -454,6 +466,8 @@ def benchy_acceptance() -> bool:
                     # The app must mount the exported bytes, then release its WebGL context.
                     shown = page.is_visible('#bp-view-assembly')
                     if shown:
+                        page.evaluate("() => { const m=document.getElementById('donate-modal'); if (m && getComputedStyle(m).visibility !== 'hidden') document.getElementById('donate-close').click(); }")
+                        page.wait_for_function("() => getComputedStyle(document.getElementById('donate-overlay')).visibility === 'hidden' || !document.getElementById('donate-overlay').classList.contains('active')", timeout=10_000)
                         page.click('#bp-view-assembly')
                         page.wait_for_function("CurveCut.assembly.isOpen() && !gsap.isTweening(document.querySelector('#assembly-overlay'))", timeout=60_000)
                         app_ids = page.evaluate('CurveCut.assembly._handle().ids()')

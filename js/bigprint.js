@@ -979,7 +979,7 @@
 
         // the Pieces panel yields to this panel (it would cover the fields on a phone)
         piecesWasVisible = window.getComputedStyle(piecesPanel).visibility !== "hidden";
-        gsap.killTweensOf([viewDock, actionDock, piecesPanel]); // a load's still-running fade-in must not win
+        gsap.killTweensOf([actionDock, piecesPanel]); // a load's still-running fade-in must not win
         gsap.to([actionDock, piecesPanel], { autoAlpha: 0, y: 10, duration: 0.4, ease: "power2.out" });
         panelCollapse.reset(); // Big Print re-entry always starts expanded
         gsap.fromTo(panel, { y: 16 },

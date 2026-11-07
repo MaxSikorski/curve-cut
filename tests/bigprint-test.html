@@ -735,6 +735,46 @@
         check("solid manifest says solid parts and has no hollow block",
             solidManifest.includes("Hollow: none (solid parts)") && !solidManifest.includes("Wall:")
             && !solidManifest.includes("Material saved"));
+        {
+            // L2 / L3: one mm formatter for the panel and the manifest; scale to 4 significant digits
+            check("fmtMm: 2 decimals under 10 mm, 1 decimal otherwise, whole when whole",
+                B.fmtMm(0.034) === "0.03" && B.fmtMm(5) === "5" && B.fmtMm(9.456) === "9.46"
+                && B.fmtMm(29.5) === "29.5" && B.fmtMm(12.34) === "12.3" && B.fmtMm(300) === "300" && B.fmtMm(24.999999) === "25",
+                [0.034, 5, 9.456, 29.5, 12.34, 24.999999].map(B.fmtMm).join(" "));
+            const tiny = B.buildManifest([], {
+                name: "t", scale: 0.083333333, size: { x: 25.0000001, y: 50, z: 24.96 },
+                bed: { w: 180, d: 180, h: 180 }, printer: "A1 mini", margin: 5,
+                nudge: { x: 0, y: 0, z: 0 }, gap: 0.15, connectors: "off" });
+            check("manifest scale has 4 significant digits and Final size uses the panel's formatter",
+                tiny.includes("Scale: ×0.08333") && !tiny.includes("0.083333")
+                && tiny.includes("Final size (W×D×H): 25 × 25 × 50 mm"), tiny.split("\n").filter((l) => /Scale|Final/.test(l)).join(" | "));
+        }
+        {
+            // T6: the part table lists each part's finished W x D x H
+            const sizeBase = { name: "s", scale: 1, size: { x: 300, y: 600, z: 300 },
+                bed: { w: 500, d: 500, h: 500 }, printer: "SV08 Max", margin: 5,
+                nudge: { x: 0, y: 0, z: 0 }, gap: 0.15, connectors: "off" };
+            const withSize = B.buildManifest([
+                { id: "A1", file: "Part_A1.stl", tris: 100, engraved: true, size: { w: 300, d: 300.0004, h: 308 } },
+                { id: "A1-L2", file: "Part_A1-L2.stl", tris: 90, engraved: false, size: { w: 300, d: 300, h: 299.925 } },
+            ], sizeBase).split("\n");
+            const header = withSize.find((l) => l.startsWith("ID "));
+            const rowA = withSize.find((l) => l.startsWith("A1 ")), rowB = withSize.find((l) => l.startsWith("A1-L2"));
+            check("T6 manifest has a W x D x H mm column right after file",
+                !!header && header.indexOf("W x D x H mm") > header.indexOf("file")
+                && header.indexOf("W x D x H mm") < header.indexOf("triangles"), header);
+            check("T6 manifest sizes are formatted to 3 decimals, trimmed",
+                !!rowA && rowA.includes("300 x 300 x 308") && !!rowB && rowB.includes("300 x 300 x 299.925"),
+                `${rowA} | ${rowB}`);
+            check("T6 size column lines up with the header",
+                !!rowA && !!rowB && rowA.indexOf("300 x 300 x 308") === header.indexOf("W x D x H mm")
+                && rowB.indexOf("300 x 300 x 299.925") === header.indexOf("W x D x H mm"));
+            const noSize = B.buildManifest([{ id: "A1", file: "Part_A1.stl", tris: 12, engraved: false }], sizeBase)
+                .split("\n").find((l) => l.startsWith("A1 "));
+            const noHead = B.buildManifest([{ id: "A1", file: "Part_A1.stl", tris: 12, engraved: false }], sizeBase)
+                .split("\n").find((l) => l.startsWith("ID "));
+            check("T6 rows without size show -", !!noSize && noSize.indexOf("-") === noHead.indexOf("W x D x H mm"), noSize);
+        }
 
         const hollowBase = { name: "h", scale: 1, size: { x: 60, y: 60, z: 60 },
             bed: { w: 256, d: 256, h: 256 }, printer: "A1", margin: 5,

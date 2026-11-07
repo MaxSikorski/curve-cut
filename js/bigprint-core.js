@@ -345,14 +345,19 @@ window.BigPrintCore = (() => {
         }, { level: 6 });
     }
 
-    /* Human-readable manifest for the export zip. rows = [{ id, file, tris,
+    /* One millimetre formatter for the panel and the manifest: 2 decimals under 10 mm,
+       1 decimal otherwise, trailing zeros trimmed. Scale: 4 significant digits. */
+    const fmtMm = (mm) => String(+(+mm).toFixed(Math.abs(mm) < 10 ? 2 : 1));
+    const fmtScale4 = (k) => String(+(+k).toPrecision(4));
+
+    /* Human-readable manifest for the export zip. rows = [{ id, file, size?: {w,d,h}, tris,
        engraved, pegs?, sockets?, thinSeams?, onPad?, noPadRoom? }]; settings includes provenance plus the complete export UI
        state (scale, size, bed, printer, margin, nudge, gap, format, IDs and
        connectors). */
     function buildManifest(rows, s) {
         const L = [];
         const nudge = s.nudge || { x: 0, y: 0, z: 0 };
-        const fmtMm = (v) => String(+(+v).toFixed(2));
+        const fmt2 = (v) => String(+(+v).toFixed(2));
         L.push(`Curve Cut — Big Print manifest`);
         L.push(`Provenance:`);
         L.push(`  Application: Curve Cut`);
@@ -360,12 +365,12 @@ window.BigPrintCore = (() => {
         L.push(`  Export date: ${s.exportDate || "unknown"}`);
         L.push(`  Original model filename: ${s.name}`);
         L.push(`  Settings:`);
-        L.push(`    Scale: ×${s.scale}`);
-        L.push(`    Final size (W×D×H): ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm`);
+        L.push(`    Scale: ×${fmtScale4(s.scale)}`);
+        L.push(`    Final size (W×D×H): ${fmtMm(s.size.x)} × ${fmtMm(s.size.z)} × ${fmtMm(s.size.y)} mm`);
         L.push(`    Printer: ${s.printer}`);
         L.push(`    Bed (W×D×H): ${s.bed.w} × ${s.bed.d} × ${s.bed.h} mm`);
         L.push(`    Margin: ${s.margin} mm`);
-        L.push(`    Nudge (W×D×H): ${fmtMm(nudge.x)} × ${fmtMm(nudge.z)} × ${fmtMm(nudge.y)} mm`);
+        L.push(`    Nudge (W×D×H): ${fmt2(nudge.x)} × ${fmt2(nudge.z)} × ${fmt2(nudge.y)} mm`);
         L.push(`    Assembly gap: ${s.gap} mm`);
         L.push(`    Format: ${s.format || "not recorded"}`);
         L.push(`    Connectors: ${s.connectors}`);
@@ -396,7 +401,7 @@ window.BigPrintCore = (() => {
         L.push(`  Part count: ${rows.length}`);
         L.push("");
         L.push(`Model: ${s.name}`);
-        L.push(`Scale: ×${s.scale} → ${s.size.x.toFixed(0)} × ${s.size.z.toFixed(0)} × ${s.size.y.toFixed(0)} mm (W×D×H)`);
+        L.push(`Scale: ×${fmtScale4(s.scale)} → ${fmtMm(s.size.x)} × ${fmtMm(s.size.z)} × ${fmtMm(s.size.y)} mm (W×D×H)`);
         L.push(`Printer: ${s.printer} (bed ${s.bed.w}×${s.bed.d}×${s.bed.h} mm, margin ${s.margin} mm)`);
         L.push(`Assembly gap: ${s.gap} mm · Connectors: ${s.connectors}`);
         L.push(`Parts: ${rows.length} (grid IDs: columns = letters, rows = numbers, -L2.. = higher layers)`);
@@ -407,12 +412,16 @@ window.BigPrintCore = (() => {
             : `${plural(r.pegs, "peg")}, ${plural(r.sockets || 0, "socket")}`
                 + (r.thinSeams ? `, ${plural(r.thinSeams, "seam")} too thin` : "");
         const connW = Math.max(26, ...rows.map((r) => rowConn(r).length + 2));
-        L.push("ID        file                 triangles  " + "connectors".padEnd(connW) + "engraved ID");
+        const rowSize = (r) => r.size
+            ? [r.size.w, r.size.d, r.size.h].map((v) => +(+v).toFixed(3)).join(" x ") : "-";
+        const sizeW = Math.max(14, ...rows.map((r) => rowSize(r).length + 2));
+        L.push("ID        file                 " + "W x D x H mm".padEnd(sizeW) + "triangles  "
+            + "connectors".padEnd(connW) + "engraved ID");
         for (const r of rows) {
             const conn = rowConn(r);
             const id = r.engraved ? (r.onPad ? "yes (on a pad)" : "yes")
                 : (r.noPadRoom ? "no (no room for a label pad)" : "no (face too small)");
-            L.push(`${r.id.padEnd(10)}${r.file.padEnd(21)}${String(r.tris).padEnd(11)}${conn.padEnd(connW)}${id}`);
+            L.push(`${r.id.padEnd(10)}${r.file.padEnd(21)}${rowSize(r).padEnd(sizeW)}${String(r.tris).padEnd(11)}${conn.padEnd(connW)}${id}`);
         }
         return L.join("\n");
     }
@@ -539,6 +548,6 @@ window.BigPrintCore = (() => {
         resolveLayout, computeGrid, cellCount, gridCells, seamOf, seamGridPositions, seamPlanes,
         serializeSTL, serialize3MF, buildManifest, assemblyMapLayout, assemblyCellRect, assemblyScale, assemblyLabelPx,
         assemblyPanelTitle, explodedPosition, proxyTargetFor, explodeNoteText,
-        colLetter, partId, scaleForTarget, targetForScale, bakedScaleLabel,
+        colLetter, partId, fmtMm, fmtScale4, scaleForTarget, targetForScale, bakedScaleLabel,
         partStory };
 })();

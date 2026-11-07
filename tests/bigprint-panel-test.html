@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+    <style>iframe { width: 1280px; height: 800px; border: 0; }</style>
+</head>
+<body>
+<pre id="log"></pre>
+<iframe id="app"></iframe>
+<script>
+/* The Big Print panel promises what the export delivers, driven through the
+   real app in the frame: F3 Size and Scale agree, F4 nudge limits shown and
+   enforced, F6 part sizes in the manifest, F9 peg note follows Connectors, F10
+   connector and ID plan before export. Run via tools/check_bigprint_panel.py
+   (needs --allow-file-access-from-files). Result in document.title. */
+(() => {
+    "use strict";
+
+    const frame = document.getElementById("app");
+    // no welcome tour (it would take focus); the donation popup then opens a couple of seconds after load: closed below
+    try { localStorage.setItem("curvecut-tour", "done"); } catch (_) { /* ignore */ }
+    frame.src = "../index.html";
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    const fails = [];
+    const check = (name, cond, detail) => {
+        log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!cond) fails.push(name);
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitFor = async (test, timeout = 8000) => {
+        const deadline = performance.now() + timeout;
+        while (performance.now() < deadline) {
+            let ok = false;
+            try { ok = test(); } catch (_) { ok = false; }
+            if (ok) return true;
+            await sleep(25);
+        }
+        try { return !!test(); } catch (_) { return false; }
+    };
+
+    let win, doc, CC;
+    const $ = (id) => doc.getElementById(id);
+    const near = (a, b, tol) => Math.abs(a - b) <= tol;
+    const idle = () => !CC.ops.busy();
+    const toast = () => $("toast-live").textContent;
+    const setValue = (id, value) => {
+        const el = $(id);
+        el.value = String(value);
+        el.dispatchEvent(new win.Event("input", { bubbles: true }));
+        el.dispatchEvent(new win.Event("change", { bubbles: true }));
+    };
+    const setChecked = (id, on) => {
+        const el = $(id);
+        if (el.checked !== on) el.click();
+    };
+    // a value written by script (no user edit): no native change event, only input then blur
+    const scriptEntry = (id, value) => {
+        const el = $(id);
+        el.focus();
+        el.value = String(value);
+        el.dispatchEvent(new win.Event("input", { bubbles: true }));
+        el.blur();
+    };
+    // a real edit through the editing commands, then a real blur
+    const typedEntry = (id, text) => {
+        const el = $(id);
+        el.focus();
+        el.select();
+        doc.execCommand("insertText", false, text);
+        el.blur();
+    };
+    const closeDonation = async () => {
+        const modal = $("donate-modal");
+        if (modal && win.getComputedStyle(modal).visibility !== "hidden" && parseFloat(win.getComputedStyle(modal).opacity) > 0.5) {
+            $("donate-close").click();
+            await sleep(500);
+        }
+    };
+
+    const attach = async () => {
+        await waitFor(() => frame.contentWindow && frame.contentWindow.CurveCut
+            && typeof frame.contentWindow.CurveCut.loadGeometry === "function"
+            && frame.contentWindow.CurveCut.bigPrint && frame.contentWindow.CurveCut.cutFlow, 30000);
+        win = frame.contentWindow; doc = win.document; CC = win.CurveCut;
+        if (CC.tour && CC.tour.isActive()) CC.tour.end();
+        win.showSaveFilePicker = undefined;
+    };
+    const captures = [];
+    const load = async (geometry, name) => {
+        for (let attempt = 0; attempt < 8; attempt++) {
+            await waitFor(idle, 60000);
+            await sleep(300);
+            await waitFor(idle, 60000);
+            CC.loadGeometry(geometry, name);
+            if (CC.pieces.length === 1 && CC.pieces[0].name === name) break;
+        }
+        await waitFor(idle, 60000);
+        await sleep(50);
+        await waitFor(idle, 60000);
+    };
+    const enterBigPrint = async () => {
+        for (let attempt = 0; attempt < 10; attempt++) {
+            await closeDonation();
+            await waitFor(idle, 60000);
+            await sleep(150);
+            await waitFor(idle, 60000);
+            $("bigprint-btn").click();
+            if (await waitFor(() => CC.bigPrint.isActive(), 1500)) break;
+        }
+    };
+    const readCapture = async (cap) => new Uint8Array(await (await win.fetch(cap.href)).arrayBuffer());
+    const partNames = (zip) => Object.keys(zip).filter((n) => /^Part_.*\.(stl|3mf)$/.test(n)).sort();
+    const textOf = (bytes) => new win.TextDecoder().decode(bytes);
+    // extents of a part along the file's own axes: x = W, y = D, z = H (both formats)
+    const extents = (zip, name) => {
+        let xs;
+        if (name.endsWith(".stl")) {
+            const bytes = zip[name];
+            const g = new win.THREE.STLLoader().parse(
+                bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+            g.computeBoundingBox();
+            const b = g.boundingBox;
+            return { w: b.max.x - b.min.x, d: b.max.y - b.min.y, h: b.max.z - b.min.z };
+        }
+        const model = textOf(win.fflate.unzipSync(zip[name])["3D/3dmodel.model"]);
+        xs = { x: [Infinity, -Infinity], y: [Infinity, -Infinity], z: [Infinity, -Infinity] };
+        for (const m of model.matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)) {
+            ["x", "y", "z"].forEach((a, i) => {
+                const v = parseFloat(m[i + 1]);
+                if (v < xs[a][0]) xs[a][0] = v;
+                if (v > xs[a][1]) xs[a][1] = v;
+            });
+        }
+        return { w: xs.x[1] - xs.x[0], d: xs.y[1] - xs.y[0], h: xs.z[1] - xs.z[0] };
+    };
+    const runExport = async () => {
+        captures.length = 0;
+        CC.bigPrint._lastExport = null;
+        await waitFor(() => CC.cutFlow.isEngineReady(), 60000);
+        for (let attempt = 0; attempt < 10; attempt++) {
+            await closeDonation();
+            if (!(await waitFor(idle, 60000))) log(`runExport: still busy with "${CC.ops.busyName()}" after 60 s`);
+            await sleep(100);
+            await waitFor(idle, 60000);
+            $("bp-export").click();
+            if (await waitFor(() => CC.ops.busyName() === "bigprint" || !!CC.bigPrint._lastExport, 1500)) break;
+        }
+        await waitFor(() => !!CC.bigPrint._lastExport || /failed|Stopped/.test(toast()), 300000);
+        await waitFor(idle, 60000);
+        const cap = captures[captures.length - 1];
+        const zip = cap ? win.fflate.unzipSync(await readCapture(cap)) : null;
+        return { result: CC.bigPrint._lastExport, zip, toast: toast() };
+    };
+    const choosePrinter = (text) => {
+        const select = $("bp-printer");
+        const opt = [...select.options].find((o) => o.textContent.startsWith(text));
+        select.value = opt.value;
+        select.dispatchEvent(new win.Event("change", { bubbles: true }));
+    };
+    const connNote = () => $("bp-conn-note").hidden ? "" : $("bp-conn-note").textContent;
+    const fixedState = () => {
+        choosePrinter("SV08 Max");
+        setValue("bp-margin", 5);
+        setValue("bp-gap", 0.15);
+        setChecked("bp-connectors", true);
+        setValue("bp-conn-shape", "hexagon");
+        setValue("bp-conn-size", 10);
+        setValue("bp-conn-tol", 0.25);
+        setChecked("bp-engrave", true);
+        setChecked("bp-full-volume", false);
+        setValue("bp-nudge-x", 0); setValue("bp-nudge-y", 0); setValue("bp-nudge-z", 0);
+        $("bp-format").value = "stl";
+    };
+
+    (async () => {
+        try {
+            await attach();
+            check("P0 harness: Big Print reachable in the frame", !!CC && !!CC.bigPrint);
+            captures.length = 0;
+            win.HTMLAnchorElement.prototype.click = function () {
+                captures.push({ name: this.download, href: this.href });
+            };
+            await sleep(2600); // the donation popup opens ~2.2 s after load
+            await closeDonation();
+            await load(new win.THREE.BoxGeometry(300, 600, 300).toNonIndexed(), "box");
+            await enterBigPrint();
+            check("P0 Big Print is active on a 300 x 300 x 600 box", CC.bigPrint.isActive());
+
+            // ===== F9: the peg note only matters while Connectors is on
+            fixedState();
+            setChecked("bp-connectors", false);
+            setChecked("bp-full-volume", true);
+            const noteOff1 = $("bp-full-volume-note").hidden;
+            setChecked("bp-connectors", true);
+            const noteOn1 = $("bp-full-volume-note").hidden;
+            setChecked("bp-connectors", false);
+            const noteOff2 = $("bp-full-volume-note").hidden;
+            setChecked("bp-full-volume", false);
+            setChecked("bp-connectors", true);
+            setChecked("bp-full-volume", true);
+            const noteOn2 = $("bp-full-volume-note").hidden;
+            setChecked("bp-full-volume", false);
+            check("F9 connectors off + full volume on: note hidden (both orders)", noteOff1 === true && noteOff2 === true,
+                `hidden: off/full ${noteOff1}, on->off ${noteOff2}`);
+            check("F9 connectors back on with full volume on: note shown", noteOn1 === false && noteOn2 === false,
+                `hidden: off->on ${noteOn1}, full after on ${noteOn2}`);
+
+            // ===== F10: the plan before export
+            fixedState();
+            const planOn = "Will add hexagon pegs and sockets (10 mm, tolerance 0.25 mm) on every seam with room; "
+                + "exact counts after export. Part IDs will be engraved on each part where there is room.";
+            const n0 = connNote();
+            check("F10 default plan: hexagon pegs 10 mm, tol 0.25, IDs on", n0 === planOn, n0 || "(empty)");
+            setChecked("bp-connectors", false);
+            const n1 = connNote();
+            check("F10 connectors off", n1 === "No connectors: parts will need glue only. Part IDs will be engraved on each part where there is room.", n1 || "(empty)");
+            setChecked("bp-engrave", false);
+            const n2 = connNote();
+            check("F10 connectors off, IDs off", n2 === "No connectors: parts will need glue only. No part IDs engraved.", n2 || "(empty)");
+            setChecked("bp-connectors", true);
+            const n3 = connNote();
+            check("F10 connectors on, IDs off", n3 === "Will add hexagon pegs and sockets (10 mm, tolerance 0.25 mm) on every seam with room; "
+                + "exact counts after export. No part IDs engraved.", n3 || "(empty)");
+            setChecked("bp-engrave", true);
+            setValue("bp-conn-shape", "circle");
+            const n4 = connNote();
+            check("F10 shape follows the select", n4.startsWith("Will add circle pegs and sockets (10 mm,"), n4 || "(empty)");
+            setValue("bp-conn-size", 8);
+            setValue("bp-conn-tol", 0.3);
+            const n5 = connNote();
+            check("F10 size and tolerance follow the fields", n5.startsWith("Will add circle pegs and sockets (8 mm, tolerance 0.3 mm)"), n5 || "(empty)");
+            check("F10 note is shown", !$("bp-conn-note").hidden);
+            setValue("bp-conn-shape", "hexagon");
+            setValue("bp-conn-size", 10);
+            setValue("bp-conn-tol", 0.25);
+
+            // ===== F6 (and F10 after export): ticket-1 settings, solid
+            for (const fmt of ["stl", "3mf"]) {
+                $("bp-format").value = fmt;
+                const t = performance.now();
+                const e = await runExport();
+                const names = e.zip ? partNames(e.zip) : [];
+                const man = e.zip && e.zip["manifest.txt"] ? textOf(e.zip["manifest.txt"]) : "";
+                const lines = man.split("\n");
+                const header = lines.find((l) => l.startsWith("ID ")) || "";
+                const a1 = lines.find((l) => /^A1 /.test(l)) || "", a1l2 = lines.find((l) => /^A1-L2 /.test(l)) || "";
+                log(`F6 ${fmt} export ${Math.round(performance.now() - t)} ms, ${names.length} parts; header: ${header}`);
+                check(`F6 ${fmt}: manifest rows carry the finished size`,
+                    header.includes("W x D x H mm") && a1.includes("300 x 300 x 308") && a1l2.includes("300 x 300 x 299.925"),
+                    `${a1} | ${a1l2}`);
+                const m1 = names.includes(`Part_A1.${fmt}`) ? extents(e.zip, `Part_A1.${fmt}`) : null;
+                const m2 = names.includes(`Part_A1-L2.${fmt}`) ? extents(e.zip, `Part_A1-L2.${fmt}`) : null;
+                const asText = (m) => m ? `${+m.w.toFixed(3)} x ${+m.d.toFixed(3)} x ${+m.h.toFixed(3)}` : "missing";
+                check(`F6 ${fmt}: manifest sizes equal the measured file boxes (0.001)`,
+                    !!m1 && !!m2
+                        && [m1, m2].every((m, i) => {
+                            const row = i ? a1l2 : a1;
+                            const got = (row.match(/(\d+(?:\.\d+)?) x (\d+(?:\.\d+)?) x (\d+(?:\.\d+)?)/) || []).slice(1).map(Number);
+                            return got.length === 3 && near(got[0], m.w, 0.001) && near(got[1], m.d, 0.001) && near(got[2], m.h, 0.001);
+                        }),
+                    `measured ${asText(m1)} / ${asText(m2)}`);
+                if (fmt === "stl") {
+                    check("F10 after export the counts agree with the plan (1 of 1 seam, 2 of 2 parts)",
+                        e.toast.includes("Connectors on 1 of 1 seam") && e.toast.includes("IDs on 2 of 2 parts")
+                        && man.includes("Connector seams: 1 of 1 got connectors"), e.toast);
+                }
+            }
+
+            // ===== F3: Size and Scale agree (A1 mini)
+            fixedState();
+            choosePrinter("A1 mini");
+            const sizeEntry = (v) => {
+                const el = $("bp-size");
+                el.focus();
+                el.value = String(v);
+                el.dispatchEvent(new win.Event("input", { bubbles: true }));
+                el.dispatchEvent(new win.Event("change", { bubbles: true }));
+                el.blur();
+            };
+            sizeEntry(50);
+            const sc50 = parseFloat($("bp-scale").value);
+            check("F3 typed 50: Size stays 50, Scale ~0.0833, Final 25 x 25 x 50",
+                $("bp-size").value === "50" && near(sc50, 0.0833, 0.00006)
+                && $("bp-status").textContent.startsWith("Final 25 × 25 × 50 mm"),
+                `size ${$("bp-size").value}, scale ${$("bp-scale").value}, ${$("bp-status").textContent}`);
+            $("bp-format").value = "stl";
+            const e50 = await runExport();
+            const n50 = e50.zip ? partNames(e50.zip) : [];
+            const ex50 = n50.includes("Part_A1.stl") ? extents(e50.zip, "Part_A1.stl") : null;
+            const longest50 = ex50 ? Math.max(ex50.w, ex50.d, ex50.h) : NaN;
+            check("F3 typed 50: Part_A1 longest side 50.000 +- 0.01", near(longest50, 50, 0.01),
+                `${longest50.toFixed ? longest50.toFixed(3) : longest50}; parts ${n50.join(",")}`);
+            sizeEntry(59);
+            check("F3 typed 59: Size 59, Final 29.5 x 29.5 x 59",
+                $("bp-size").value === "59" && $("bp-status").textContent.startsWith("Final 29.5 × 29.5 × 59 mm"),
+                `size ${$("bp-size").value}, ${$("bp-status").textContent}`);
+            sizeEntry(60);
+            check("F3 typed 60: Size 60, Scale 0.1, Final 30 x 30 x 60",
+                $("bp-size").value === "60" && $("bp-scale").value === "0.1"
+                && $("bp-status").textContent.startsWith("Final 30 × 30 × 60 mm"),
+                `size ${$("bp-size").value}, scale ${$("bp-scale").value}, ${$("bp-status").textContent}`);
+            check("F10 one part (no seams): says so, IDs sentence stays",
+                connNote() === "One part: no seams, so no connectors. Part IDs will be engraved on each part where there is room.",
+                connNote() || "(empty)");
+            sizeEntry(0);
+            check("F3 typed 0: ignored, field rewritten from the scale on commit",
+                $("bp-size").value === "60" && $("bp-scale").value === "0.1", `size ${$("bp-size").value}, scale ${$("bp-scale").value}`);
+            sizeEntry(3);
+            check("F3 below the 0.01 floor: field shows the smallest size and a toast says why",
+                $("bp-size").value === "6" && $("bp-scale").value === "0.01"
+                && toast().includes("Smallest scale is 0.01× — 6 mm is the smallest size for this model."),
+                `size ${$("bp-size").value}, scale ${$("bp-scale").value}, ${toast()}`);
+            check("L2 tiny model: Final keeps decimals under 10 mm, whole when whole",
+                $("bp-status").textContent.startsWith("Final 3 × 3 × 6 mm"), $("bp-status").textContent);
+            setValue("bp-scale", 250);
+            $("bp-scale").blur();
+            check("F3 above 100x: clamps and says why",
+                $("bp-scale").value === "100" && $("bp-size").value === "60000"
+                && toast().includes("Largest scale is 100×"),
+                `size ${$("bp-size").value}, scale ${$("bp-scale").value}, ${toast()}`);
+            setValue("bp-scale", 1);
+
+            // ===== F11: spinner and arrow keys step by a little, never jump to the minimum
+            fixedState();
+            setValue("bp-scale", 1);
+            await sleep(100);
+            const stepped = (id, dir) => {
+                const el = $(id);
+                el.focus();
+                el[dir]();
+                el.dispatchEvent(new win.Event("input", { bubbles: true }));
+                el.dispatchEvent(new win.Event("change", { bubbles: true }));
+                const v = el.value;
+                el.blur();
+                return v;
+            };
+            const sUp = stepped("bp-scale", "stepUp");
+            const sDown = stepped("bp-scale", "stepDown"), sDown2 = stepped("bp-scale", "stepDown");
+            check("F11 Scale at 1: up 1.01, down 0.99 (then 1 after the matching up)", sUp === "1.01" && sDown === "1" && sDown2 === "0.99",
+                `${sUp} ${sDown} ${sDown2}`);
+            setValue("bp-scale", 1);
+            const zUp = stepped("bp-size", "stepUp"), zDown = stepped("bp-size", "stepDown");
+            check("F11 Size at 600: up 601, back to 600", zUp === "601" && zDown === "600", `${zUp} ${zDown}`);
+            const nUp = stepped("bp-nudge-y", "stepUp"), nDown = stepped("bp-nudge-y", "stepDown");
+            check("F11 Nudge H at 0: up 0.01, back to 0", nUp === "0.01" && nDown === "0",
+                `${nUp} ${nDown}; min ${$("bp-nudge-y").min} step ${$("bp-nudge-y").step}`);
+
+            // ===== F12: a window that shrinks under a typed nudge: the box shows the edge the grid uses
+            fixedState();
+            setValue("bp-scale", 1);
+            setChecked("bp-connectors", false);
+            setChecked("bp-engrave", false);
+            setValue("bp-nudge-y", 100);
+            $("bp-nudge-y").blur();
+            setValue("bp-margin", 52.402); // usable 395.196, so the H window ends at 95.196: off the 0.01 grid
+            await sleep(100);
+            const f12Max = $("bp-nudge-y").max;
+            check("F12 shrunk window: field is the inward edge, never above max",
+                $("bp-nudge-y").value === "95.19" && f12Max === "95.19", `value ${$("bp-nudge-y").value}, max ${f12Max}`);
+            const e12 = await runExport();
+            const man12 = e12.zip && e12.zip["manifest.txt"] ? textOf(e12.zip["manifest.txt"]) : "";
+            const nl = (man12.split("\n").find((l) => l.includes("Nudge (W×D×H)")) || "").trim();
+            check("F12 the export used the shown nudge", nl.endsWith("× 95.19 mm") && !!e12.result, nl);
+            // L6: an emptied nudge box is rewritten on commit
+            setValue("bp-margin", 5);
+            setValue("bp-nudge-y", 12);
+            $("bp-nudge-y").focus();
+            $("bp-nudge-y").value = "";
+            $("bp-nudge-y").dispatchEvent(new win.Event("input", { bubbles: true }));
+            $("bp-nudge-y").blur();
+            check("L6 emptied nudge box shows the effective value on commit", $("bp-nudge-y").value === "0",
+                `[${$("bp-nudge-y").value}]`);
+            setValue("bp-nudge-y", 0);
+
+            // ===== F4: nudge limits (SV08 Max, scale 2)
+            fixedState();
+            setValue("bp-scale", 2);
+            setValue("bp-conn-shape", "circle");
+            setValue("bp-conn-size", 12);
+            setValue("bp-conn-tol", 0.2);
+            await sleep(100);
+            const range = $("bp-nudge-range") ? $("bp-nudge-range").textContent : "(no range element)";
+            check("F4 range text shows the real window, W +-180.4", /W −180\.4…\+180\.4/.test(range), range);
+            scriptEntry("bp-nudge-x", 9999);
+            check("F4 9999 set by script + input, then blur: field 180.4", $("bp-nudge-x").value === "180.4", $("bp-nudge-x").value);
+            scriptEntry("bp-nudge-x", -9999);
+            check("F4 -9999 set by script + input, then blur: field -180.4", $("bp-nudge-x").value === "-180.4", $("bp-nudge-x").value);
+            typedEntry("bp-nudge-x", "9999");
+            check("F4 9999 typed/pasted: field 180.4", $("bp-nudge-x").value === "180.4", $("bp-nudge-x").value);
+            typedEntry("bp-nudge-x", "-9999");
+            check("F4 -9999 typed/pasted: field -180.4", $("bp-nudge-x").value === "-180.4", $("bp-nudge-x").value);
+            check("F4 field limits are the real edges, step 0.01",
+                $("bp-nudge-x").min === "-180.4" && $("bp-nudge-x").max === "180.4" && $("bp-nudge-x").step === "0.01",
+                `${$("bp-nudge-x").min}..${$("bp-nudge-x").max} step ${$("bp-nudge-x").step}`);
+            $("bp-format").value = "stl";
+            scriptEntry("bp-nudge-x", 9999);
+            const over = await runExport();
+            const overNames = over.zip ? partNames(over.zip) : [];
+            scriptEntry("bp-nudge-x", 0);
+            setValue("bp-nudge-x", 180.4);
+            $("bp-nudge-x").blur();
+            const direct = await runExport();
+            const directNames = direct.zip ? partNames(direct.zip) : [];
+            const dimsOf = (e, names, id) => names.includes(`Part_${id}.stl`) ? extents(e.zip, `Part_${id}.stl`) : null;
+            const fmt3 = (m) => m ? [m.w, m.d, m.h].map((v) => v.toFixed(3)).join(" x ") : "missing";
+            const oA = dimsOf(over, overNames, "A1"), oB = dimsOf(over, overNames, "B1");
+            const dA = dimsOf(direct, directNames, "A1"), dB = dimsOf(direct, directNames, "B1");
+            log(`F4 over-limit export: ${overNames.length} parts, A1 ${fmt3(oA)}, B1 ${fmt3(oB)}`);
+            log(`F4 direct 180.4 export: ${directNames.length} parts, A1 ${fmt3(dA)}, B1 ${fmt3(dB)}`);
+            const same = (p, q) => !!p && !!q && near(p.w, q.w, 0.0005) && near(p.d, q.d, 0.0005) && near(p.h, q.h, 0.0005);
+            check("F4 over-limit and direct 180.4 export give identical A1/B1 and 12 parts",
+                overNames.length === 12 && directNames.length === 12 && same(oA, dA) && same(oB, dB),
+                `${overNames.length}/${directNames.length} parts`);
+            check("F4 A1 is 490.000 and B1 has a 119.525 side",
+                !!dA && near(Math.max(dA.w, dA.d, dA.h), 490, 0.0005)
+                && !!dB && [dB.w, dB.d, dB.h].some((v) => near(v, 119.525, 0.0005)),
+                `A1 ${fmt3(dA)}, B1 ${fmt3(dB)}`);
+
+            $("bp-cancel").click();
+            await waitFor(() => !CC.bigPrint.isActive(), 3000);
+        } catch (error) {
+            check("test harness did not throw", false, String(error && error.stack || error));
+        }
+        document.title = fails.length ? "FAIL: " + fails.join(", ") : "PASS";
+    })();
+})();
+</script>
+</body>
+</html>

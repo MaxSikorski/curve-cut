@@ -74,5 +74,7 @@
     }, true);
 
     // let the workspace settle first; skip if the tour got relaunched meanwhile
-    setTimeout(() => { if (!(CC.tour && CC.tour.isActive())) show(); }, 2200);
+    setTimeout(() => {
+        if (!(CC.tour && CC.tour.isActive()) && !(CC.about && CC.about.isOpen())) show();
+    }, 2200);
 })();

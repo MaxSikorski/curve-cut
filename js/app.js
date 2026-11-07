@@ -552,7 +552,6 @@
     const VIEW_KEYS = ["front", "back", "left", "right", "top", "bottom"];
     window.addEventListener("keydown", (e) => {
         if (e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
-        if (window.CurveCut.drawActive) return;
         const i = parseInt(e.key, 10) - 1;
         if (pieces.length && i >= 0 && i < VIEW_KEYS.length) flyTo(VIEW_DIRS[VIEW_KEYS[i]]);
     });

@@ -17,6 +17,8 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 | `check_pen.py`, `check_units.py` | Pen math; units and orientation | fast |
 | `check_api.py` | The page API step A1 (`CC.api` reading tools): tool list parses in Python, `tests/api-test.html`, and the real app answers `invoke` | medium |
 | `check_hollow_panel.py` | The Hollow panel driven through the real app (preview, Confirm, undo, cancel, saved settings) and Big Print on a confirmed hollow (refusals, size lock, exported hollow parts, manifest, phone and tablet reach) | medium |
+| `check_ux_polish.py` | Cut cancellation and recovery; About and tour timing, focus and button labels | medium |
+| `check_small_tickets.py` | Pieces zip names, pen-mode camera keys, About version line | medium |
 | `check_cut_engine.py`, `check_formats.py`, `check_repair.py`, `check_hollow.py` | Cut engine; OBJ/3MF; mesh repair; hollowing | fast to medium |
 | `check_bigprint.py` | Big Print grid math and cell cutter (plus the 6× Benchy acceptance when `test-assets/` has the Benchy) | medium to heavy |
 | `check_bigprint_panel.py` | The Big Print panel against its export on a 300 x 300 x 600 box: Size and Scale agree, nudge limits shown and enforced, part sizes in the manifest (STL and 3MF), peg note, connector and ID plan before export | heavy |
@@ -30,10 +32,11 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 
 Heavy checks use several CPU cores each: run them one at a time.
 
-## Generators (not checks)
+## Generators and measuring tools (not checks)
 | Script | What it does |
 |---|---|
 | `embed_worker.py` | Builds `js/compute-worker-src.js` from the worker shell, Manifold and the core engines; `--check` fails if the file is stale |
 | `embed_viewer.py` | Builds `js/assembly-viewer-src.js` (three.js, OrbitControls, fflate, the viewer and their licence texts as strings) for `assembly.html`; reads `vendor/`, never changes it; `--check` fails if the file is stale |
+| `time_simplify.py` | Times the worker simplify-to-target op (`tests/simplify-timing.html`) and prints the table; not a check, so it stays out of the suite and CI |
 | `embed_demo.py` | Embeds the demo model as `assets/demo/voron-cube.stl.b64.js` |
 | `vendor_libs.py`, `vendor_manifold.py`, `vendor_hershey.py` | Reproducible vendoring of the libraries in `vendor/` |

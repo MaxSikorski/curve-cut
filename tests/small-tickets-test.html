@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+    <style>iframe { width: 1280px; height: 800px; border: 0; }</style>
+</head>
+<body>
+<pre id="log"></pre>
+<iframe id="app"></iframe>
+<script>
+/* Real app tests for three small fixes: Pieces export zip names, camera view
+   keys while drawing a curve, and the version line in About.
+   Run via tools/check_small_tickets.py; results are in document.title. */
+(() => {
+    "use strict";
+    const frame = document.getElementById("app");
+    const log = (message) => { document.getElementById("log").textContent += message + "\n"; };
+    const fails = [];
+    const check = (name, condition, detail = "") => {
+        log(`${condition ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!condition) fails.push(name);
+    };
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const waitFor = async (test, timeout = 8000) => {
+        const deadline = performance.now() + timeout;
+        while (performance.now() < deadline) {
+            try { if (test()) return true; } catch (_) { /* frame is still loading */ }
+            await sleep(10);
+        }
+        try { return !!test(); } catch (_) { return false; }
+    };
+    let win, doc, CC;
+    const $ = (id) => doc.getElementById(id);
+    const visible = (id) => {
+        const el = $(id);
+        if (!el || el.hidden) return false;
+        const cs = win.getComputedStyle(el);
+        return cs.display !== "none" && cs.visibility !== "hidden" && parseFloat(cs.opacity) > 0.5;
+    };
+    const idle = () => !CC.ops.busy();
+    const pageErrors = [];
+    const key = (k) => win.dispatchEvent(new win.KeyboardEvent("keydown", { key: k, bubbles: true }));
+    const closeDonate = async () => {
+        if (!visible("donate-modal")) return;
+        $("donate-close").click();
+        await waitFor(() => !visible("donate-modal"), 3000);
+    };
+    const load = async (geometry, name) => {
+        await waitFor(idle, 60000);
+        CC.loadGeometry(geometry, name);
+        await sleep(300);
+        if (!await waitFor(idle, 60000)) throw new Error("model check did not finish");
+        if (!await waitFor(() => CC.cutFlow.isEngineReady(), 60000)) throw new Error("cut engine did not start");
+        await waitFor(() => visible("view-dock") && !win.gsap.isTweening($("view-dock")), 8000);
+    };
+    // camera direction as the unit vector from the orbit target to the camera
+    const camDir = () => CC.camera.position.clone().sub(CC.controls.target).normalize();
+    const settleCamera = async () => {
+        await sleep(100);
+        await waitFor(() => !win.gsap.isTweening(CC.camera.position) && !win.gsap.isTweening(CC.controls.target), 5000);
+        await sleep(50);
+    };
+    const fmtDir = (d) => `(${d.x.toFixed(4)}, ${d.y.toFixed(4)}, ${d.z.toFixed(4)})`;
+    const sameDir = (a, b) => a.distanceTo(b) < 1e-3;
+
+    // the same download capture the hollow panel test uses
+    const captures = [];
+    const readCapture = async (cap) => new Uint8Array(await (await win.fetch(cap.href)).arrayBuffer());
+
+    const exportAs = async (fmt) => {
+        $("export-fmt").querySelector(`button[data-fmt="${fmt}"]`).click();
+        captures.length = 0;
+        $("export-btn").click();
+        if (!await waitFor(() => captures.length > 0, 15000)) return null;
+        const cap = captures[0];
+        const bytes = await readCapture(cap);
+        return { name: cap.name, entries: win.fflate.unzipSync(bytes) };
+    };
+
+    (async () => {
+        try {
+            localStorage.setItem("curvecut-tour", "done");
+            frame.src = "../index.html";
+            const attached = await waitFor(() => frame.contentWindow && frame.contentWindow.CurveCut
+                && frame.contentWindow.CurveCut.about && frame.contentWindow.CurveCut.tour
+                && frame.contentWindow.CurveCut.pen && frame.contentWindow.CurveCut.cutFlow, 30000);
+            if (!attached) throw new Error("app did not initialize");
+            win = frame.contentWindow; doc = win.document; CC = win.CurveCut;
+            win.addEventListener("error", (event) => pageErrors.push(String(event.message)));
+            if (CC.tour && CC.tour.isActive()) CC.tour.end();
+            win.showSaveFilePicker = undefined;
+            win.HTMLAnchorElement.prototype.click = function () {
+                captures.push({ name: this.download, href: this.href });
+            };
+
+            // ===== 16: version in About
+            $("info-btn").click();
+            await waitFor(() => visible("about-modal"), 4000);
+            const aboutText = $("about-modal").textContent;
+            check("16 the version constant looks like x.y.z", /^\d+\.\d+\.\d+$/.test(CC.VERSION), String(CC.VERSION));
+            check("16 About shows 'Version ' + the constant", aboutText.includes("Version " + CC.VERSION),
+                `constant ${CC.VERSION}`);
+            let manifestLine = "";
+            try {
+                const manifest = win.BigPrintCore.buildManifest([], {
+                    name: "x", version: CC.VERSION, scale: 1, size: { x: 1, y: 1, z: 1 }, printer: "x",
+                    bed: { w: 1, d: 1, h: 1 }, margin: 0, gap: 0, connectors: "off",
+                });
+                manifestLine = (manifest.split("\n").find((l) => l.includes("Version:")) || "").trim();
+            } catch (err) { manifestLine = "buildManifest threw: " + err; }
+            check("16 the manifest prints the same constant", manifestLine === "Version: " + CC.VERSION, manifestLine);
+            $("about-close").click();
+            await waitFor(() => !visible("about-modal"), 4000);
+
+            // ===== 11: Pieces export zip names
+            await load(new win.THREE.BoxGeometry(60, 60, 60).toNonIndexed(), "test box.stl");
+            await sleep(2500); await closeDonate();
+            $("draw-btn").click();
+            doc.querySelector('#mode-dock [data-mode="planar"]').click();
+            if (!await waitFor(() => !$("sc-apply").disabled && visible("simplecut-panel"), 5000))
+                throw new Error("planar controls did not open");
+            $("sc-apply").click();
+            check("11 box cut into 2 pieces", await waitFor(() => CC.pieces.length === 2 && idle(), 120000),
+                `pieces ${CC.pieces.length}`);
+            await waitFor(() => visible("pieces-panel"), 5000);
+            const stl = await exportAs("stl");
+            log(`11 STL zip name: ${stl && stl.name}`);
+            check("11 STL zip is named test-box-2-pieces-stl.zip", !!stl && stl.name === "test-box-2-pieces-stl.zip",
+                stl && stl.name);
+            const stlNames = stl ? Object.keys(stl.entries) : [];
+            check("11 STL zip has 2 .stl entries", stlNames.length === 2 && stlNames.every((n) => n.endsWith(".stl")),
+                stlNames.join(", "));
+            await waitFor(idle, 15000);
+            const mf = await exportAs("3mf");
+            log(`11 3MF zip name: ${mf && mf.name}`);
+            check("11 3MF zip is named test-box-2-pieces-3mf.zip", !!mf && mf.name === "test-box-2-pieces-3mf.zip",
+                mf && mf.name);
+            const mfNames = mf ? Object.keys(mf.entries) : [];
+            check("11 3MF zip has 2 .3mf entries", mfNames.length === 2 && mfNames.every((n) => n.endsWith(".3mf")),
+                mfNames.join(", "));
+            $("export-fmt").querySelector('button[data-fmt="stl"]').click();
+
+            // ===== 14: camera keys while drawing a curve
+            await load(new win.THREE.BoxGeometry(60, 60, 60).toNonIndexed(), "pen box.stl");
+            await closeDonate();
+            doc.querySelector('#view-dock [data-view="top"]').click();
+            await settleCamera();
+            const topDir = camDir();
+            doc.querySelector('#view-dock [data-view="front"]').click();
+            await settleCamera();
+            const frontDir = camDir();
+            check("14 the view buttons give different Front and Top views", !sameDir(topDir, frontDir),
+                `front ${fmtDir(frontDir)} top ${fmtDir(topDir)}`);
+
+            $("draw-btn").click();
+            doc.querySelector('#mode-dock [data-mode="curve"]').click();
+            await waitFor(() => CC.pen.isActive(), 4000);
+            await sleep(1000);
+            const layer = $("draw-layer"), capture = layer.setPointerCapture;
+            layer.setPointerCapture = () => {};
+            try {
+                const pointer = (type, x, y, buttons) => {
+                    const target = doc.elementFromPoint(x, y);
+                    target.dispatchEvent(new win.PointerEvent(type, {
+                        bubbles: true, pointerId: 1, pointerType: "mouse", button: 0,
+                        buttons, clientX: x, clientY: y,
+                    }));
+                };
+                const x = win.innerWidth / 2, y = win.innerHeight / 2;
+                pointer("pointerdown", x - 40, y, 1); pointer("pointerup", x - 40, y, 0);
+                pointer("pointerdown", x + 40, y, 1); pointer("pointerup", x + 40, y, 0);
+            } finally {
+                layer.setPointerCapture = capture;
+            }
+            const before = CC.pen.points ? CC.pen.points() : [];
+            check("14 two curve points placed", before.length === 2, String(before.length));
+            check("14 the camera row stays hidden in pen mode (keys only)", !visible("view-dock"));
+
+            key("5");
+            await settleCamera();
+            const pen5 = camDir();
+            check("14 key 5 in pen mode gives the Top view", sameDir(pen5, topDir),
+                `got ${fmtDir(pen5)} want ${fmtDir(topDir)}`);
+            key("1");
+            await settleCamera();
+            const pen1 = camDir();
+            check("14 key 1 in pen mode gives the Front view again", sameDir(pen1, frontDir),
+                `got ${fmtDir(pen1)} want ${fmtDir(frontDir)}`);
+
+            const after = CC.pen.points ? CC.pen.points() : [];
+            const maxDiff = before.length === after.length && before.length
+                ? Math.max(...before.map((p, i) => Math.max(
+                    Math.abs(p[0] - after[i][0]), Math.abs(p[1] - after[i][1]), Math.abs(p[2] - after[i][2]))))
+                : Infinity;
+            check("14 the curve's point list is unchanged (same count, within 1e-6)",
+                before.length === 2 && after.length === before.length && maxDiff < 1e-6,
+                `${before.length} -> ${after.length} points, max diff ${maxDiff}`);
+
+            $("draw-done").click();
+            check("14 Done makes the curve preview", await waitFor(() => CC.spline && visible("preview-dock"), 5000));
+            await waitFor(idle, 60000);
+            $("cut-apply").click();
+            check("14 Apply cuts the box into 2 pieces", await waitFor(() => CC.pieces.length === 2 && idle(), 120000),
+                String(CC.pieces.length));
+
+            check("No page errors", pageErrors.length === 0, pageErrors.join(" | "));
+        } catch (error) {
+            check("test harness did not throw", false, String(error && error.stack || error));
+        }
+        document.title = fails.length ? "FAIL: " + fails.join(", ") : "PASS";
+    })();
+})();
+</script>
+</body>
+</html>

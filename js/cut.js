@@ -579,6 +579,15 @@
                 return false;
             }
 
+            // A one-sided result did not split any source piece. Keep the
+            // originals and the preview so the cut can be adjusted.
+            if (!results.some((r, i) => CC.pieces.includes(visible[i])
+                && r && r.inside && r.outside)) {
+                disposeCutResults(results);
+                CC.toast("That line doesn't cross the model — draw it across the model to cut.");
+                return false;
+            }
+
             CC.history.capture(); // the outgoing piece set becomes the undo step
 
             let counter = CC.pieces.length;

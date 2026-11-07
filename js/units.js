@@ -11,6 +11,8 @@
     const dimensions = document.getElementById("units-dimensions");
     const target = document.getElementById("units-target");
     const axisSelect = document.getElementById("units-cal-axis");
+    const resetRow = document.getElementById("units-reset-row");
+    const originalSize = document.getElementById("units-original-size");
     const trap = CC.a11y.makeFocusTrap(modal);
     let open = false;
     let nudged = false;
@@ -19,6 +21,10 @@
         const model = CC.pieces.length === 1 ? CC.pieces[0] : null;
         if (!model) return null;
         model.userData.units = model.userData.units || { fileUnit: "mm", upAxis: "y" };
+        if (!model.userData.importSize) {
+            const size = sizeOf(model);
+            model.userData.importSize = { x: size.x, y: size.y, z: size.z };
+        }
         return { model, state: model.userData.units };
     }
 
@@ -35,6 +41,10 @@
         const size = sizeOf(current.model);
         dimensions.textContent =
             `${size.x.toFixed(1)} × ${size.z.toFixed(1)} × ${size.y.toFixed(1)} mm`;
+        const imported = current.model.userData.importSize;
+        const format = (value) => Number(value.toFixed(3)).toString();
+        originalSize.textContent = `Original file: ${format(imported.x)} × ${format(imported.z)} × ${format(imported.y)}`;
+        resetRow.hidden = Math.abs((current.model.userData.unitsFactor || 1) - 1) <= 1e-9;
         for (const button of modal.querySelectorAll("[data-unit]")) {
             const on = button.dataset.unit === current.state.fileUnit;
             button.classList.toggle("on", on);
@@ -99,7 +109,7 @@
             duration: CC.a11y.dur(0.3), ease: "power2.out" });
     }
 
-    function applyGeometryChange(name, mutate, nextState) {
+    function applyGeometryChange(name, mutate, nextState, scale) {
         if (refuseBusy()) return false;
         if (refuseHollow()) return false;
         const current = modelState();
@@ -128,6 +138,10 @@
             next.userData = Object.assign({}, current.model.userData, {
                 units: Object.assign({}, current.state, nextState),
             });
+            if (scale !== undefined) {
+                next.userData.unitsFactor = (current.model.userData.unitsFactor || 1) * scale;
+                if (name === "reset units") next.userData.unitsFactor = 1;
+            }
 
             CC.history.capture();
             CC.scene.remove(current.model);
@@ -158,7 +172,7 @@
         const unit = button.dataset.unit;
         const scale = Core.conversionScale(current.state.fileUnit, unit);
         applyGeometryChange("units", (geometry) => geometry.scale(scale, scale, scale),
-            { fileUnit: unit });
+            { fileUnit: unit }, scale);
     });
 
     modal.querySelector("[data-axis-group]").addEventListener("click", (e) => {
@@ -183,7 +197,15 @@
             return;
         }
         applyGeometryChange("calibration", (geometry) => geometry.scale(scale, scale, scale),
-            {});
+            {}, scale);
+    });
+
+    document.getElementById("units-reset").addEventListener("click", () => {
+        const current = modelState();
+        if (!current) return;
+        const scale = 1 / (current.model.userData.unitsFactor || 1);
+        applyGeometryChange("reset units", (geometry) => geometry.scale(scale, scale, scale),
+            {}, scale);
     });
 
     target.addEventListener("keydown", (e) => {

@@ -33,8 +33,8 @@
     } catch (_) {}
 
     async function timedSimplify(token, target) {
-        const stamps = [];
         const start = performance.now();
+        const stamps = [start];
         const result = await CC.compute.run("simplifyToTarget", { token, target }, {
             cancelGraceMs: 10000,
             onProgress: (progress) => {
@@ -131,7 +131,9 @@
             let buffer = null;
             try {
                 buffer = await (await fetch(path)).arrayBuffer();
-            } catch (_) {}
+            } catch (error) {
+                log(`fetch error: ${error && error.message}`);
+            }
             if (!buffer) {
                 log(`SKIP: ${label} not present`);
                 continue;

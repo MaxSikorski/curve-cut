@@ -22,7 +22,9 @@ def finished(title: str) -> bool:
 
 def main() -> int:
     ensure_playwright()
-    result = run_page(page_url("tests/simplify-timing.html"), REAL_TIME_LIMIT_S, done=finished)
+    # The page fetches ../test-assets/*.stl over file://; that needs this flag.
+    result = run_page(page_url("tests/simplify-timing.html"), REAL_TIME_LIMIT_S, done=finished,
+                      args=("--allow-file-access-from-files",))
     if result.skipped:
         return skip_or_fail(result.skipped)
     if result.log:

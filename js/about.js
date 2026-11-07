@@ -29,11 +29,14 @@
 
     const a11y = window.CurveCut.a11y;
     let open = false;
+    let endedTour = false; // the tour trap moved focus away, so give it back on close
     const trap = a11y.makeFocusTrap(modal);
 
     function show() {
         if (open) return;
-        if (window.CurveCut.tour) window.CurveCut.tour.dismissForAbout();
+        const tour = window.CurveCut.tour;
+        endedTour = !!(tour && tour.isActive());
+        if (tour) tour.dismissForAbout();
         open = true;
         trap.activate();
         gsap.killTweensOf([overlay, modal]);
@@ -46,6 +49,7 @@
         if (!open) return;
         open = false;
         trap.deactivate();
+        if (endedTour) { endedTour = false; document.getElementById("info-btn").focus({ preventScroll: true }); }
         gsap.killTweensOf([overlay, modal]);
         if (immediate === true) {
             gsap.set(overlay, { autoAlpha: 0 });

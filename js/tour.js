@@ -107,6 +107,10 @@
             text: "Cut 3D prints along curves — right in your browser, nothing to "
                 + "install. Hit {label} and we'll tour on the demo cube — or drop "
                 + "your own STL, OBJ, or 3MF anywhere and it continues on that instead.",
+            textLoaded: "Cut 3D prints along curves — right in your browser, nothing to "
+                + "install. Hit {label} to tour on your model.",
+            textLoadedPlain: "Cut 3D prints along curves — right in your browser, nothing to "
+                + "install. Let's tour on your model.",
             waitFor: "curvecut:model-loaded",
             pending: () => !CC.getModel(), // no model on hand yet
             demoOffer: true,
@@ -319,8 +323,11 @@
         const canDemo = waiting && s.demoOffer && !!window.DEMO_MODEL_B64;
         els.next.textContent = s.last ? "Done"
             : canDemo ? "Start now" : waiting ? "Waiting…" : "Next";
-        els.text.textContent = s.text.replace("{label}", els.next.textContent);
         els.next.disabled = !!waiting && !canDemo;
+        if (s.textLoaded && CC.getModel()) { // a model is on hand: no demo cube talk
+            const usable = !els.next.disabled && els.next.textContent !== "Waiting…";
+            els.text.textContent = usable ? s.textLoaded.replace("{label}", els.next.textContent) : s.textLoadedPlain;
+        } else els.text.textContent = s.text.replace("{label}", els.next.textContent);
         // back is locked too — leaving mid-wait would drop the listener that
         // flips demo state when the real completion lands (Max #2)
         els.back.style.visibility = step === 0 ? "hidden" : "visible";
@@ -363,6 +370,7 @@
 
     function start() {
         if (active || (CC.about && CC.about.isOpen())) return;
+        els.always.checked = store() === "always"; // an early end must not erase this
         clearTimeout(autoStartTimer);
         autoStartTimer = null;
         active = true;

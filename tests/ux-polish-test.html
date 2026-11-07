@@ -61,7 +61,7 @@
             win.addEventListener("error", (event) => errors.push(String(event.message)));
             const openedAt = win.performance.now();
             $("info-btn").click();
-            check("About opened in the first 300 ms", openedAt < 300, `${Math.round(openedAt)} ms`);
+            check("About opened before the tour auto-start (1400 ms)", openedAt < 1200, `${Math.round(openedAt)} ms`);
             await sleep(2500);
             check("About stays visible while the automatic tour is suppressed",
                 visible("about-modal") && !visible("tour-card") && !CC.tour.isActive());
@@ -102,6 +102,28 @@
             check("Opening and closing About cancels the pending automatic tour", !fresh.CurveCut.tour.isActive());
             freshFrame.remove();
 
+            // "Show every visit" survives About ending the tour early, and the
+            // donation prompt stays away while About is open.
+            localStorage.setItem("curvecut-tour", "always");
+            const alwaysFrame = document.createElement("iframe");
+            document.body.appendChild(alwaysFrame);
+            alwaysFrame.src = "../index.html";
+            if (!await waitFor(() => alwaysFrame.contentWindow && alwaysFrame.contentWindow.CurveCut
+                && alwaysFrame.contentWindow.CurveCut.about && alwaysFrame.contentWindow.CurveCut.tour, 30000)) throw new Error("always app did not initialize");
+            const aw = alwaysFrame.contentWindow, ad = aw.document;
+            const avis = (id) => { const e = ad.getElementById(id); return !!e && getComputedStyle(e).visibility !== "hidden" && getComputedStyle(e).display !== "none" && Number(getComputedStyle(e).opacity) > 0; };
+            aw.CurveCut.tour.start();
+            await waitFor(() => aw.CurveCut.tour.isActive(), 4000);
+            ad.getElementById("info-btn").click();
+            await sleep(3000);
+            check("Opening About keeps the every-visit tour setting", localStorage.getItem("curvecut-tour") === "always", String(localStorage.getItem("curvecut-tour")));
+            check("Donation prompt stays hidden while About is open", avis("about-modal") && !avis("donate-modal"));
+            ad.getElementById("about-close").click();
+            await sleep(600);
+            check("Closing About returns focus to the info button", ad.activeElement === ad.getElementById("info-btn"), String(ad.activeElement && ad.activeElement.id));
+            alwaysFrame.remove();
+            localStorage.removeItem("curvecut-tour");
+
             await waitFor(idle, 60000);
             CC.loadGeometry(new win.THREE.SphereGeometry(60, 200, 200).toNonIndexed(), "dense sphere");
             await sleep(300);
@@ -114,6 +136,7 @@
             await waitFor(() => visible("tour-card"), 4000);
             check("Loaded-model step one names its primary button", $("tour-next").textContent === "Next"
                 && $("tour-text").textContent.includes($("tour-next").textContent), $("tour-text").textContent);
+            check("Loaded-model step one does not mention the demo cube", !/demo cube/i.test($("tour-text").textContent), $("tour-text").textContent);
             CC.tour.end();
             await waitFor(() => !visible("tour-card"), 4000);
 

@@ -153,14 +153,19 @@
             const packed = AC.packMesh(sphere);
             const out = AC.unpackMesh(Object.assign({ offset: 0 }, packed), packed.data);
             const pos = sphere.getAttribute("position");
-            let worst = true;
+            let worst = true, maxOver = 0;
             for (let i = 0; i < pos.count; i++) {
                 for (let a = 0; a < 3; a++) {
-                    const err = Math.abs(out.position[i * 3 + a] - pos.array[i * 3 + a]);
-                    if (err > packed.step[a] / 2 + 1e-6) worst = false;
+                    const v = pos.array[i * 3 + a];
+                    const err = Math.abs(out.position[i * 3 + a] - v);
+                    // half a quantisation step, plus float32 rounding of both stored values
+                    const slack = 2 * Math.abs(v) * Math.pow(2, -23) + 1e-9;
+                    maxOver = Math.max(maxOver, err - packed.step[a] / 2);
+                    if (err > packed.step[a] / 2 + slack) worst = false;
                 }
             }
-            check("C3 every vertex within step/2", worst && out.position.length === pos.array.length);
+            check("C3 every vertex within step/2", worst && out.position.length === pos.array.length,
+                `worst excess over step/2 ${maxOver.toExponential(2)}, step ${packed.step.map((x) => x.toExponential(2)).join("/")}`);
             const idx = sphere.getIndex().array;
             check("C3 indices identical", out.index.length === idx.length
                 && out.index.every((v, i) => v === idx[i]));

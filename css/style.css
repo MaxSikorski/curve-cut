@@ -709,13 +709,10 @@ p { line-height: 1.6; color: inherit; opacity: 0.85; }
     flex-shrink: 0;
 }
 .bp-x { font-size: 0.75rem; color: var(--text-muted); }
+/* a label, its box and its unit stay together when a row wraps */
+.bp-pair { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+#bp-scale:disabled, #bp-scale-slider:disabled, #bp-size:disabled { opacity: 0.5; cursor: not-allowed; }
 .bp-conn-shape { flex: 0 0 auto !important; width: 104px; }
-.bp-hollow-hint {
-    flex: 1;
-    color: var(--text-muted);
-    font-size: 0.75rem;
-    white-space: nowrap;
-}
 /* Hollow panel (js/hollow.js) */
 .hollow-hint {
     flex: 1;
@@ -749,18 +746,14 @@ p { line-height: 1.6; color: inherit; opacity: 0.85; }
     gap: 2px;
 }
 .hollow-warning-hard { font-weight: 700; }
-.bp-hollow-teaser {
+.bp-hollow-row .view-btn { flex: 0 0 auto; }
+.bp-hollow-note {
+    flex: 1;
     color: var(--text-muted);
     font-size: 0.75rem;
-}
-.bp-hollow-row .view-btn { flex: 0 0 auto; }
-.bp-hollow-status {
     text-align: left;
-    padding-left: 62px;
-    color: var(--text-color);
-    opacity: 0.85;
 }
-.bp-hollow-warning-hard { font-weight: 700; }
+.hollow-lamp-row .view-btn { flex: 0 0 auto; }
 
 .nav-actions { display: flex; gap: 4px; align-items: center; }
 
@@ -1139,6 +1132,11 @@ body.theme-anim * {
 .nonwatertight-actions .btn { white-space: nowrap; }
 
 @media (max-width: 480px) {
+    /* Big Print rows wrap instead of running off the panel's right edge */
+    #bigprint-panel .sc-row { flex-wrap: wrap; row-gap: 6px; }
+    #bigprint-panel .sc-row input[type="number"] { width: 60px; }
+    #bigprint-panel .sc-row input[type="range"] { min-width: 72px; }
+    .hollow-lamp-row { flex-wrap: wrap; }
     .modal { padding: 28px; }
     .action-dock .btn { padding: 10px 14px; font-size: 0.85rem; }
     .modal-actions { justify-content: stretch; flex-direction: column-reverse; }
@@ -1152,6 +1150,17 @@ body.theme-anim * {
 
 @media (max-width: 768px) {
     .header-nav { padding: 20px; }
+
+    /* Big Print's panel needs the room the view dock takes */
+    body.bigprint-active #view-dock { display: none; }
+    /* the panel scrolls when the screen is short; the collapse chevron moves inside so scrolling can't clip it */
+    #bigprint-panel {
+        max-height: calc(100vh - 96px);
+        max-height: calc(100dvh - 96px);
+        overflow-y: auto;
+        padding-top: 34px;
+    }
+    #bigprint-panel .panel-collapse-btn { top: 4px; }
 
     .view-dock {
         bottom: 16px;

@@ -198,5 +198,9 @@
     }
 
     exportBtn.addEventListener("click", exportVisible);
+    // another panel may have hidden this one before a new model replaced the pieces: let the next rebuild fade it in
+    window.addEventListener("curvecut:model-loaded", () => {
+        if (gsap.isTweening(panel) || getComputedStyle(panel).visibility === "hidden") shown = false; // mid-fade counts as hidden
+    });
     window.addEventListener("curvecut:pieces-changed", rebuild);
 })();

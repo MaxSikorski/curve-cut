@@ -365,22 +365,6 @@
                 + " (the cavity stays sealed — pick a smaller bed or bigger scale for open shells)"
             && hollowStory.exportLabel === "1 sealed hollow part", JSON.stringify(hollowStory));
 
-        const savings34 = B.hollowSavingsStory(34, 6);
-        check("34% savings gets teaser and numeric status",
-            savings34.teaser.includes("34") && savings34.status.includes("34"),
-            JSON.stringify(savings34));
-        const savings12 = B.hollowSavingsStory(12, 6);
-        check("12% savings gets no teaser and numeric status",
-            savings12.teaser === null && savings12.status.includes("12"),
-            JSON.stringify(savings12));
-        for (const savedPct of [5, 0, -314]) {
-            const story = B.hollowSavingsStory(savedPct, 6);
-            const rendered = `${story.teaser || ""} ${story.status}`;
-            check(`${savedPct}% savings gets not-worth wording without a negative number`,
-                story.teaser === null && story.status.toLowerCase().includes("not worth")
-                    && !/-\d/.test(rendered), JSON.stringify(story));
-        }
-
         // ====================================== step 3: streaming cell cutter
 
         await CutCore.init();
@@ -748,7 +732,32 @@
             bed: { w: 256, d: 256, h: 256 }, printer: "A1", margin: 5,
             nudge: { x: 0, y: 0, z: 0 }, gap: 0.15, connectors: "off",
         });
-        check("un-hollowed manifest has no hollow block", !solidManifest.includes("Hollow:"));
+        check("solid manifest says solid parts and has no hollow block",
+            solidManifest.includes("Hollow: none (solid parts)") && !solidManifest.includes("Wall:")
+            && !solidManifest.includes("Material saved"));
+
+        const hollowBase = { name: "h", scale: 1, size: { x: 60, y: 60, z: 60 },
+            bed: { w: 256, d: 256, h: 256 }, printer: "A1", margin: 5,
+            nudge: { x: 0, y: 0, z: 0 }, gap: 0.15, connectors: "off" };
+        const mHa = B.buildManifest([], { ...hollowBase,
+            hollow: { wallMm: 2.4, savedPct: 81.3, engineUsed: "grid", fellBack: false,
+                openFaces: ["Bottom"], closedFaces: [], holes: 0 } });
+        check("manifest lists open faces and drilled holes",
+            mHa.includes("Open faces: Bottom") && mHa.includes("Drilled holes: 0")
+            && !mHa.includes("Asked to open") && !mHa.includes("Hollow: none"));
+        check("manifest hollow lines come in the agreed order",
+            ["Hollow:", "Wall: 2.4 mm", "Open faces: Bottom", "Drilled holes: 0", "Material saved: 81.3%",
+                "Engine: grid", "Fallback: no"].map((t) => mHa.indexOf(t))
+                .every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1])));
+        const mHb = B.buildManifest([], { ...hollowBase,
+            hollow: { wallMm: 2.4, savedPct: 50, engineUsed: "grid", fellBack: false,
+                openFaces: [], closedFaces: ["Bottom"], holes: 2 } });
+        check("manifest names faces asked open but left closed, and the hole count",
+            mHb.includes("Open faces: none") && mHb.includes("Asked to open but left closed: Bottom")
+            && mHb.includes("Drilled holes: 2"));
+        check("manifest receipt without the new fields still prints",
+            manifest.includes("Open faces: none") && manifest.includes("Drilled holes: 0")
+            && !manifest.includes("Asked to open"));
 
         // ===================== step 8: hollow seams (solid bosses + label pads)
 

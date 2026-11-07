@@ -16,7 +16,7 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 | `check_smoke.py` | The app starts and loads a model with no page errors (`--root DIR` tests another tree, e.g. a release) | fast |
 | `check_pen.py`, `check_units.py` | Pen math; units and orientation | fast |
 | `check_api.py` | The page API step A1 (`CC.api` reading tools): tool list parses in Python, `tests/api-test.html`, and the real app answers `invoke` | medium |
-| `check_hollow_panel.py` | The Hollow panel driven through the real app (preview, Confirm, undo, cancel, saved settings) | medium |
+| `check_hollow_panel.py` | The Hollow panel driven through the real app (preview, Confirm, undo, cancel, saved settings) and Big Print on a confirmed hollow (refusals, size lock, exported hollow parts, manifest, phone and tablet reach) | medium |
 | `check_ux_polish.py` | Cut cancellation and recovery; About and tour timing, focus and button labels | medium |
 | `check_small_tickets.py` | Pieces zip names, pen-mode camera keys, About version line | medium |
 | `check_cut_engine.py`, `check_formats.py`, `check_repair.py`, `check_hollow.py` | Cut engine; OBJ/3MF; mesh repair; hollowing | fast to medium |
@@ -26,7 +26,7 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 | `check_memory.py` | Worker memory stats and recycle | heavy |
 | `check_property.py` | Random-seed invariants for cuts and hollows | heavy |
 | `check_race.py` | Eight operation-coordinator race scenarios (`index.html#racetest`) | heavy |
-| `check_perf.py`, `check_perf_medium.py`, `check_perf_real.py` | Speed and memory budgets; `check_perf_real` needs the private large test model, strict budgets with `CURVECUT_PERF_STRICT=1` | heavy |
+| `check_perf.py`, `check_perf_medium.py`, `check_perf_real.py` | Speed and memory budgets; `check_perf_real` needs the private large test model, times the Hollow panel (preview, Confirm) on it, strict budgets with `CURVECUT_PERF_STRICT=1` | heavy |
 | `check_benchy.py` | 3DBenchy wavy-cut acceptance (needs `test-assets/3DBenchy.stl`) | heavy |
 
 Heavy checks use several CPU cores each: run them one at a time.

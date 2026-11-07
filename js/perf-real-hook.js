@@ -1,12 +1,14 @@
 /* Curve Cut — real-model performance harness (v2.1p perf lane)
    Runs ONLY when the page is opened as index.html#perfreal (real-time CDP via
    tools/check_perf_real.py). Loads the local 512k-triangle test model through the file
-   input, declines simplification, times auto-repair, measures hollow's two
-   UI beats, applies a curve cut, and records the post-GC JS heap slice.
+   input, declines simplification, times auto-repair, times the Hollow panel
+   (lamp wall, preview then Confirm) and checks Big Print locks the scale on the
+   confirmed hollow, undoes it, applies a curve cut, and records the post-GC JS
+   heap slice.
 
    Final document.title format, parsed strictly by the launcher:
-   "PERFREAL load=<ms> repair=<ms> ltout=<ms> ltsan=<ms> hsave=<ms>"
-   " hsettle=<ms> cut=<ms> heap=<MB>"
+   "PERFREAL load=<ms> repair=<ms> ltout=<ms> ltsan=<ms> hprev=<ms>"
+   " hconf=<ms> cut=<ms> heap=<MB>"
    `ltout` and `ltsan` are the worst long tasks outside and inside a recorded
    CC.ops interval; `heap` is performance.memory.usedJSHeapSize in MB.
    Inert for normal users. */
@@ -108,19 +110,6 @@
         return detail && /\bhole[s]? capped\b/i.test(detail.textContent);
     };
 
-    const savingsVisible = () => {
-        const status = document.getElementById("bp-hollow-status");
-        return status && /(?:Hollowing could save|Not worth hollowing)/i.test(status.textContent);
-    };
-
-    const hollowSettled = () => {
-        const status = document.getElementById("bp-hollow-status");
-        if (!status) return false;
-        const text = status.textContent.trim();
-        return text.length > 0 && !/Checking walls…/.test(text) &&
-            /(?:coarse preview|warnings:)/i.test(text);
-    };
-
     let stage = "start";
 
     (async () => {
@@ -145,21 +134,42 @@
             const repairMs = performance.now() - repairStart;
             await waitFor(() => !CC.ops.busy(), "repair operation end", 60000);
 
-            stage = "hollow";
+            stage = "hollow-preview";
+            document.getElementById("hollow-btn").click();
+            await waitFor(() => CC.hollow.isOpen(), "Hollow panel", 60000);
+            const lamp = document.getElementById("hollow-lamp"); // lamp: 2.4 mm wall, open bottom
+            lamp.checked = true;
+            lamp.dispatchEvent(new Event("change", { bubbles: true }));
+            const hollowStatusText = () => document.getElementById("hollow-status").textContent;
+            const previewStart = performance.now();
+            document.getElementById("hollow-preview").click();
+            await waitFor(() => !document.getElementById("hollow-confirm").disabled
+                || /failed|too big|cancelled/i.test(hollowStatusText()), "hollow preview", 600000);
+            if (document.getElementById("hollow-confirm").disabled) {
+                throw new Error(`hollow preview did not finish: ${hollowStatusText()}`);
+            }
+            const hollowPreviewMs = performance.now() - previewStart;
+
+            stage = "hollow-confirm";
+            const confirmStart = performance.now();
+            document.getElementById("hollow-confirm").click();
+            await waitFor(() => CC.hollow.status() === "confirmed" && !CC.ops.busy(),
+                "hollow confirm", 60000);
+            const hollowConfirmMs = performance.now() - confirmStart;
+
+            stage = "hollow-bigprint";
+            await sleep(900); // the panel's close fade must finish before Big Print opens
             document.getElementById("bigprint-btn").click();
             await waitFor(() => CC.bigPrintActive === true, "Big Print entry", 60000);
-            const hollowOn = document.getElementById("bp-hollow-on");
-            hollowOn.click();
-            const hollowWall = document.getElementById("bp-hollow-wall");
-            hollowWall.value = "1.6";
-            const hollowStart = performance.now();
-            hollowWall.dispatchEvent(new Event("input", { bubbles: true }));
-            await waitFor(savingsVisible, "hollow savings text");
-            const hollowSavingsMs = performance.now() - hollowStart;
-            await waitFor(hollowSettled, "hollow warnings or settled status");
-            const hollowSettleMs = performance.now() - hollowStart;
+            if (!document.getElementById("bp-scale").disabled) {
+                throw new Error("Big Print did not lock the scale on the confirmed hollow");
+            }
             document.getElementById("bp-cancel").click();
             await waitFor(() => !CC.bigPrintActive, "Big Print exit", 60000);
+
+            stage = "hollow-undo";
+            document.getElementById("undo-btn").click();
+            await waitFor(() => CC.hollow.status() === "none" && !CC.ops.busy(), "hollow undo", 60000);
 
             stage = "cut";
             const c = CC.getModelCenter();
@@ -198,8 +208,8 @@
                 " repair=" + Math.round(repairMs) +
                 " ltout=" + Math.round(longOutside) +
                 " ltsan=" + Math.round(longSanctioned) +
-                " hsave=" + Math.round(hollowSavingsMs) +
-                " hsettle=" + Math.round(hollowSettleMs) +
+                " hprev=" + Math.round(hollowPreviewMs) +
+                " hconf=" + Math.round(hollowConfirmMs) +
                 " cut=" + Math.round(cutMs) +
                 " heap=" + heapMB.toFixed(1);
         } catch (err) {

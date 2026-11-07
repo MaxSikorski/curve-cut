@@ -120,6 +120,7 @@
             <p class="hero-subtitle">Cut 3D prints along curves, not flat planes.<br>Drop an STL, OBJ, or 3MF anywhere to begin.</p>
             <div class="hero-cta">
                 <button class="btn primary-btn" id="open-file-btn">Open Model</button>
+                <button class="btn secondary-btn" id="assembly-open-btn" title="View the assembly.html from a Big Print zip, or the zip itself">Open assembly file</button>
             </div>
         </div>
     </div>
@@ -225,6 +226,7 @@
         <div class="sc-footer">
             <div class="sc-actions">
                 <button class="view-btn" id="bp-explode" style="display:none">Exploded view</button>
+                <button class="view-btn" id="bp-view-assembly" style="display:none" title="Open the 3D assembly view of the parts you just exported">View assembly</button>
             </div>
             <div class="sc-actions">
                 <select id="bp-format" class="bp-conn-shape" title="File format for the exported parts">
@@ -266,6 +268,14 @@
                 <button class="view-btn view-btn-primary" id="hollow-confirm" disabled>Confirm</button>
             </div>
         </div>
+    </div>
+
+    <div class="assembly-overlay" id="assembly-overlay" role="dialog" aria-modal="true" aria-labelledby="assembly-title">
+        <div class="assembly-bar">
+            <h2 class="assembly-title" id="assembly-title">3D assembly view</h2>
+            <button class="view-btn" id="assembly-close" aria-label="Close the 3D assembly view">Close</button>
+        </div>
+        <div class="assembly-mount" id="assembly-mount"></div>
     </div>
 
     <!-- Pieces panel -->
@@ -426,6 +436,7 @@
     </div>
 
     <input type="file" id="file-input" accept=".stl,.obj,.3mf" hidden>
+    <input type="file" id="assembly-file-input" accept=".html,.htm,.zip" hidden>
 
     <script src="vendor/three/three.min.js"></script>
     <script src="vendor/three/OrbitControls.js"></script>
@@ -457,6 +468,8 @@
     <script src="js/assembly-viewer.js"></script><!-- the viewer; its big source loads only on export -->
     <script src="js/bigprint-core.js"></script>
     <script src="js/bigprint.js"></script>
+    <script src="js/assembly-open-core.js"></script>
+    <script src="js/assembly-open.js"></script>
     <script src="js/pieces.js"></script>
     <script src="js/simplify.js"></script>
     <script src="js/history.js"></script>

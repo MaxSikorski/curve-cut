@@ -1249,6 +1249,7 @@
         proxySimplified = false;
         proxyFirstTarget = PROXY_TARGET;
         explodeBtn.style.display = "none";
+        if (CC.assembly) CC.assembly.offer(null); // the 3D view button lives and dies with the exploded view
     }
 
     function updateExplode() {
@@ -1801,6 +1802,7 @@
                     halved: assembly.halved } : null };
             exportCompleted = true;
             if (proxies.length) explodeBtn.style.display = "";
+            if (assembly && assembly.ok && CC.assembly) CC.assembly.offer(assembly.bytes);
             const story = Core.partStory(rows.length, sealedHollow(model));
             const choice = receipt ? ` · hollow, ${+receipt.wallMm.toFixed(2)} mm wall` : " · solid parts";
             CC.toast(`Big Print done — ${story.exportLabel} in `

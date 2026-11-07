@@ -94,6 +94,18 @@
         if (!await waitFor(() => visible("units-modal"), 5000)) throw new Error("Units did not open");
     };
 
+    // A click is refused (modal stays open) if an automatic repair grabs the op lock
+    // between the idle check and the click, so click again until the modal closes.
+    const clickUntilClosed = async (el, what) => {
+        const end = Date.now() + 30000;
+        while (Date.now() < end) {
+            if (!visible("units-modal")) return;
+            if (idle()) el.click();
+            if (await waitFor(() => !visible("units-modal"), 1500)) return;
+        }
+        throw new Error(`Units did not close after ${what}`);
+    };
+
     // the same download capture the hollow panel test uses
     const captures = [];
     const readCapture = async (cap) => new Uint8Array(await (await win.fetch(cap.href)).arrayBuffer());
@@ -285,22 +297,19 @@
             await closeDonate();
             await waitFor(idle, 60000); // a load's automatic repair holds the op lock
             await openUnits();
-            $("units-modal").querySelector('[data-unit="cm"]').click();
-            if (!await waitFor(() => !visible("units-modal"), 5000)) throw new Error("Units did not close after unit change");
+            await clickUntilClosed($("units-modal").querySelector('[data-unit="cm"]'), "unit change");
             await waitFor(idle, 60000); // a load's automatic repair holds the op lock
             await openUnits();
             $("units-cal-axis").value = "W";
             $("units-target").value = "32";
-            $("units-apply-cal").click();
-            if (!await waitFor(() => !visible("units-modal"), 5000)) throw new Error("Units did not close after calibration");
+            await clickUntilClosed($("units-apply-cal"), "calibration");
             check("15 calibration produces 32 mm width", Math.abs(boxSize().x - 32) <= 1e-6, String(boxSize().x));
             await openUnits();
             check("15 reset row shows the original file dimensions", visible("units-reset-row")
                 && $("units-reset-row").textContent.includes("1.6 × 1.2 × 0.8"), $("units-reset-row").textContent.trim());
             await waitFor(idle, 60000); // a load's automatic repair holds the op lock
             const resetUndoBefore = undoCount();
-            $("units-reset").click();
-            if (!await waitFor(() => !visible("units-modal"), 5000)) throw new Error("Units did not close after reset");
+            await clickUntilClosed($("units-reset"), "reset");
             const resetSize = boxSize();
             check("15 reset restores all three dimensions", Math.abs(resetSize.x - 1.6) <= 1e-6
                 && Math.abs(resetSize.z - 1.2) <= 1e-6 && Math.abs(resetSize.y - 0.8) <= 1e-6,

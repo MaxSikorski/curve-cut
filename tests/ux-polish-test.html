@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+    <style>iframe { width: 1280px; height: 800px; border: 0; }</style>
+</head>
+<body>
+<pre id="log"></pre>
+<iframe id="app"></iframe>
+<script>
+/* Real app tests for cut cancellation and the About/tour interaction.
+   Run via tools/check_ux_polish.py; results are in document.title. */
+(() => {
+    "use strict";
+    const frame = document.getElementById("app");
+    const log = (message) => { document.getElementById("log").textContent += message + "\n"; };
+    const fails = [];
+    const check = (name, condition, detail = "") => {
+        log(`${condition ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
+        if (!condition) fails.push(name);
+    };
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const waitFor = async (test, timeout = 8000) => {
+        const deadline = performance.now() + timeout;
+        while (performance.now() < deadline) {
+            try { if (test()) return true; } catch (_) { /* frame is still loading */ }
+            await sleep(10);
+        }
+        try { return !!test(); } catch (_) { return false; }
+    };
+    const errors = [];
+    let win, doc, CC;
+    const $ = (id) => doc.getElementById(id);
+    const visible = (id) => {
+        const el = $(id);
+        if (!el || el.hidden) return false;
+        const cs = win.getComputedStyle(el);
+        return cs.display !== "none" && cs.visibility !== "hidden" && parseFloat(cs.opacity) > 0.5;
+    };
+    const idle = () => !CC.ops.busy();
+    const lastToast = () => {
+        const entries = doc.querySelectorAll(".toast .stats-name");
+        return entries.length ? entries[entries.length - 1].textContent : "";
+    };
+    const openPlanar = async () => {
+        await waitFor(idle, 60000);
+        $("draw-btn").click();
+        doc.querySelector('#mode-dock [data-mode="planar"]').click();
+        return waitFor(() => !$("sc-apply").disabled && visible("simplecut-panel"), 5000);
+    };
+
+    (async () => {
+        try {
+            localStorage.removeItem("curvecut-tour");
+            frame.src = "../index.html";
+            const attached = await waitFor(() => frame.contentWindow && frame.contentWindow.CurveCut
+                && frame.contentWindow.CurveCut.about && frame.contentWindow.CurveCut.tour, 30000);
+            if (!attached) throw new Error("app did not initialize");
+            win = frame.contentWindow; doc = win.document; CC = win.CurveCut;
+            win.addEventListener("error", (event) => errors.push(String(event.message)));
+            const openedAt = win.performance.now();
+            $("info-btn").click();
+            check("About opened in the first 300 ms", openedAt < 300, `${Math.round(openedAt)} ms`);
+            await sleep(2500);
+            check("About stays visible while the automatic tour is suppressed",
+                visible("about-modal") && !visible("tour-card") && !CC.tour.isActive());
+            CC.tour.start();
+            check("Tour cannot start while About is open", !CC.tour.isActive()
+                && visible("about-modal") && !visible("tour-card"));
+            $("about-close").click();
+            await waitFor(() => !visible("about-modal"), 4000);
+            $("info-btn").click();
+            $("about-tour").click();
+            const tourReady = await waitFor(() => visible("tour-card") && !visible("about-modal")
+                && doc.activeElement === $("tour-next"), 5000);
+            check("Take the tour closes About and focuses the primary button", tourReady,
+                `focus ${doc.activeElement && doc.activeElement.id}`);
+            check("Empty workspace step one names its primary button",
+                $("tour-next").textContent === "Start now"
+                && $("tour-text").textContent.includes($("tour-next").textContent), $("tour-text").textContent);
+
+            $("info-btn").click();
+            await waitFor(() => visible("about-modal") && !visible("tour-card"), 4000);
+            check("Opening About ends a running tour", visible("about-modal")
+                && !visible("tour-card") && !CC.tour.isActive());
+            $("about-close").click();
+            await waitFor(() => !visible("about-modal"), 4000);
+
+            // A first-visit auto-start must stay cancelled even if About is
+            // closed again before the delayed start would have fired.
+            localStorage.removeItem("curvecut-tour");
+            const freshFrame = document.createElement("iframe");
+            document.body.appendChild(freshFrame);
+            freshFrame.src = "../index.html";
+            if (!await waitFor(() => freshFrame.contentWindow && freshFrame.contentWindow.CurveCut
+                && freshFrame.contentWindow.CurveCut.about && freshFrame.contentWindow.CurveCut.tour, 30000)) throw new Error("fresh app did not initialize");
+            const fresh = freshFrame.contentWindow;
+            fresh.document.getElementById("info-btn").click();
+            fresh.document.getElementById("about-close").click();
+            await sleep(2500);
+            check("Opening and closing About cancels the pending automatic tour", !fresh.CurveCut.tour.isActive());
+            freshFrame.remove();
+
+            await waitFor(idle, 60000);
+            CC.loadGeometry(new win.THREE.SphereGeometry(60, 200, 200).toNonIndexed(), "dense sphere");
+            await sleep(300);
+            if (!await waitFor(idle, 60000)) throw new Error("model check did not finish");
+            if (!await waitFor(() => CC.cutFlow.isEngineReady(), 60000)) throw new Error("cut engine did not start");
+            const model = CC.pieces[0];
+            const count = CC.pieces.length;
+            const undo = CC.history.memoryReport().undoEntries;
+            CC.tour.start();
+            await waitFor(() => visible("tour-card"), 4000);
+            check("Loaded-model step one names its primary button", $("tour-next").textContent === "Next"
+                && $("tour-text").textContent.includes($("tour-next").textContent), $("tour-text").textContent);
+            CC.tour.end();
+            await waitFor(() => !visible("tour-card"), 4000);
+
+            if (!await openPlanar()) throw new Error("planar controls did not open");
+            $("sc-apply").click();
+            await sleep(50);
+            check("Dense sphere cut still running after 50 ms", CC.ops.busyName() === "cut", CC.ops.busyName() || "idle");
+            win.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+            const stopped = await waitFor(idle, 60000);
+            await waitFor(() => lastToast() === "Cut cancelled — the original piece is kept.", 4000);
+            check("Escape reports user cancellation", lastToast() === "Cut cancelled — the original piece is kept.", lastToast());
+            check("Cancellation keeps the same pieces and adds no undo step", CC.pieces.length === count
+                && CC.pieces[0] === model && CC.history.memoryReport().undoEntries === undo);
+            check("Cancellation clears the busy state", stopped && !CC.ops.busy());
+
+            if (!await openPlanar()) throw new Error("planar controls did not reopen");
+            $("sc-apply").click();
+            const succeeded = await waitFor(() => CC.pieces.length === 2 && idle(), 180000);
+            check("A second cut succeeds", succeeded, `pieces ${CC.pieces.length}, busy ${CC.ops.busyName()}`);
+
+            // Replace a piece under a cut and announce the real structural
+            // change; it must retain the model-changed message, not cancel.
+            if (!await openPlanar()) throw new Error("planar controls did not open for model-change test");
+            $("sc-apply").click();
+            check("Model-change test starts a cut", CC.ops.busyName() === "cut");
+            const source = CC.pieces[0];
+            const replacement = new win.THREE.Mesh(source.geometry, source.material);
+            replacement.name = source.name;
+            replacement.position.copy(source.position);
+            replacement.rotation.copy(source.rotation);
+            replacement.scale.copy(source.scale);
+            CC.scene.remove(source);
+            CC.scene.add(replacement);
+            CC.pieces[0] = replacement;
+            win.dispatchEvent(new win.CustomEvent("curvecut:pieces-changed"));
+            await waitFor(idle, 180000);
+            await waitFor(() => lastToast() === "The model changed while cutting — the cut was discarded.", 4000);
+            check("A real model change keeps its own message", idle() && lastToast()
+                === "The model changed while cutting — the cut was discarded.", lastToast());
+
+            $("sc-cancel").click();
+            if (!await openPlanar()) throw new Error("planar controls did not reopen for Cancel button test");
+            const beforeCancel = CC.pieces.slice();
+            const undoBeforeCancel = CC.history.memoryReport().undoEntries;
+            $("sc-apply").click();
+            check("Cancel button test starts a cut", CC.ops.busyName() === "cut");
+            $("sc-cancel").click();
+            const buttonStopped = await waitFor(idle, 60000);
+            await waitFor(() => lastToast() === "Cut cancelled — the original piece is kept.", 4000);
+            check("Cancel button reports cancellation and keeps the pieces and history", buttonStopped
+                && lastToast() === "Cut cancelled — the original piece is kept."
+                && CC.pieces.length === beforeCancel.length
+                && CC.pieces.every((piece, i) => piece === beforeCancel[i])
+                && CC.history.memoryReport().undoEntries === undoBeforeCancel, lastToast());
+            check("No page errors", errors.length === 0, errors.join(" | "));
+        } catch (error) {
+            check("test harness did not throw", false, String(error && error.stack || error));
+        }
+        document.title = fails.length ? "FAIL: " + fails.join(", ") : "PASS";
+    })();
+})();
+</script>
+</body>
+</html>

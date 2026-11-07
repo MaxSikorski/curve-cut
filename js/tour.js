@@ -105,7 +105,7 @@
         {
             title: "Welcome to Curve Cut",
             text: "Cut 3D prints along curves — right in your browser, nothing to "
-                + "install. Hit Start now and we'll tour on the demo cube — or drop "
+                + "install. Hit {label} and we'll tour on the demo cube — or drop "
                 + "your own STL, OBJ, or 3MF anywhere and it continues on that instead.",
             waitFor: "curvecut:model-loaded",
             pending: () => !CC.getModel(), // no model on hand yet
@@ -209,6 +209,7 @@
     const trap = CC.a11y.makeFocusTrap(card);
 
     let active = false;
+    let autoStartTimer = null;
     let step = -1;
     let waitListener = null;
     let opEndListener = null; // failure unlock for op-gated waits (once)
@@ -298,7 +299,6 @@
 
         els.label.textContent = `Step ${step + 1} of ${STEPS.length}`;
         els.title.textContent = s.title;
-        els.text.textContent = s.text;
         els.alwaysRow.style.display = s.last ? "flex" : "none"; // .sc-check is display:flex
         if (s.last) els.always.checked = store() === "always";
 
@@ -319,6 +319,7 @@
         const canDemo = waiting && s.demoOffer && !!window.DEMO_MODEL_B64;
         els.next.textContent = s.last ? "Done"
             : canDemo ? "Start now" : waiting ? "Waiting…" : "Next";
+        els.text.textContent = s.text.replace("{label}", els.next.textContent);
         els.next.disabled = !!waiting && !canDemo;
         // back is locked too — leaving mid-wait would drop the listener that
         // flips demo state when the real completion lands (Max #2)
@@ -361,8 +362,9 @@
     }
 
     function start() {
-        if (active) return;
-        CC.about && CC.about.hide();
+        if (active || (CC.about && CC.about.isOpen())) return;
+        clearTimeout(autoStartTimer);
+        autoStartTimer = null;
         active = true;
         actionsDone.clear();
         // fresh bookkeeping per run — leftovers from an aborted earlier tour
@@ -370,13 +372,17 @@
         demo.previewOpen = demo.cutApplied = demo.bigPrintOpen = false;
         veil.style.display = "block";
         card.style.display = "block";
+        gsap.killTweensOf([veil, card]);
         gsap.fromTo([veil, card], { opacity: 0 },
             { opacity: 1, duration: CC.a11y.dur(0.4), ease: "power2.out" });
         show(0);
         trap.activate();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (active) els.next.focus({ preventScroll: true });
+        }));
     }
 
-    function end() {
+    function end(immediate) {
         if (!active) return;
         active = false;
         trap.deactivate();
@@ -388,10 +394,16 @@
             window.removeEventListener("curvecut:op-ended", opEndListener);
             opEndListener = null;
         }
-        gsap.to([veil, card], {
-            opacity: 0, duration: CC.a11y.dur(0.3), ease: "power2.out",
-            onComplete: () => { veil.style.display = "none"; card.style.display = "none"; },
-        });
+        gsap.killTweensOf([veil, card]);
+        if (immediate === true) {
+            veil.style.display = "none";
+            card.style.display = "none";
+        } else {
+            gsap.to([veil, card], {
+                opacity: 0, duration: CC.a11y.dur(0.3), ease: "power2.out",
+                onComplete: () => { veil.style.display = "none"; card.style.display = "none"; },
+            });
+        }
         // our own demo cut may still be landing (Escape/Done can fire while
         // it's in flight, unlike Next which the wait above already locks) —
         // discarding/undoing under it would race the commit and strand the
@@ -407,6 +419,16 @@
             return;
         }
         finishEnd();
+    }
+
+    function dismissForAbout() {
+        clearTimeout(autoStartTimer);
+        autoStartTimer = null;
+        end(true);
+        // A skipped tour may still be fading even though it is no longer active.
+        gsap.killTweensOf([veil, card]);
+        veil.style.display = "none";
+        card.style.display = "none";
     }
 
     function finishEnd() {
@@ -453,14 +475,17 @@
     // relaunch from the "i" popup
     if (CC.about) {
         CC.about.tourBtn.hidden = false;
-        CC.about.tourBtn.addEventListener("click", start);
+        CC.about.tourBtn.addEventListener("click", () => {
+            CC.about.hide(true);
+            start();
+        });
     }
 
     // auto-open on first visit (or every visit if the visitor opted in)
     const seen = store();
     if (!seen || seen === "always") {
-        setTimeout(start, 1400); // let the hero entrance finish first
+        autoStartTimer = setTimeout(start, 1400); // let the hero entrance finish first
     }
 
-    CC.tour = { start, end, isActive: () => active };
+    CC.tour = { start, end, dismissForAbout, isActive: () => active };
 })();

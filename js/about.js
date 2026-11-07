@@ -33,17 +33,25 @@
 
     function show() {
         if (open) return;
+        if (window.CurveCut.tour) window.CurveCut.tour.dismissForAbout();
         open = true;
         trap.activate();
+        gsap.killTweensOf([overlay, modal]);
         gsap.to(overlay, { autoAlpha: 1, duration: a11y.dur(0.3), ease: "power2.out" });
         gsap.fromTo(modal, { scale: 0.95 },
             { autoAlpha: 1, scale: 1, duration: a11y.dur(0.4), ease: "power4.out" });
     }
 
-    function hide() {
+    function hide(immediate) {
         if (!open) return;
         open = false;
         trap.deactivate();
+        gsap.killTweensOf([overlay, modal]);
+        if (immediate === true) {
+            gsap.set(overlay, { autoAlpha: 0 });
+            gsap.set(modal, { autoAlpha: 0, scale: 0.95 });
+            return;
+        }
         gsap.to(overlay, { autoAlpha: 0, duration: a11y.dur(0.3), ease: "power2.out" });
         gsap.to(modal, { autoAlpha: 0, scale: 0.95, duration: a11y.dur(0.3), ease: "power2.out" });
     }
@@ -61,5 +69,5 @@
 
     // the tour (js/tour.js) reveals this button when it registers itself;
     // donateUrl feeds the visit popup (js/donate.js)
-    window.CurveCut.about = { show, hide, tourBtn, donateUrl: DONATE_URL };
+    window.CurveCut.about = { show, hide, isOpen: () => open, tourBtn, donateUrl: DONATE_URL };
 })();

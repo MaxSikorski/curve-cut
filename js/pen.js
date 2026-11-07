@@ -368,7 +368,9 @@
 
     // ----------------------------------------------------------------- wire
 
-    CC.pen = { enter, exit, isActive: () => active }; // driven by js/cutmodes.js
+    // driven by js/cutmodes.js; points() is a read-only copy for tests
+    CC.pen = { enter, exit, isActive: () => active,
+        points: () => points.map((p) => p.a.toArray()) };
     document.getElementById("draw-cancel").addEventListener("click", () => exit(false));
     document.getElementById("draw-done").addEventListener("click", done);
     document.getElementById("draw-clear").addEventListener("click", () => {

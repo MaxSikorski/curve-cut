@@ -17,6 +17,13 @@
     const donate = document.getElementById("about-donate");
     const tourBtn = document.getElementById("about-tour");
 
+    // version line in the footer, from the same constant the export manifest prints
+    const versionLine = document.createElement("div");
+    versionLine.className = "about-legal";
+    versionLine.id = "about-version";
+    versionLine.textContent = "Version " + window.CurveCut.VERSION;
+    modal.appendChild(versionLine);
+
     github.href = REPO_URL;
     license.href = LICENSE_URL;
     source.href = REPO_URL;

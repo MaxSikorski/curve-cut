@@ -283,9 +283,11 @@
             // THREE's y is height and z is depth: W × D × H = 1.6 × 1.2 × 0.8.
             await load(new win.THREE.BoxGeometry(1.6, 0.8, 1.2).toNonIndexed(), "units box.stl");
             await closeDonate();
+            await waitFor(idle, 60000); // a load's automatic repair holds the op lock
             await openUnits();
             $("units-modal").querySelector('[data-unit="cm"]').click();
             if (!await waitFor(() => !visible("units-modal"), 5000)) throw new Error("Units did not close after unit change");
+            await waitFor(idle, 60000); // a load's automatic repair holds the op lock
             await openUnits();
             $("units-cal-axis").value = "W";
             $("units-target").value = "32";
@@ -295,6 +297,7 @@
             await openUnits();
             check("15 reset row shows the original file dimensions", visible("units-reset-row")
                 && $("units-reset-row").textContent.includes("1.6 × 1.2 × 0.8"), $("units-reset-row").textContent.trim());
+            await waitFor(idle, 60000); // a load's automatic repair holds the op lock
             const resetUndoBefore = undoCount();
             $("units-reset").click();
             if (!await waitFor(() => !visible("units-modal"), 5000)) throw new Error("Units did not close after reset");

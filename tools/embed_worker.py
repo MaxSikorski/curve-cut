@@ -282,6 +282,7 @@ WORKER_SHELL = r'''
             (source) => CC.hollowCore.previewShell(source, payload.wallMm,
                 payload.opts || {})),
         hollowApply: (payload, id) => hollowApply(payload, id),
+        simplifyToTarget: (payload, id) => simplifyToTarget(payload, id),
         cutWithCutter: (payload, id) => cutWithCutter(payload, id),
     };
 
@@ -310,9 +311,41 @@ WORKER_SHELL = r'''
         return result;
     }
 
-    function progress(id, stage, fraction) {
-        root.postMessage({ id, progress: { stage, fraction } });
+    function progress(id, stage, fraction, round) {
+        const report = { stage, fraction };
+        if (round !== undefined) report.round = round;
+        root.postMessage({ id, progress: report });
         checkCancelled();
+    }
+
+    /* One simplify round per turn of the event loop, so a cancel message can land
+       between rounds. The cached source is borrowed and never deleted here. */
+    async function simplifyToTarget(payload, id) {
+        const source = cachedSource(payload);
+        const rounds = CutCore.simplifyRounds(source, payload.target);
+        let step;
+        try {
+            progress(id, "simplify", 0, 0);
+            step = rounds.next();
+            while (!step.done) {
+                await new Promise((resolve) => root.setTimeout(resolve, 0));
+                progress(id, "simplify", Math.min(step.value.round / 24, 0.99), step.value.round);
+                step = rounds.next();
+            }
+        } catch (error) {
+            rounds.return();
+            throw error;
+        }
+        const result = step.value;
+        try {
+            const mesh = result.solid.getMesh();
+            const output = { vertProperties: mesh.vertProperties.slice(),
+                triVerts: mesh.triVerts.slice(), stats: result.stats };
+            progress(id, "simplify", 1);
+            return output;
+        } finally {
+            result.solid.delete();
+        }
     }
 
     function hollowEstimate(payload, id) {

@@ -295,9 +295,11 @@
     }
 
     let activeCutJob = null;
+    let activeCutOp = null;
     function cancelCut() {
         if (!CC.ops || (CC.ops.busyName() !== "cut"
             && CC.ops.busyName() !== "cut-preview")) return false;
+        if (activeCutOp) activeCutOp.userCancelled = true;
         CC.ops.cancel();
         if (activeCutJob && CC.compute && !CC.compute.degraded) {
             CC.compute.cancel(activeCutJob.id);
@@ -547,19 +549,23 @@
             CC.toast("Another operation is still running — one moment.");
             return false;
         }
+        activeCutOp = op;
+        const reportDiscard = () => CC.toast(op.userCancelled
+            ? "Cut cancelled — the original piece is kept."
+            : "The model changed while cutting — the cut was discarded.");
         try {
             CC.progress.show("Preparing the cut…");
             await framePainted();
             const cutterPlan = makeCutter();
             const connectorPlan = makeConnectors ? makeConnectors() : null;
             if (!op.alive()) {
-                CC.toast("The model changed while cutting — the cut was discarded.");
+                reportDiscard();
                 return false;
             }
 
             const results = await cutBatch(visible, cutterPlan, connectorPlan, options, op);
             if (!results) {
-                CC.toast("The model changed while cutting — the cut was discarded.");
+                reportDiscard();
                 return false;
             }
             CC.progress.update("Finishing…", 1);
@@ -569,7 +575,7 @@
             // — committing now would graft results onto the wrong model
             if (!op.alive()) {
                 disposeCutResults(results);
-                CC.toast("The model changed while cutting — the cut was discarded.");
+                reportDiscard();
                 return false;
             }
 
@@ -606,11 +612,12 @@
             return true;
         } catch (err) {
             if (err && err.name === "ComputeCancelled" && !op.alive()) {
-                CC.toast("The model changed while cutting — the cut was discarded.");
+                reportDiscard();
                 return false;
             }
             throw err;
         } finally {
+            if (activeCutOp === op) activeCutOp = null;
             CC.ops.end(op);
         }
     }

@@ -15,6 +15,8 @@ license texts sit beside each component.
 | Hershey `futural` stroke font | 1967 (JHF) | Public domain (attribution note) | `vendor/hershey/LICENSE` | https://github.com/kamalmostafa/hershey-fonts |
 | Voron Design Cube (demo model) | v8 | GPL-3.0 | `assets/demo/LICENSE` | https://github.com/VoronDesign |
 
+Big Print's `assembly.html` (inside each exported zip) bundles copies of three.js r147 (+ OrbitControls) and fflate 0.8.2 with their MIT licence texts.
+
 Acknowledgement (Hershey Fonts distribution requirement): the Hershey Fonts were
 originally created by Dr. A. V. Hershey while working at the U.S. National Bureau
 of Standards; the JHF data format was originally created by James Hurt, Cognition, Inc.

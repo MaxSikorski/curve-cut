@@ -14,9 +14,11 @@
     const CC = root.CurveCut = root.CurveCut || {};
     const SOURCE_KEY = "CurveCutComputeWorkerSource";
     const CANCEL_GRACE_MS = 250;
+    // One simplify round on a large model can outlast 250 ms, and a recycle would drop the primed cache.
+    const SIMPLIFY_CANCEL_GRACE_MS = 10000;
     const WORKER_URL_REVOKE_FALLBACK_MS = 5000;
     const GEOMETRY_COPY_CHUNK = 16384;
-    // The 512k statue measured 243,335,168 B after repair plus a live prime;
+    // The 512k-triangle test model measured 243,335,168 B after repair plus a live prime;
     // 256 MiB leaves 25,100,288 B (about 10%) for post-prime growth.
     const WASM_RECYCLE_THRESHOLD_BYTES = 256 * 1024 * 1024;
 
@@ -24,6 +26,13 @@
         constructor() {
             super("Compute operation cancelled");
             this.name = "ComputeCancelled";
+        }
+    }
+
+    class ComputeSuperseded extends Error {
+        constructor() {
+            super("Compute request superseded by a newer one");
+            this.name = "ComputeSuperseded";
         }
     }
 
@@ -544,6 +553,20 @@
         return primeMainRepair(payload, root.CutCore.repairGeometry(geometry));
     }
 
+    function simplifyMain(payload) {
+        const rounds = root.CutCore.simplifyRounds(mainCachedSource(payload), payload.target);
+        let step = rounds.next();
+        while (!step.done) step = rounds.next();
+        const result = step.value;
+        try {
+            const mesh = result.solid.getMesh();
+            return { vertProperties: mesh.vertProperties.slice(),
+                triVerts: mesh.triVerts.slice(), stats: result.stats };
+        } finally {
+            result.solid.delete();
+        }
+    }
+
     const MAIN_OPS = {
         ping: (payload) => payload,
         repairGeometry,
@@ -574,6 +597,7 @@
             : withMainSource(payload,
                 (source) => CC.hollowCore.previewShell(source, payload.wallMm,
                     payload.opts || payload || {})),
+        simplifyToTarget: simplifyMain,
         hollowApply: (payload) => {
             const run = CC.hollowCore.hollow(mainCachedSource(payload), payload.wallMm,
                 payload.opts || {});
@@ -642,7 +666,7 @@
             if (active !== job) return;
             settle(job, false, new ComputeCancelled());
             recycle();
-        }, CANCEL_GRACE_MS);
+        }, job.cancelGraceMs);
         return true;
     }
 
@@ -669,7 +693,9 @@
         const job = { id, op, payload, options,
             onProgress: typeof options.onProgress === "function" ? options.onProgress : () => {},
             resolve: null, reject: null, cancelRequested: false, cancelTimer: null,
-            worker: null };
+            worker: null,
+            cancelGraceMs: Number.isFinite(options.cancelGraceMs) && options.cancelGraceMs > 0
+                ? options.cancelGraceMs : CANCEL_GRACE_MS };
         const promise = new Promise((resolve, reject) => {
             job.resolve = resolve;
             job.reject = reject;
@@ -693,6 +719,75 @@
         }, (error) => settle(job, false, error));
 
         return promise;
+    }
+
+    /* Latest-wins simplify: one job in flight, one waiting. A newer request
+       cancels the running job between rounds (the primed cache survives) and
+       replaces any waiting one. Calls api.run so wrappers see the job. */
+    let simplifyFlight = null;
+    let simplifyWaiting = null;
+
+    function startSimplify(request) {
+        let promise;
+        try {
+            promise = api.run("simplifyToTarget", { token: request.token, target: request.target },
+                { cancelGraceMs: SIMPLIFY_CANCEL_GRACE_MS });
+        } catch (error) {
+            request.reject(error);
+            return;
+        }
+        // A wrapper may drop promise.id; the job just started is the active one.
+        const id = promise.id !== undefined ? promise.id : (active ? active.id : null);
+        const flight = { id, request, cancelling: false, cancelled: false };
+        simplifyFlight = flight;
+        const finish = (settleRequest, value) => {
+            if (simplifyFlight === flight) simplifyFlight = null;
+            // cancelSimplify() wins over everything, even a result that arrives
+            // late or a newer request that came in after it.
+            const outcome = flight.cancelled ? [request.reject, new ComputeCancelled()]
+                : simplifyWaiting ? [request.reject, new ComputeSuperseded()]
+                    : [settleRequest, value];
+            const next = simplifyWaiting;
+            simplifyWaiting = null;
+            outcome[0](outcome[1]);
+            if (next) startSimplify(next);
+        };
+        promise.then((value) => finish(request.resolve, value),
+            (error) => finish(request.reject, error));
+    }
+
+    function cancelFlight() {
+        if (simplifyFlight.cancelling) return;
+        simplifyFlight.cancelling = true;
+        cancel(simplifyFlight.id);
+    }
+
+    function requestSimplify(token, target) {
+        return new Promise((resolve, reject) => {
+            const request = { token, target, resolve, reject };
+            if (!simplifyFlight) {
+                startSimplify(request);
+                return;
+            }
+            if (simplifyWaiting) simplifyWaiting.reject(new ComputeSuperseded());
+            simplifyWaiting = request;
+            cancelFlight();
+        });
+    }
+
+    function cancelSimplify() {
+        let pending = false;
+        if (simplifyWaiting) {
+            simplifyWaiting.reject(new ComputeCancelled());
+            simplifyWaiting = null;
+            pending = true;
+        }
+        if (simplifyFlight) {
+            simplifyFlight.cancelled = true;
+            cancelFlight();
+            pending = true;
+        }
+        return pending;
     }
 
     function memoryReport() {
@@ -746,6 +841,7 @@
 
     const api = {
         run, cancel, recycle, ready, geometryPayload, geometryPayloadAsync, ComputeCancelled,
+        ComputeSuperseded, requestSimplify, cancelSimplify,
     };
     Object.defineProperty(api, "_testSetWasmRecycleThreshold", {
         value: setTestWasmRecycleThreshold,

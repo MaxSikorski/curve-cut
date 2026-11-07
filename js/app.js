@@ -552,7 +552,6 @@
     const VIEW_KEYS = ["front", "back", "left", "right", "top", "bottom"];
     window.addEventListener("keydown", (e) => {
         if (e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
-        if (window.CurveCut.drawActive) return;
         const i = parseInt(e.key, 10) - 1;
         if (pieces.length && i >= 0 && i < VIEW_KEYS.length) flyTo(VIEW_DIRS[VIEW_KEYS[i]]);
     });
@@ -597,7 +596,7 @@
 
     function updateStatsResetVisibility() {
         const single = pieces.length === 1;
-        statsReset.hidden = !(single && pieces[0].userData.bakedScale);
+        statsReset.hidden = !(single && pieces[0].userData.bakedScale && !pieces[0].userData.hollow);
         statsRepair.hidden = !single;
     }
 
@@ -610,6 +609,8 @@
         if (Math.abs(bakedScale - 1) > 1e-9) {
             detail += ` · ${window.BigPrintCore.bakedScaleLabel(bakedScale)}`;
         }
+        const hollow = pieces[0] && pieces[0].userData.hollow;
+        if (hollow && window.CurveCut.hollow) detail += ` · ${window.CurveCut.hollow.describe(hollow)}`;
         const capRepair = pieces[0] && pieces[0].userData.capRepair;
         if (capRepair) detail += ` · ${capRepair.loops} hole${capRepair.loops === 1 ? "" : "s"} capped`;
         document.getElementById("stats-detail").textContent = detail;
@@ -632,6 +633,10 @@
 
     statsRepair.addEventListener("click", () => {
         if (pieces.length !== 1) return;
+        if (window.CurveCut.hollow && window.CurveCut.hollow.isOpen()) {
+            toast("Close the Hollow panel first.");
+            return;
+        }
         runRepair(pieces[0]);
     });
 
@@ -854,7 +859,7 @@
 
     // Shared surface for the other modules (pen tool, cut engine).
     window.CurveCut = {
-        VERSION: "2.1.0",
+        VERSION: "2.2.0",
         scene, camera, controls, renderer, canvas,
         drawActive: false,
         spline: null,

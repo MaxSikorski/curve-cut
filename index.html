@@ -158,6 +158,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
         </button>
         <button class="btn secondary-btn" id="new-btn">Start New</button>
+        <button class="btn secondary-btn" id="hollow-btn" title="Hollow the model: even walls, open bottom if you want one">Hollow</button>
         <button class="btn secondary-btn" id="bigprint-btn">Big Print</button>
         <button class="btn primary-btn" id="draw-btn">Draw Cut</button>
     </div>
@@ -180,47 +181,38 @@
             <span class="bp-x">×</span>
             <input type="number" id="bp-bed-d" step="1" min="10" title="Bed depth">
             <span class="bp-x">×</span>
-            <input type="number" id="bp-bed-h" step="1" min="10" title="Bed height">
-            <span class="sc-unit">mm</span>
+            <span class="bp-pair"><input type="number" id="bp-bed-h" step="1" min="10" title="Bed height"><span class="sc-unit">mm</span></span>
         </div>
         <div class="sc-row">
             <label for="bp-scale">Scale</label>
             <input type="range" id="bp-scale-slider" min="0.1" max="12" step="0.05" value="1">
-            <input type="number" id="bp-scale" step="0.1" min="0.1"><span class="sc-unit">×</span>
+            <input type="number" id="bp-scale" step="0.01" min="0.01"><span class="sc-unit">×</span>
             <label class="bp-sub" for="bp-size" title="Longest side of the finished model">Size</label>
-            <input type="number" id="bp-size" step="1" min="1"><span class="sc-unit">mm</span>
+            <input type="number" id="bp-size" step="1" min="0"><span class="sc-unit">mm</span>
         </div>
-        <div class="sc-row">
-            <label class="sc-check" style="width:auto"><input type="checkbox" id="bp-hollow-on"> Hollow the model (save material)</label>
-            <span class="bp-hollow-teaser" id="bp-hollow-teaser"></span>
+        <div class="sc-row bp-hollow-row">
+            <span class="bp-hollow-note" id="bp-hollow-note" aria-live="polite"></span>
+            <button class="view-btn" id="bp-hollow-open" title="Leave Big Print and open the Hollow panel">Hollow…</button>
         </div>
-        <div class="sc-row bp-hollow-row" id="bp-hollow-fields" style="display:none">
-            <label for="bp-hollow-wall">Wall</label>
-            <input type="number" id="bp-hollow-wall" value="6" min="0.8" step="0.5"><span class="sc-unit">mm</span>
-            <span class="bp-hollow-hint" id="bp-hollow-hint">≈ 15 walls @ 0.4 mm</span>
-            <button class="view-btn" id="bp-glow-swatch" title="Print this test strip in your lamp filament to see how each wall thickness glows">Glow swatch STL</button>
-            <button class="view-btn view-btn-primary" id="bp-hollow-apply">Apply hollow</button>
-        </div>
-        <div class="sc-status bp-hollow-status" id="bp-hollow-status"></div>
         <div class="sc-row">
             <label title="Slide the cut grid to dodge fragile features">Nudge</label>
-            <span class="bp-sub">W</span><input type="number" id="bp-nudge-x" step="1" value="0" title="Slide cuts along the width">
-            <span class="bp-sub">D</span><input type="number" id="bp-nudge-z" step="1" value="0" title="Slide cuts along the depth">
-            <span class="bp-sub">H</span><input type="number" id="bp-nudge-y" step="1" value="0" title="Slide cuts up/down">
-            <span class="sc-unit">mm</span>
-            <label class="bp-sub" for="bp-gap" title="Gap left between printed parts so they fit together">Gap</label>
-            <input type="number" id="bp-gap" step="0.05" min="0" max="0.5" value="0.15"><span class="sc-unit">mm</span>
+            <span class="bp-pair"><span class="bp-sub">W</span><input type="number" id="bp-nudge-x" step="0.01" value="0" title="Slide cuts along the width"></span>
+            <span class="bp-pair"><span class="bp-sub">D</span><input type="number" id="bp-nudge-z" step="0.01" value="0" title="Slide cuts along the depth"></span>
+            <span class="bp-pair"><span class="bp-sub">H</span><input type="number" id="bp-nudge-y" step="0.01" value="0" title="Slide cuts up/down"><span class="sc-unit">mm</span></span>
+            <span class="bp-pair"><label class="bp-sub" for="bp-gap" title="Gap left between printed parts so they fit together">Gap</label>
+            <input type="number" id="bp-gap" step="0.05" min="0" max="0.5" value="0.15"><span class="sc-unit">mm</span></span>
         </div>
+        <div class="sc-row"><span class="bp-nudge-range" id="bp-nudge-range"></span></div>
         <div class="sc-row">
             <label class="sc-check" style="width:auto"><input type="checkbox" id="bp-connectors" checked> Connectors</label>
             <select id="bp-conn-shape" class="bp-conn-shape">
                 <option value="circle">Circle</option>
                 <option value="hexagon">Hexagon</option>
             </select>
-            <label class="bp-sub" for="bp-conn-size">Size</label>
-            <input type="number" id="bp-conn-size" step="0.5" min="2"><span class="sc-unit">mm</span>
-            <label class="bp-sub" for="bp-conn-tol" title="Sockets are printed this much larger than pegs">Tol</label>
-            <input type="number" id="bp-conn-tol" step="0.05" min="0" max="1" value="0.2"><span class="sc-unit">mm</span>
+            <span class="bp-pair"><label class="bp-sub" for="bp-conn-size">Size</label>
+            <input type="number" id="bp-conn-size" step="0.5" min="2"><span class="sc-unit">mm</span></span>
+            <span class="bp-pair"><label class="bp-sub" for="bp-conn-tol" title="Sockets are printed this much larger than pegs">Tol</label>
+            <input type="number" id="bp-conn-tol" step="0.05" min="0" max="1" value="0.2"><span class="sc-unit">mm</span></span>
             <label class="sc-check" style="width:auto" title="Engrave each part's grid ID on an inside face"><input type="checkbox" id="bp-engrave" checked> Engrave IDs</label>
         </div>
         <div class="sc-status" id="bp-conn-note" hidden></div>
@@ -241,6 +233,37 @@
                 </select>
                 <button class="view-btn" id="bp-cancel">Cancel</button>
                 <button class="view-btn view-btn-primary" id="bp-export">Cut &amp; Export</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hollow: even walls, optional open bottom; previews the real result before Confirm -->
+    <div class="simplecut-panel glass" id="hollow-panel" role="region" aria-label="Hollow">
+        <div class="sc-row">
+            <label for="hollow-wall">Wall</label>
+            <input type="number" id="hollow-wall" min="0.8" step="0.1" value="6">
+            <span class="sc-unit">mm</span>
+            <span class="hollow-hint" id="hollow-wall-hint">≈ 15 walls @ 0.4 mm</span>
+        </div>
+        <div class="sc-row hollow-lamp-row">
+            <label class="sc-check" title="Thin walls that let light through, and an open bottom for the light. Use low-voltage (12/24 V) LEDs only."><input type="checkbox" id="hollow-lamp"> Lamp</label>
+            <span class="hollow-hint">2.4 mm walls that glow, open bottom</span>
+            <button class="view-btn" id="hollow-glow-swatch" title="Print this test strip in your lamp filament to see how each wall thickness glows">Glow swatch STL</button>
+        </div>
+        <div class="sc-row">
+            <span class="hollow-row-label" title="Faces left open: no wall across them">Open</span>
+            <div class="hollow-faces" id="hollow-open-faces" role="group" aria-label="Open faces">
+                <label class="sc-check"><input type="checkbox" id="hollow-open-bottom"> Bottom</label>
+            </div>
+        </div>
+        <div class="sc-status hollow-status" id="hollow-status" aria-live="polite"></div>
+        <ul class="hollow-warnings" id="hollow-warnings" hidden></ul>
+        <div class="sc-footer">
+            <div class="sc-actions"><span class="hollow-stale" id="hollow-stale" hidden>Out of date</span></div>
+            <div class="sc-actions">
+                <button class="view-btn" id="hollow-cancel">Cancel</button>
+                <button class="view-btn" id="hollow-preview">Preview hollowed</button>
+                <button class="view-btn view-btn-primary" id="hollow-confirm" disabled>Confirm</button>
             </div>
         </div>
     </div>
@@ -430,12 +453,15 @@
     <script src="js/hollow-core.js"></script>
     <script src="js/lamp-core.js"></script>
     <script src="js/compute.js"></script>
+    <script src="js/assembly-core.js"></script><!-- 3D assembly view data, before bigprint -->
+    <script src="js/assembly-viewer.js"></script><!-- the viewer; its big source loads only on export -->
     <script src="js/bigprint-core.js"></script>
     <script src="js/bigprint.js"></script>
     <script src="js/pieces.js"></script>
     <script src="js/simplify.js"></script>
     <script src="js/history.js"></script>
     <script src="js/units.js"></script>
+    <script src="js/hollow.js"></script>
     <script src="js/analysis-core.js"></script>
     <script src="js/ai-tools.js"></script><!-- the tool list as data; Python reads it too -->
     <script src="js/api.js"></script><!-- CC.api: the page API for chat and agents -->

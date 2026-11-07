@@ -1765,36 +1765,107 @@
         }
     }
 
-    /* Reduce toward a target triangle count (not a fixed tolerance), so
-       detail is only removed until the mesh is light enough — never nuked.
-       Ramps the tolerance up gently and stops at the first result under
-       target. Throws Error("not-watertight") like simplifyGeometry. */
-    function simplifyToTarget(geometry, targetTris) {
-        let current;
+    const SIMPLIFY_MAX_ROUNDS = 24;
+
+    /* Round-by-round simplify of a BORROWED Manifold toward targetTris.
+       Yields { round, tris, eps } after every simplify() call (the only place a
+       caller can stop it) and returns { solid, stats }; the caller owns and must
+       delete the returned solid. Every intermediate is deleted in finally, so
+       iterator.return() cleans up too. The result is never over the target
+       unless stats.floorReached; it aims for 90-100% of the target. */
+    function* simplifyRounds(solid, targetTris) {
+        const target = Math.floor(Number(targetTris));
+        if (!Number.isFinite(target) || target < 1) {
+            throw new RangeError("simplify target must be at least 1 triangle");
+        }
+        const original = solid.numTri();
+        if (original <= target) {
+            return { solid: solid.translate([0, 0, 0]), stats: {
+                original, target, tris: original, rounds: 0, eps: 0,
+                floorReached: false, unchanged: true } };
+        }
+        const box = solid.boundingBox();
+        const diag = Math.hypot(box.max[0] - box.min[0], box.max[1] - box.min[1],
+            box.max[2] - box.min[2]);
+        const epsMax = diag * 0.01;
+        let eps = diag * 2e-6;
+        let above = solid, below = null;
+        let epsAbove = 0, epsBelow = 0, round = 0, floorReached = false;
+        let keep = null;
+        const drop = (m) => { if (m && m !== solid && m !== keep) m.delete(); };
         try {
-            current = toManifold(geometry);
+            // Ramp: same growth as before, last step clamped to land on epsMax.
+            for (;;) {
+                const next = above.simplify(eps);
+                round++;
+                const tris = next.numTri();
+                // next.return() at the yield skips a catch, so a finally frees it.
+                let adopted = false;
+                try { yield { round, tris, eps }; adopted = true; } finally { if (!adopted) drop(next); }
+                if (tris <= target) { below = next; epsBelow = eps; break; }
+                drop(above);
+                above = next; epsAbove = eps;
+                if (eps >= epsMax) { floorReached = true; break; }
+                eps = Math.min(eps * 1.7, epsMax);
+            }
+            if (below === null) {
+                const out = above === solid ? solid.translate([0, 0, 0]) : above;
+                keep = out;
+                return { solid: out, stats: { original, target, tris: out.numTri(), rounds: round,
+                    eps: epsAbove, floorReached: true, unchanged: false } };
+            }
+            // Refine: bisect (geometric midpoint) between the last two tolerances.
+            let lo = epsAbove > 0 ? epsAbove : epsBelow / 1.7, hi = epsBelow;
+            if (below.numTri() < 0.9 * target) {
+                for (let i = 0; i < 6 && round < SIMPLIFY_MAX_ROUNDS; i++) {
+                    const mid = Math.sqrt(lo * hi);
+                    const trial = above.simplify(mid);
+                    round++;
+                    const tris = trial.numTri();
+                    let adopted = false;
+                    try { yield { round, tris, eps: mid }; adopted = true; } finally { if (!adopted) drop(trial); }
+                    if (tris <= target) {
+                        drop(below);
+                        below = trial; hi = mid;
+                        if (tris >= 0.9 * target) break;
+                    } else {
+                        drop(above);
+                        above = trial; lo = mid;
+                    }
+                    if (hi / lo < 1.02) break;
+                }
+            }
+            keep = below;
+            return { solid: below, stats: { original, target, tris: below.numTri(), rounds: round,
+                eps: hi, floorReached: false, unchanged: false } };
+        } finally {
+            drop(above);
+            drop(below);
+        }
+    }
+
+    /* Reduce toward a target triangle count (not a fixed tolerance), so detail is
+       only removed until the mesh is light enough. Throws Error("not-watertight")
+       like simplifyGeometry; stats ride on geometry.userData.simplifyStats. */
+    function simplifyToTarget(geometry, targetTris) {
+        let source;
+        try {
+            source = toManifold(geometry);
         } catch (err) {
             throw new Error("not-watertight");
         }
-        const original = current;
+        let result = null;
         try {
-            geometry.computeBoundingBox();
-            const size = new THREE.Vector3();
-            geometry.boundingBox.getSize(size);
-            const diag = size.length();
-
-            let eps = diag * 2e-6;
-            const epsMax = diag * 0.01;
-            for (let i = 0; current.numTri() > targetTris && eps < epsMax && i < 24; i++) {
-                const next = current.simplify(eps);
-                if (current !== original) current.delete();
-                current = next;
-                eps *= 1.7;
-            }
-            return toGeometry(current);
+            const rounds = simplifyRounds(source, targetTris);
+            let step = rounds.next();
+            while (!step.done) step = rounds.next();
+            result = step.value;
+            const out = toGeometry(result.solid);
+            out.userData.simplifyStats = result.stats;
+            return out;
         } finally {
-            if (current !== original) current.delete();
-            original.delete();
+            if (result) result.solid.delete();
+            source.delete();
         }
     }
 
@@ -1818,6 +1889,8 @@
     window.CutCore = {
         init,
         isReady: () => !!wasm,
+        // The initialised Manifold module, for cores that need its static builders (hollow-core).
+        manifoldModule: () => wasm,
         weldGeometry, findBoundaryLoops, capBoundaryLoops,
         toManifold, toGeometry, isWatertight, repairGeometry,
         sampleSpline, buildCutter, cutWithCutter, cutGeometries,
@@ -1825,6 +1898,6 @@
         buildConnectorSolid, cutGridCell, placeSeamConnectors, applyCellConnectors,
         buildTextSolid, engraveCellId, engraveOnPad,
         createOuterContext, addOuterPlane, disposeOuterContext, buildBossSolid,
-        simplifyGeometry, simplifyToTarget, geometryVolume,
+        simplifyGeometry, simplifyToTarget, simplifyRounds, geometryVolume,
     };
 })();

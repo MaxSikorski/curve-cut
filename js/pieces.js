@@ -112,6 +112,16 @@
         };
     }
 
+    // the loaded model's name for file names: cut pieces are named "<model> · N"
+    function modelFileName() {
+        const first = CC.pieces[0];
+        const raw = first ? (first.userData.sourceName || first.name || "") : "";
+        const clean = raw.replace(/\.(stl|obj|3mf)$/i, "").replace(/( · \d+)+$/, "")
+            .replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "")
+            .slice(0, 60).replace(/-+$/, "");
+        return clean || "curve-cut";
+    }
+
     async function exportVisible() {
         const visible = CC.pieces.filter((p) => p.visible);
         if (!visible.length) {
@@ -162,7 +172,7 @@
                 CC.progress.update("Finishing zip…", 1);
                 const zipped = writer.end();
                 writer = null;
-                download(zipped, `curve-cut-${visible.length}-pieces.zip`);
+                download(zipped, `${modelFileName()}-${visible.length}-pieces-${exportFmt}.zip`);
                 CC.toast(`Exporting ${visible.length} pieces as one ${exportFmt.toUpperCase()} zip…`);
             } else {
                 const file = serialize(visible[0], 0);
@@ -188,5 +198,9 @@
     }
 
     exportBtn.addEventListener("click", exportVisible);
+    // another panel may have hidden this one before a new model replaced the pieces: let the next rebuild fade it in
+    window.addEventListener("curvecut:model-loaded", () => {
+        if (gsap.isTweening(panel) || getComputedStyle(panel).visibility === "hidden") shown = false; // mid-fade counts as hidden
+    });
     window.addEventListener("curvecut:pieces-changed", rebuild);
 })();

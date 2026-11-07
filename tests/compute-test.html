@@ -507,7 +507,6 @@
                 dispatchedCall.options && dispatchedCall.options.cancelGraceMs]));
         check("simplify sends a token-only payload", simplifyCalls.length === 2
             && simplifyCalls[0].payload.token === simplifyToken
-            && simplifyCalls[0].payload.token === simplifyToken
             && !["geometry", "vertProperties", "triVerts"].some((key) =>
                 Object.prototype.hasOwnProperty.call(simplifyCalls[0].payload, key)),
             JSON.stringify(simplifyCalls.map((entry) => Object.keys(entry.payload))));

@@ -263,6 +263,8 @@
             check("7 missed curve keeps the mesh and undo count", CC.pieces.length === 1 && CC.pieces[0] === original
                 && undoCount() === undoBefore, `pieces ${CC.pieces.length}, undo ${undoCount()}`);
             check("7 missed curve stays in preview", CC.spline === missedSpline && visible("preview-dock"));
+            check("7 missed curve keeps the side tint", CC.pieces[0].material.vertexColors === true
+                && !!CC.pieces[0].geometry.getAttribute("color"));
             $("cut-discard").click();
             doc.querySelector('#mode-dock [data-mode="planar"]').click();
             if (!await waitFor(() => visible("simplecut-panel") && !$("sc-apply").disabled, 5000))
@@ -317,6 +319,24 @@
             check("15 reset adds one undo step", undoCount() === resetUndoBefore + 1, String(undoCount()));
             await openUnits();
             check("15 reset row is hidden at original size", !visible("units-reset-row"));
+            check("15 reset selects mm again", $("units-modal").querySelector('[data-unit="mm"]').classList.contains("on")
+                && !$("units-modal").querySelector('[data-unit="cm"]').classList.contains("on"));
+            // mm is already selected, so this click must be a no-op (it used to shrink the model 10x)
+            $("units-modal").querySelector('[data-unit="mm"]').click();
+            await sleep(500);
+            const afterMm = boxSize();
+            check("15 mm after reset leaves the size unchanged", Math.abs(afterMm.x - 1.6) <= 1e-6
+                && Math.abs(afterMm.z - 1.2) <= 1e-6 && Math.abs(afterMm.y - 0.8) <= 1e-6,
+                `${afterMm.x} × ${afterMm.z} × ${afterMm.y}`);
+            await waitFor(idle, 60000);
+            check("15 reset row stays hidden after mm", !visible("units-reset-row"));
+            // a Big Print bake hides the reset row: its "Original file" promise would not hold
+            CC.pieces[0].userData.unitsFactor = 10;
+            CC.pieces[0].userData.bakedScale = 2;
+            win.dispatchEvent(new win.CustomEvent("curvecut:pieces-changed", { detail: { source: "test" } }));
+            check("15 reset row hidden when a Big Print bake is present", !visible("units-reset-row"));
+            delete CC.pieces[0].userData.bakedScale;
+            CC.pieces[0].userData.unitsFactor = 1;
             $("units-close").click();
             await waitFor(() => !visible("units-modal"), 5000);
             CC.history.undo();

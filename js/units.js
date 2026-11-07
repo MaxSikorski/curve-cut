@@ -44,7 +44,9 @@
         const imported = current.model.userData.importSize;
         const format = (value) => Number(value.toFixed(3)).toString();
         originalSize.textContent = `Original file: ${format(imported.x)} × ${format(imported.z)} × ${format(imported.y)}`;
-        resetRow.hidden = Math.abs((current.model.userData.unitsFactor || 1) - 1) <= 1e-9;
+        const baked = current.model.userData.bakedScale;
+        resetRow.hidden = Math.abs((current.model.userData.unitsFactor || 1) - 1) <= 1e-9
+            || (baked !== undefined && Math.abs(baked - 1) > 1e-9);
         for (const button of modal.querySelectorAll("[data-unit]")) {
             const on = button.dataset.unit === current.state.fileUnit;
             button.classList.toggle("on", on);
@@ -205,7 +207,7 @@
         if (!current) return;
         const scale = 1 / (current.model.userData.unitsFactor || 1);
         applyGeometryChange("reset units", (geometry) => geometry.scale(scale, scale, scale),
-            {}, scale);
+            { fileUnit: "mm" }, scale);
     });
 
     target.addEventListener("keydown", (e) => {

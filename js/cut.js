@@ -142,7 +142,9 @@
     /* Tint every visible piece's vertices blue/orange by a caller-supplied
        side test — the Polycarver-style "what you'll get" preview, computed
        on the CPU so it works on any GPU. classifier(x,y,z) -> true = side A. */
+    let lastClassifier = null;
     function tintBySide(classifier) {
+        lastClassifier = classifier;
         untintPieces();
         for (const mesh of CC.pieces) {
             if (!mesh.visible) continue;
@@ -538,6 +540,7 @@
        swaps their source geometry. */
     async function applyCutterFlow(makeCutter, keep = { inside: true, outside: true },
         makeConnectors = null, options = {}) {
+        const retint = tinted.length ? lastClassifier : null;
         untintPieces(); // never let preview tints leak into undo snapshots
         const visible = CC.pieces.filter((p) => p.visible);
         if (!visible.length) {
@@ -585,6 +588,7 @@
                 && r && r.inside && r.outside)) {
                 disposeCutResults(results);
                 CC.toast("That line doesn't cross the model — draw it across the model to cut.");
+                if (retint) tintBySide(retint); // the preview stays open, so keep its sides
                 return false;
             }
 

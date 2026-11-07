@@ -35,6 +35,16 @@ REQUIRED_COVERAGE_CHECKS = (
     "readiness-time demotion does not use worker transfer or cancel",
     "cutWithCutter detaches transferred geometry",
     "cutWithCutter builds connector solids worker-side",
+    "worker simplifyToTarget matches the main-thread result",
+    "worker simplifyToTarget lands within 85-100% of target",
+    "worker simplify result is watertight",
+    "simplify sends a token-only payload",
+    "simplify cancel stops between rounds",
+    "simplify cancel keeps the worker and its cache",
+    "newest simplify request supersedes older ones",
+    "cancelSimplify rejects pending requests",
+    "simplify needs a primed token",
+    "degraded simplifyToTarget matches the worker result",
 )
 
 

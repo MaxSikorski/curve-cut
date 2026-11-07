@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="../vendor/manifold/manifold.wasm.b64.js"></script>
+<script src="../vendor/manifold/manifold.js"></script>
+<script src="../vendor/three/three.min.js"></script>
+<script src="../vendor/three/STLLoader.js"></script>
+<script src="../js/cut-core.js"></script>
+<script src="../js/hollow-core.js"></script>
+<script src="../js/compute-worker-src.js"></script>
+<script src="../js/compute.js"></script>
+<script>
+/* Timing page for the worker simplifyToTarget op. Run by tools/time_simplify.py.
+   A measuring tool, not a check: it only fails when something breaks. */
+(async () => {
+    "use strict";
+
+    const CC = window.CurveCut;
+    const TARGETS = [375000, 200000, 100000, 50000];
+    const log = (message) => { document.getElementById("log").textContent += message + "\n"; };
+    const ms = (value) => Math.round(value);
+    const MB = (bytes) => Number.isFinite(bytes) ? (bytes / 1048576).toFixed(0) + " MB" : "n/a";
+    let longestTask = 0;
+    try {
+        new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) longestTask = Math.max(longestTask, entry.duration);
+        }).observe({ type: "longtask", buffered: true });
+    } catch (_) {}
+
+    async function timedSimplify(token, target) {
+        const stamps = [];
+        const start = performance.now();
+        const result = await CC.compute.run("simplifyToTarget", { token, target }, {
+            cancelGraceMs: 10000,
+            onProgress: (progress) => {
+                if (progress.stage === "simplify") stamps.push(performance.now());
+            },
+        });
+        const total = performance.now() - start;
+        let longest = 0;
+        for (let i = 1; i < stamps.length; i++) longest = Math.max(longest, stamps[i] - stamps[i - 1]);
+        return { result, total, longest };
+    }
+
+    async function measureModel(label, token, original) {
+        log(`${label}: ${original} triangles`);
+        log("  target   | total ms | rounds | longest round ms | got     | % target | floor");
+        let worstRound = 0;
+        for (const target of TARGETS) {
+            if (target >= original) continue;
+            longestTask = 0;
+            const { result, total, longest } = await timedSimplify(token, target);
+            worstRound = Math.max(worstRound, longest);
+            const got = result.triVerts.length / 3;
+            log(`  ${String(target).padEnd(8)} | ${String(ms(total)).padEnd(8)} | `
+                + `${String(result.stats.rounds).padEnd(6)} | ${String(ms(longest)).padEnd(16)} | `
+                + `${String(got).padEnd(7)} | ${(100 * got / target).toFixed(1).padEnd(8)} | `
+                + `${result.stats.floorReached}`
+                + (target === 200000 ? `  (longest main-thread task ${ms(longestTask)} ms, informational)` : ""));
+        }
+        // Cancel probe: cancelSimplify() on the first progress at round 2 or later.
+        const tokensBefore = CC.memoryReport().workerCacheTokenCount;
+        const realRun = CC.compute.run;
+        let cancelledAt = null, cancelledRound = 0;
+        CC.compute.run = function(op, payload, options) {
+            const wrapped = Object.assign({}, options, {
+                onProgress: (progress) => {
+                    if (progress.stage === "simplify" && progress.round >= 2 && cancelledAt === null) {
+                        cancelledRound = progress.round;
+                        cancelledAt = performance.now();
+                        CC.compute.cancelSimplify();
+                    }
+                },
+            });
+            return realRun.call(this, op, payload, wrapped);
+        };
+        let probeName = "finished";
+        let rejectedAt = null;
+        try {
+            await CC.compute.requestSimplify(token, 50000);
+        } catch (error) {
+            probeName = error.name;
+            rejectedAt = performance.now();
+        } finally {
+            CC.compute.run = realRun;
+        }
+        let cacheIntact = false;
+        try {
+            const after = await CC.compute.requestSimplify(token, 200000);
+            cacheIntact = after.triVerts.length > 0;
+        } catch (_) {}
+        log(`  cancel probe: ${probeName} after round ${cancelledRound}, `
+            + `${rejectedAt === null ? "n/a" : ms(rejectedAt - cancelledAt)} ms from cancel to rejection; `
+            + `cache intact: ${cacheIntact}; tokens ${tokensBefore} -> `
+            + `${CC.memoryReport().workerCacheTokenCount}`);
+        if (!cacheIntact || probeName !== "ComputeCancelled") {
+            throw new Error(`${label}: cancel probe failed (${probeName}, cache ${cacheIntact})`);
+        }
+        return { worstRound };
+    }
+
+    try {
+        await CC.compute.ready();
+        if (CC.compute.degraded) throw new Error("compute worker unavailable");
+        await CutCore.init();
+        const worst = [];
+
+        // Model A: a generated sphere with exactly 600,000 triangles.
+        const sphere = new THREE.SphereGeometry(50, 600, 501);
+        const sphereTris = sphere.getIndex().count / 3;
+        const sphereInput = CC.compute.geometryPayload(sphere);
+        let t0 = performance.now();
+        await CC.compute.run("prime", { token: "timing-a", geometry: sphereInput, scale: 1 },
+            { transfer: [sphereInput.vertProperties.buffer, sphereInput.triVerts.buffer] });
+        log(`generated sphere: prime ${ms(performance.now() - t0)} ms`);
+        worst.push(await measureModel("generated sphere", "timing-a", sphereTris));
+        log(`worker memory after sphere: ${MB(CC.memoryReport().workerWasmBytes)}`);
+        await CC.compute.run("release", { token: "timing-a" });
+
+        // Models B and C: private large test models, when present.
+        const privateModels = [
+            ["large model (hollow)", "../test-assets/large-figure-hollow.stl", "timing-b"],
+            ["large model (solid)", "../test-assets/large-figure-solid.stl", "timing-c"],
+        ];
+        for (const [label, path, token] of privateModels) {
+            let buffer = null;
+            try {
+                buffer = await (await fetch(path)).arrayBuffer();
+            } catch (_) {}
+            if (!buffer) {
+                log(`SKIP: ${label} not present`);
+                continue;
+            }
+            const geometry = new THREE.STLLoader().parse(buffer);
+            const arrays = CC.compute.geometryPayload(geometry);
+            const tris = arrays.triVerts.length / 3;
+            t0 = performance.now();
+            const repaired = await CC.compute.run("repairGeometry", {
+                vertProperties: arrays.vertProperties, triVerts: arrays.triVerts,
+                checkWatertight: true, primeToken: token,
+            }, { transfer: [arrays.vertProperties.buffer, arrays.triVerts.buffer] });
+            const primeMs = performance.now() - t0;
+            if (repaired.primeReady !== true) throw new Error(`${label}: repair did not prime`);
+            const primedTris = repaired.watertight ? tris
+                : (repaired.triVerts ? repaired.triVerts.length / 3 : tris);
+            log(`${label}: repair+prime ${ms(primeMs)} ms`);
+            worst.push(await measureModel(label, token, primedTris));
+            log(`worker memory after ${label}: ${MB(CC.memoryReport().workerWasmBytes)}`);
+            await CC.compute.run("release", { token });
+        }
+
+        log("");
+        const slowest = Math.max(...worst.map((entry) => entry.worstRound));
+        log(`longest single round on any model: ${ms(slowest)} ms (limit 5000 ms)`);
+        if (slowest >= 5000) throw new Error(`a single round took ${ms(slowest)} ms (limit 5000)`);
+        document.title = "DONE";
+    } catch (error) {
+        log("EXCEPTION: " + (error.stack || error));
+        document.title = "FAIL: " + error.message;
+    }
+})();
+</script>
+</body>
+</html>

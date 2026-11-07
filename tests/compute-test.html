@@ -454,6 +454,133 @@
             && released.token === cacheToken && released.released === true,
             released && JSON.stringify(released));
 
+        // Density PR 1: simplifyToTarget on a primed model (cancellable, latest request wins).
+        const simplifyToken = "compute-test-simplify";
+        const simplifyGeometry = new THREE.SphereGeometry(10, 160, 120).toNonIndexed();
+        const simplifyInput = CC.compute.geometryPayload(simplifyGeometry);
+        await CC.compute.run("prime", {
+            token: simplifyToken, geometry: simplifyInput, scale: 1,
+        }, { transfer: [simplifyInput.vertProperties.buffer, simplifyInput.triVerts.buffer] });
+        const simplifyCalls = [];
+        const simplifyComputeRun = CC.compute.run;
+        CC.compute.run = function(op, payload, options) {
+            if (op === "simplifyToTarget") simplifyCalls.push({ op, payload });
+            return simplifyComputeRun.call(this, op, payload, options);
+        };
+        let simplified = null, simplifiedError = null;
+        try {
+            simplified = await CC.compute.run("simplifyToTarget",
+                { token: simplifyToken, target: 8000 });
+        } catch (error) {
+            simplifiedError = error;
+        } finally {
+            CC.compute.run = simplifyComputeRun;
+        }
+        const simplifyMain = CutCore.simplifyToTarget(simplifyGeometry, 8000);
+        const simplifyMainTris = simplifyMain.getIndex().count / 3;
+        const simplifyMainVolume = CutCore.geometryVolume(simplifyMain);
+        const simplifiedTris = simplified ? simplified.triVerts.length / 3 : 0;
+        const simplifiedVolume = simplified
+            ? Math.abs(signedVolume(geometryAdapter(simplified))) : 0;
+        check("worker simplifyToTarget matches the main-thread result", !!simplified
+            && Math.abs(simplifiedTris - simplifyMainTris) / simplifyMainTris < 0.01
+            && Math.abs(simplifiedVolume - simplifyMainVolume) / simplifyMainVolume < 0.001,
+            simplified ? `${simplifiedTris} vs ${simplifyMainTris} tris`
+                + (simplifiedTris === simplifyMainTris ? " (identical)" : " (differ)")
+                + `; volume ${simplifiedVolume.toFixed(2)} vs ${simplifyMainVolume.toFixed(2)}`
+                : String(simplifiedError && simplifiedError.message));
+        check("worker simplifyToTarget lands within 85-100% of target", !!simplified
+            && simplifiedTris <= 8000 && simplifiedTris >= 6800
+            && simplified.stats.target === 8000 && simplified.stats.tris === simplifiedTris,
+            simplified && `${simplifiedTris} of 8000, rounds ${simplified.stats.rounds}`);
+        check("worker simplify result is watertight", !!simplified && watertight(simplified));
+        check("simplify sends a token-only payload", simplifyCalls.length === 1
+            && simplifyCalls[0].payload.token === simplifyToken
+            && !["geometry", "vertProperties", "triVerts"].some((key) =>
+                Object.prototype.hasOwnProperty.call(simplifyCalls[0].payload, key)),
+            JSON.stringify(simplifyCalls.map((entry) => Object.keys(entry.payload))));
+        simplifyMain.dispose();
+
+        const simplifyFull = await CC.compute.run("simplifyToTarget",
+            { token: simplifyToken, target: 1000 });
+        const simplifyFullRounds = simplifyFull.stats.rounds;
+        const simplifyWorkerBefore = CC.compute._worker;
+        const simplifyTokensBefore = CC.memoryReport().workerCacheTokenCount;
+        let simplifyCancelRound = null, simplifyMaxRound = 0, simplifyCancelError = null;
+        const simplifyCancelRun = CC.compute.run("simplifyToTarget",
+            { token: simplifyToken, target: 1000 }, {
+                cancelGraceMs: 10000,
+                onProgress: (progress) => {
+                    if (progress.stage !== "simplify" || typeof progress.round !== "number") return;
+                    simplifyMaxRound = Math.max(simplifyMaxRound, progress.round);
+                    if (simplifyCancelRound === null && progress.round >= 1) {
+                        simplifyCancelRound = progress.round;
+                        CC.compute.cancel(simplifyCancelRun.id);
+                    }
+                },
+            });
+        try { await simplifyCancelRun; } catch (error) { simplifyCancelError = error; }
+        check("simplify cancel stops between rounds", simplifyFullRounds >= 5
+            && !!simplifyCancelError && simplifyCancelError.name === "ComputeCancelled"
+            && simplifyCancelRound !== null && simplifyMaxRound <= simplifyCancelRound + 1,
+            `full run ${simplifyFullRounds} rounds; cancelled at round ${simplifyCancelRound}, `
+            + `last progress round ${simplifyMaxRound}; ${simplifyCancelError && simplifyCancelError.name}`);
+        let simplifyAfter = null, simplifyAfterError = null;
+        try {
+            simplifyAfter = await CC.compute.run("simplifyToTarget",
+                { token: simplifyToken, target: 8000 });
+        } catch (error) { simplifyAfterError = error; }
+        check("simplify cancel keeps the worker and its cache",
+            CC.compute._worker === simplifyWorkerBefore && CC.compute._workerCount === 1
+            && CC.memoryReport().workerCacheTokenCount === simplifyTokensBefore
+            && !!simplifyAfter,
+            simplifyAfterError ? simplifyAfterError.message
+                : `tokens ${simplifyTokensBefore}, workers ${CC.compute._workerCount}`);
+
+        const outcome = (promise) => promise.then(
+            (value) => ({ value }), (error) => ({ error }));
+        const simplifyWorkerBeforeSupersede = CC.compute._worker;
+        const requestA = outcome(CC.compute.requestSimplify(simplifyToken, 1000));
+        const requestB = outcome(CC.compute.requestSimplify(simplifyToken, 2000));
+        const requestC = outcome(CC.compute.requestSimplify(simplifyToken, 12000));
+        const [outA, outB, outC] = await Promise.all([requestA, requestB, requestC]);
+        let pingAfter = null;
+        try { pingAfter = await CC.compute.run("ping", 7); } catch (_) {}
+        check("newest simplify request supersedes older ones",
+            !!outA.error && outA.error.name === "ComputeSuperseded"
+            && !!outB.error && outB.error.name === "ComputeSuperseded"
+            && !!outC.value && outC.value.stats.target === 12000
+            && CC.compute._worker === simplifyWorkerBeforeSupersede && pingAfter === 7,
+            `${outA.error && outA.error.name}, ${outB.error && outB.error.name}, `
+            + `${outC.value ? "target " + outC.value.stats.target : outC.error && outC.error.message}`);
+
+        const cancelA = outcome(CC.compute.requestSimplify(simplifyToken, 1000));
+        const cancelB = outcome(CC.compute.requestSimplify(simplifyToken, 2000));
+        const cancelledAny = CC.compute.cancelSimplify();
+        const [outCancelA, outCancelB] = await Promise.all([cancelA, cancelB]);
+        let afterCancelAll = null;
+        try {
+            afterCancelAll = await CC.compute.requestSimplify(simplifyToken, 12000);
+        } catch (_) {}
+        check("cancelSimplify rejects pending requests", cancelledAny === true
+            && !!outCancelA.error && outCancelA.error.name === "ComputeCancelled"
+            && !!outCancelB.error && outCancelB.error.name === "ComputeCancelled"
+            && CC.compute._worker === simplifyWorkerBeforeSupersede && !!afterCancelAll
+            && CC.compute.cancelSimplify() === false,
+            `${cancelledAny}, ${outCancelA.error && outCancelA.error.name}, `
+            + `${outCancelB.error && outCancelB.error.name}`);
+
+        let noTokenMessage = null, badTokenMessage = null;
+        try { await CC.compute.run("simplifyToTarget", { target: 1000 }); }
+        catch (error) { noTokenMessage = error.message; }
+        try { await CC.compute.run("simplifyToTarget", { token: "compute-test-nope", target: 1000 }); }
+        catch (error) { badTokenMessage = error.message; }
+        check("simplify needs a primed token",
+            noTokenMessage === "cached compute operation needs a cache token"
+            && /^Unknown compute cache token/.test(badTokenMessage || ""),
+            `${noTokenMessage} | ${badTokenMessage}`);
+        await CC.compute.run("release", { token: simplifyToken });
+
         // Lamp phase 1a: open faces and drilled holes ride in opts, stats carry the facts.
         const lampOpts = () => ({
             engine: "mesh", openFaces: ["bottom"],
@@ -618,6 +745,28 @@
             && lampDegraded.stats.holes.count === 1 && !!lampWorker
             && Math.abs(lampDegraded.stats.volumeAfterMm3 - lampWorker.stats.volumeAfterMm3) < 1e-6,
             lampDegraded ? `${lampDegraded.stats.volumeAfterMm3}` : String(lampDegradedError && lampDegradedError.message));
+
+        const simplifyDegradedInput = CC.compute.geometryPayload(simplifyGeometry);
+        let simplifyDegraded = null, simplifyDegradedError = null;
+        try {
+            await CC.compute.run("prime", {
+                token: "compute-test-simplify-main", geometry: simplifyDegradedInput, scale: 1,
+            });
+            simplifyDegraded = await CC.compute.run("simplifyToTarget",
+                { token: "compute-test-simplify-main", target: 8000 });
+        } catch (error) {
+            simplifyDegradedError = error;
+        } finally {
+            await CC.compute.run("release", { token: "compute-test-simplify-main" });
+        }
+        const simplifyDegradedTris = simplifyDegraded ? simplifyDegraded.triVerts.length / 3 : 0;
+        check("degraded simplifyToTarget matches the worker result", !!simplifyDegraded
+            && CC.compute.degraded && !!simplified
+            && Math.abs(simplifyDegradedTris - simplifiedTris) / simplifiedTris < 0.01
+            && Math.abs(Math.abs(signedVolume(geometryAdapter(simplifyDegraded)))
+                - simplifiedVolume) / simplifiedVolume < 0.001,
+            simplifyDegraded ? `${simplifyDegradedTris} vs ${simplifiedTris} tris`
+                : String(simplifyDegradedError && simplifyDegradedError.message));
 
         const degradedRouteInput = closedBox();
         const degradedRouteSource = scenePiece(degradedRouteInput, "degraded route");

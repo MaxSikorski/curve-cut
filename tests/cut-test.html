@@ -107,16 +107,74 @@
             Math.abs(vSlim - vSphere) / vSphere < 0.01,
             `${vSphere.toFixed(0)} -> ${vSlim.toFixed(0)}`);
 
-        // --- test 6: target-based simplify stops near the target -----------
-        const slim2 = CutCore.simplifyToTarget(dense, 6000);
-        const slim2Tris = trisOf(slim2);
-        const vSlim2 = CutCore.geometryVolume(slim2);
-        check("simplifyToTarget lands at/under target",
-            slim2Tris <= 6000, `${denseTris} -> ${slim2Tris}`);
-        check("simplifyToTarget doesn't overshoot (>25% of target)",
-            slim2Tris > 1500, `${slim2Tris}`);
-        check("simplifyToTarget keeps volume (±1%)",
-            Math.abs(vSlim2 - vSphere) / vSphere < 0.01, vSlim2.toFixed(0));
+        // --- test 6: target-based simplify lands just under the target -----
+        const sweepTargets = [20000, 15000, 10000, 6000, 3000];
+        const sweep = new Map();
+        const sweepRows = [];
+        for (const target of sweepTargets) {
+            const out = CutCore.simplifyToTarget(dense, target);
+            const stats = out.userData.simplifyStats || {};
+            sweep.set(target, out);
+            sweepRows.push(`${target} -> ${trisOf(out)} (${stats.rounds} rounds)`);
+        }
+        check("simplifyToTarget sweep lands within 85-100% of target",
+            sweepTargets.every((target) => {
+                const got = trisOf(sweep.get(target));
+                const stats = sweep.get(target).userData.simplifyStats;
+                return got <= target && got >= 0.85 * target
+                    && !!stats && stats.floorReached === false;
+            }), sweepRows.join("; "));
+        check("simplifyToTarget results are watertight",
+            sweepTargets.every((target) => CutCore.isWatertight(sweep.get(target))));
+        check("simplifyToTarget keeps volume",
+            sweepTargets.every((target) => {
+                const tol = target >= 6000 ? 0.01 : 0.03;
+                return Math.abs(CutCore.geometryVolume(sweep.get(target)) - vSphere)
+                    / vSphere < tol;
+            }), sweepTargets.map((target) =>
+                CutCore.geometryVolume(sweep.get(target)).toFixed(0)).join(", "));
+        const light = CutCore.simplifyToTarget(dense, 30000);
+        const lightStats = light.userData.simplifyStats || {};
+        check("simplifyToTarget leaves a light model unchanged",
+            lightStats.unchanged === true && trisOf(light) === denseTris
+            && lightStats.rounds === 0, JSON.stringify(lightStats));
+        const floored = CutCore.simplifyToTarget(dense, 10);
+        const flooredStats = floored.userData.simplifyStats || {};
+        check("simplifyToTarget reports the floor",
+            flooredStats.floorReached === true && trisOf(floored) > 10
+            && CutCore.isWatertight(floored), `${trisOf(floored)} tris`);
+        const openBoxGeo = new THREE.BoxGeometry(1, 1, 1).toNonIndexed();
+        const openPos = openBoxGeo.getAttribute("position");
+        const openKeep = new Float32Array(openPos.array.slice(0, openPos.array.length - 18));
+        const openBox = new THREE.BufferGeometry();
+        openBox.setAttribute("position", new THREE.BufferAttribute(openKeep, 3));
+        let openMessage = null;
+        try { CutCore.simplifyToTarget(openBox, 6); } catch (e) { openMessage = e.message; }
+        check("simplifyToTarget still refuses an open mesh",
+            openMessage === "not-watertight", String(openMessage));
+        {
+            const solid = CutCore.toManifold(dense);
+            let ok = false, detail = "";
+            try {
+                const iterator = CutCore.simplifyRounds(solid, 6000);
+                iterator.next(); iterator.next();
+                iterator.return();
+                const still = solid.numTri();
+                const again = CutCore.simplifyRounds(solid, 6000);
+                let step = again.next();
+                while (!step.done) step = again.next();
+                const count = step.value.solid.numTri();
+                step.value.solid.delete();
+                ok = still === denseTris && count === trisOf(sweep.get(6000));
+                detail = `${still}, ${count} vs ${trisOf(sweep.get(6000))}`;
+            } catch (e) { detail = String(e); }
+            check("simplifyRounds cleans up and leaves its source usable", ok, detail);
+            let rangeName = null;
+            try { CutCore.simplifyRounds(solid, 0).next(); } catch (e) { rangeName = e.name; }
+            check("simplify target must be positive", rangeName === "RangeError",
+                String(rangeName));
+            solid.delete();
+        }
 
         // --- test 7: planar cutter — exact volumes, plus a tilted plane ----
         // cube spans y = -10..10; level plane at y=5 -> lower is 15/20 tall

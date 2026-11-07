@@ -28,9 +28,10 @@ Without the browser a check prints SKIPPED with that command; with `CURVECUT_REQ
 
 Heavy checks use several CPU cores each: run them one at a time.
 
-## Generators (not checks)
+## Generators and measuring tools (not checks)
 | Script | What it does |
 |---|---|
 | `embed_worker.py` | Builds `js/compute-worker-src.js` from the worker shell, Manifold and the core engines; `--check` fails if the file is stale |
+| `time_simplify.py` | Times the worker simplify-to-target op (`tests/simplify-timing.html`) and prints the table; not a check, so it stays out of the suite and CI |
 | `embed_demo.py` | Embeds the demo model as `assets/demo/voron-cube.stl.b64.js` |
 | `vendor_libs.py`, `vendor_manifold.py`, `vendor_hershey.py` | Reproducible vendoring of the libraries in `vendor/` |
